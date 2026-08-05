@@ -1,0 +1,90 @@
+import { describe, expect, it } from 'vitest'
+import { questions, questionsById } from '../data/questions'
+import {
+  ROUND_CATEGORY_COUNTS,
+  calculateScore,
+  evaluateChoice,
+  generateRoomCode,
+  resolveStudentRoute,
+  selectRoundQuestions,
+  validateJoinInput,
+} from './game'
+import type { Room, Team } from '../types/game'
+
+describe('การสุ่มคำถาม', () => {
+  it('ได้ 10 ข้อ ไม่มีรหัสซ้ำ และได้สัดส่วนหมวดถูกต้อง', () => {
+    const ids = selectRoundQuestions(questions, [], () => 0.42)
+    expect(ids).toHaveLength(10)
+    expect(new Set(ids).size).toBe(10)
+    const counts = ids.reduce<Record<string, number>>((result, id) => {
+      const category = questionsById.get(id)?.category ?? 'missing'
+      result[category] = (result[category] ?? 0) + 1
+      return result
+    }, {})
+    expect(counts).toEqual(ROUND_CATEGORY_COUNTS)
+  })
+
+  it('ไม่ใช้ทั้งชุดเดิมซ้ำเมื่อยังมีคำถามสำรอง', () => {
+    const previous = selectRoundQuestions(questions, [], () => 0.1)
+    const next = selectRoundQuestions(questions, previous, () => 0.1)
+    expect(new Set(next)).not.toEqual(new Set(previous))
+  })
+})
+
+describe('คะแนนและเกณฑ์ผ่าน', () => {
+  it('คำนวณคะแนนจากคำตอบ', () => {
+    expect(calculateScore([{ isCorrect: true }, { isCorrect: false }, { isCorrect: true }])).toBe(2)
+  })
+
+  it('เก็บคะแนนตรงตามจำนวนข้อถูกโดยไม่มีเกณฑ์แข่งความเร็ว', () => {
+    expect(calculateScore(Array.from({ length: 8 }, () => ({ isCorrect: true })))).toBe(8)
+    expect(calculateScore(Array.from({ length: 9 }, () => ({ isCorrect: true })))).toBe(9)
+    expect(calculateScore(Array.from({ length: 10 }, () => ({ isCorrect: true })))).toBe(10)
+  })
+
+  it('คำนวณความถูกต้องจากคลังคำถาม ไม่รับค่าคะแนนจาก client', () => {
+    const question = questions[0]
+    expect(evaluateChoice(question, question.correctChoiceId)).toEqual({ valid: true, isCorrect: true })
+    const wrongChoice = question.choices.find((choice) => choice.id !== question.correctChoiceId)
+    expect(evaluateChoice(question, wrongChoice?.id ?? '')).toEqual({ valid: true, isCorrect: false })
+    expect(evaluateChoice(question, 'unknown-choice')).toEqual({ valid: false, isCorrect: false })
+  })
+})
+
+describe('รหัสห้องและ validation', () => {
+  it('สร้างรหัสห้อง 6 ตัวโดยไม่มี O, 0, I, 1, L', () => {
+    for (let index = 0; index < 30; index += 1) {
+      expect(generateRoomCode(Math.random)).toMatch(/^[A-HJ-KM-NP-Z2-9]{6}$/)
+    }
+  })
+
+  it('ตรวจช่องว่าง รูปแบบรหัส และความยาวชื่อ', () => {
+    expect(validateJoinInput({ roomCode: '', teamName: ' ', guardianName: 'ก'.repeat(41) })).toEqual({
+      roomCode: 'กรุณากรอกรหัสห้อง',
+      teamName: 'กรุณากรอกชื่อกลุ่ม',
+      guardianName: 'ชื่อผู้พิทักษ์ต้องไม่เกิน 40 ตัวอักษร',
+    })
+  })
+
+  it('ยอมรับชื่อ 40 ตัวอักษรและปฏิเสธชื่อ 41 ตัวอักษร', () => {
+    expect(validateJoinInput({ roomCode: 'ABC234', teamName: 'ก'.repeat(40), guardianName: 'ข'.repeat(40) })).toEqual({})
+    expect(validateJoinInput({ roomCode: 'ABC234', teamName: 'ก'.repeat(41), guardianName: 'ข'.repeat(41) })).toEqual({
+      teamName: 'ชื่อกลุ่มต้องไม่เกิน 40 ตัวอักษร',
+      guardianName: 'ชื่อผู้พิทักษ์ต้องไม่เกิน 40 ตัวอักษร',
+    })
+  })
+})
+
+describe('route resolver', () => {
+  const room = { roomCode: 'ABC234', status: 'playing', winner: null } as Room
+  const team = { submitted: false } as Team
+
+  it('พาไปเกม ผลลัพธ์ และหน้าชนะตามสถานะหลัก', () => {
+    expect(resolveStudentRoute(room, team)).toBe('/game/ABC234')
+    expect(resolveStudentRoute(room, { ...team, submitted: true } as Team)).toBe('/result/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'completed' }, team)).toBe('/result/ABC234')
+    expect(resolveStudentRoute({ ...room, winner: { teamId: 'winner' } as Room['winner'] }, team)).toBe('/congratulations/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'waiting' }, team)).toBe('/lobby/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'closed' }, team)).toBe('/closed/ABC234')
+  })
+})

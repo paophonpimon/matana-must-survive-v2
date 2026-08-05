@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.vite
+*.tsbuildinfo
+
+# Local backup and temporary files
+Matana-must-survive.zip
+tmp/

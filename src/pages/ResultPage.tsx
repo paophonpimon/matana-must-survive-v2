@@ -1,0 +1,112 @@
+import { useEffect } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
+import { useRoom, useTeam } from '../hooks/useGameData'
+import { getTeamSession } from '../services/sessionStorage'
+import type { Room, Team } from '../types/game'
+
+const previewRoom: Room = {
+  roomCode: 'PREVIEW',
+  status: 'completed',
+  currentRound: 1,
+  createdAt: 0,
+  startedAt: 0,
+  completedAt: 0,
+  currentQuestionIndex: 9,
+  questionDurationSeconds: 30,
+  questionStartedAt: null,
+  questionIds: [],
+  previousQuestionIds: [],
+  winner: null,
+  teacherSessionId: 'preview-teacher',
+}
+
+const previewTeam: Team = {
+  id: 'preview-team',
+  teamName: 'กลุ่มตัวอย่าง',
+  guardianName: 'นักเรียนตัวอย่าง',
+  joinedAt: 0,
+  currentRound: 1,
+  currentQuestionIndex: 9,
+  score: 0,
+  answers: [],
+  submitted: true,
+  finishedAt: 0,
+  elapsedMs: 0,
+  status: 'submitted',
+  ownerUid: 'preview-student',
+}
+
+export const ResultPage = () => {
+  const { roomCode = '' } = useParams()
+  const normalizedCode = roomCode.toUpperCase()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const session = getTeamSession()
+  const isPreview = import.meta.env.DEV && searchParams.get('preview') === '1'
+  const requestedScore = Number(searchParams.get('score') ?? 0)
+  const previewScore = Math.min(10, Math.max(0, Number.isFinite(requestedScore) ? Math.trunc(requestedScore) : 0))
+  const roomState = useRoom(isPreview ? '' : normalizedCode)
+  const teamState = useTeam(isPreview ? '' : normalizedCode, !isPreview && session?.roomCode === normalizedCode ? session.teamId : '')
+  const room = isPreview ? previewRoom : roomState.data
+  const team = isPreview ? previewTeam : teamState.data
+
+  useEffect(() => {
+    if (!room || !team) return
+    if (room.status === 'closed') navigate(`/closed/${normalizedCode}`, { replace: true })
+    else if (room.winner) navigate(`/congratulations/${normalizedCode}`, { replace: true })
+    else if (room.status === 'waiting') navigate(`/lobby/${normalizedCode}`, { replace: true })
+    else if (room.status === 'playing' && !team.submitted) navigate(`/game/${normalizedCode}`, { replace: true })
+  }, [navigate, normalizedCode, room, team])
+
+  const score = isPreview ? previewScore : team?.score ?? 0
+  const failed = score <= 4
+  const successful = score >= 9
+  const image = failed ? '/images/ending-fail.png' : successful ? '/images/ending-win.png' : '/images/ending-almost.png'
+  const title = failed ? 'ภารกิจล้มเหลว' : successful ? 'ภารกิจสำเร็จ!' : 'เกือบสำเร็จแล้ว!'
+  const resultPanelClass = successful
+    ? 'congratulations-panel result-panel success-result-panel'
+    : `result-panel character-result-panel ${failed ? 'result-outcome-fail' : 'result-outcome-almost'} w-full p-6 sm:p-9`
+
+  return (
+    <ScenePage image={image} imageAlt={failed ? 'ดอกกุหลาบที่ถูกคำสาปครอบงำ' : successful ? 'มัทนาคืนร่างมนุษย์ท่ามกลางแสงทอง' : 'กุหลาบของมัทนาที่คำสาปเริ่มอ่อนกำลัง'} imagePosition={successful ? '50% 48%' : '50% 54%'}>
+      <BrandHeader />
+      <div className={successful ? 'congratulations-stage' : 'mx-auto flex w-full max-w-4xl flex-1 items-end px-5 pb-8 pt-20 sm:items-center sm:px-8 sm:py-12'}>
+        {!isPreview && (roomState.loading || teamState.loading) ? <LoadingPanel /> : !room || !team ? (
+          <ErrorPanel message={roomState.error || teamState.error || 'ไม่พบข้อมูลผลลัพธ์ของกลุ่ม'} action={<Link className="primary-button w-full" to="/join">กลับหน้าเข้าร่วม</Link>} />
+        ) : (
+          <section className={resultPanelClass}>
+            <div className={successful ? 'result-hero result-hero-success' : 'result-hero'}>
+              <div className="result-hero-copy">
+                <p className="eyebrow">คะแนนกลุ่มของคุณ · รอบที่ {room.currentRound}</p>
+                <h1 className="result-title mt-2">{title}</h1>
+                {failed ? (
+                  <p className="result-description mt-4"><span>คุณตอบคำถามผิดมากเกินไป</span><span>การตัดสินใจของคุณทำให้มัทนาถูกสาป</span><span>เป็นดอกกุหลาบไปตลอดกาล</span><span>หนทางกลับคืนสู่ร่างมนุษย์ของนางได้ปิดลงแล้ว...</span></p>
+                ) : successful ? (
+                  <p className="result-description mt-4"><span>กลุ่มของคุณทำลายคำสาปได้สำเร็จ</span><span>ความรู้ของผู้พิทักษ์ช่วยให้มัทนากลับคืนสู่ร่างมนุษย์</span><span>นี่คือคะแนนของกลุ่มคุณเมื่อหมดเวลารอบนี้</span></p>
+                ) : (
+                  <p className="result-description mt-4"><span>พลังคำสาปอ่อนลง</span><span>แต่ความรู้ของผู้พิทักษ์ยังไม่เพียงพอ</span><span>มัทนายังคงติดอยู่ในร่างดอกกุหลาบ</span><span>พยายามอีกนิด แล้วกลับมาช่วยนางในรอบต่อไป</span></p>
+                )}
+              </div>
+              {!successful && (
+                <div className="result-icon-stage">
+                  <span className="result-icon-halo" aria-hidden="true" />
+                  <img
+                    className="result-ending-icon"
+                    src={failed ? '/images/ending-fail-icon.png' : '/images/ending-almost-icon.png'}
+                    alt={failed ? 'ภาพมัทนาในผลภารกิจล้มเหลว' : 'ภาพมัทนาในผลภารกิจเกือบสำเร็จ'}
+                    draggable="false"
+                    onError={(event) => { event.currentTarget.parentElement?.classList.add('image-failed') }}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="score-reveal mt-6"><small>ตอบถูก</small><strong>{score}<span>/10</span></strong><small>ข้อ</small></div>
+            <div className="waiting-banner mt-6"><span className="pulse-dot" aria-hidden="true" /><span><strong>โปรดรอครูเปิดภารกิจรอบใหม่</strong><small>หน้านี้จะแสดงเฉพาะคะแนนกลุ่มของคุณ และเปลี่ยนอัตโนมัติเมื่อครูเตรียมรอบใหม่</small></span></div>
+            <button className="secondary-button mt-4 w-full" type="button" disabled>รอครูเปิดภารกิจรอบใหม่</button>
+          </section>
+        )}
+      </div>
+    </ScenePage>
+  )
+}

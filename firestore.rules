@@ -1,0 +1,58 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function room(roomCode) {
+      return get(/databases/$(database)/documents/rooms/$(roomCode)).data;
+    }
+
+    function isTeacher(roomCode) {
+      return signedIn() && room(roomCode).teacherSessionId == request.auth.uid;
+    }
+
+    match /rooms/{roomCode} {
+      // MVP: ผู้ใช้ที่ยืนยันตัวตนแบบ anonymous อ่านข้อมูลห้องได้เพื่อเข้าร่วมด้วยรหัส
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.teacherSessionId == request.auth.uid
+        && request.resource.data.roomCode == roomCode
+        && request.resource.data.status == 'waiting';
+      allow update: if isTeacher(roomCode);
+      allow delete: if false;
+
+      match /teams/{teamId} {
+        allow read: if isTeacher(roomCode) || (signedIn() && resource.data.ownerUid == request.auth.uid);
+        allow create: if signedIn()
+          && room(roomCode).status == 'waiting'
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.currentRound == room(roomCode).currentRound
+          && request.resource.data.score == 0
+          && request.resource.data.currentQuestionIndex == 0
+          && request.resource.data.submitted == false;
+        allow update: if isTeacher(roomCode) || (
+          signedIn()
+          && resource.data.ownerUid == request.auth.uid
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && room(roomCode).status == 'playing'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'score'])
+          && request.resource.data.currentQuestionIndex == resource.data.currentQuestionIndex
+          && request.resource.data.submitted == resource.data.submitted
+          && request.resource.data.status == resource.data.status
+          && (
+            request.resource.data.answers.size() == resource.data.answers.size() + 1
+            || request.resource.data.answers.size() == resource.data.answers.size()
+          )
+          && request.resource.data.score >= resource.data.score - 1
+          && request.resource.data.score <= resource.data.score + 1
+          && request.resource.data.score >= 0
+          && request.resource.data.score <= 10
+        );
+        allow delete: if false;
+      }
+    }
+  }
+}
