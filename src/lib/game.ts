@@ -1,4 +1,4 @@
-import type { JoinInput, Player, Question, QuestionCategory, Room } from '../types/game'
+import type { JoinInput, Player, Question, QuestionCategory, Room, TeacherSession } from '../types/game'
 
 export const ROUND_CATEGORY_COUNTS: Record<QuestionCategory, number> = {
   basic: 2,
@@ -93,6 +93,23 @@ export const resolveStudentRoute = (room: Room, player: Player): string => {
   if (room.status === 'waiting') return `/lobby/${base}`
   if (player.submitted) return `/result/${base}`
   return `/game/${base}`
+}
+
+// A locally stored teacher session can outlive the Firebase identity it was captured under
+// (a fresh anonymous sign-in on a new profile, cleared browser storage, etc.). currentUid is
+// always the authoritative, stable Firebase uid (from GameContext, backed by
+// ensureAnonymousUser) — it must win. If the stored session's teacherSessionId doesn't match
+// it, the room it points at is no longer provably owned by this browser, so it's discarded
+// entirely (both the stale uid AND its remembered roomCode) rather than silently reused,
+// which would just produce a confusing permission-denied later.
+export const resolveTeacherRoomSession = (
+  stored: TeacherSession | null,
+  currentUid: string,
+): { teacherSessionId: string; roomCode: string } => {
+  if (stored && stored.teacherSessionId === currentUid) {
+    return { teacherSessionId: currentUid, roomCode: stored.roomCode ?? '' }
+  }
+  return { teacherSessionId: currentUid, roomCode: '' }
 }
 
 export const formatElapsedTime = (elapsedMs: number | null | undefined): string => {

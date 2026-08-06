@@ -30,7 +30,20 @@ service cloud.firestore {
       // semantics at the application layer (see joinRoom in firebaseService.ts) plus the
       // create/update rules below as a defense-in-depth backstop.
       match /players/{playerId} {
-        allow read: if isTeacher(roomCode) || (signedIn() && resource.data.ownerUid == request.auth.uid);
+        // get vs list matters here: a genuinely new student's join transaction must read
+        // this doc (which doesn't exist yet) to decide reconnect-vs-new-vs-duplicate before
+        // ever calling create. That get has no `resource` to check ownership against, so it
+        // needs its own room-state-based allowance — list stays teacher-only so students can
+        // never enumerate the roster.
+        //
+        // Clause order matters: the "waiting && unlocked" clause is placed before the
+        // ownerUid clause so it short-circuits first. If it were evaluated after a false
+        // ownerUid clause, accessing resource.data on a null resource (nonexistent doc)
+        // would error out the whole allow — denying even legitimate teacher/room reads.
+        allow get: if isTeacher(roomCode)
+          || (signedIn() && room(roomCode).status == 'waiting' && room(roomCode).teamsLocked == false)
+          || (signedIn() && resource.data.ownerUid == request.auth.uid);
+        allow list: if isTeacher(roomCode);
         // teamsLocked == false blocks direct Firestore creation of a genuinely new player
         // once the teacher has locked teams — this backstops the app-level late-join guard
         // in joinRoom, so it holds even against a client bypassing the app code. Reconnect

@@ -17,6 +17,13 @@ export const GameProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     let active = true
     setError('')
+    // This effect can legitimately run more than once (React StrictMode's dev-mode double
+    // invoke, or a retry via `attempt`). That's safe only because ensureSession() — for the
+    // Firebase backend, backed by the module-level ensureAnonymousUser() — de-duplicates
+    // concurrent/repeated sign-in attempts into a single shared result, so every run here
+    // resolves to the same stable uid rather than racing two anonymous sign-ins. `uid` is
+    // never set until this resolves, so the service is never exposed to children before the
+    // authenticated uid is stable.
     gameServicePromise
       .then(async (nextService) => {
         const nextUid = await nextService.ensureSession()

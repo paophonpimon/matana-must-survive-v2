@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app'
-import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth'
+import { getAuth } from 'firebase/auth'
 import {
   collection,
   doc,
@@ -17,7 +17,8 @@ import {
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
-import type { AnswerInput, AnswerResult, GameService } from './gameService'
+import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
+import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type GameService } from './gameService'
 import type { AnswerRecord, JoinInput, JoinResult, Player, Room, TeamMeta, Unsubscribe, Winner } from '../types/game'
 
 const firebaseConfig = {
@@ -114,38 +115,44 @@ const stablePlayerId = (studentNumber: string): string => {
   return `player-${(hash >>> 0).toString(36)}`
 }
 
+// Dev-only diagnostic for the exact bug class this module guards against: a uid captured
+// earlier (React state, a function argument) drifting from the live auth.currentUser by the
+// time a write actually happens. Deliberately logs only uids/operation/roomCode — never the
+// firebaseConfig, tokens, or any other credential material.
+const logPermissionDenied = (operation: string, contextUid: string, roomCode: string): void => {
+  if (!import.meta.env.DEV) return
+  const authUid = auth.currentUser?.uid ?? null
+  console.warn('[firebase-auth] permission-denied', {
+    operation,
+    contextUid,
+    authUid,
+    matched: authUid === contextUid,
+    roomCode,
+  })
+}
+
 export class FirebaseGameService implements GameService {
   readonly isDemo = false
 
   async ensureSession(): Promise<string> {
-    if (auth.currentUser) return auth.currentUser.uid
-    return new Promise((resolve, reject) => {
-      const unsubscribe = onAuthStateChanged(
-        auth,
-        async (user) => {
-          if (user) {
-            unsubscribe()
-            resolve(user.uid)
-            return
-          }
-          try {
-            const credential = await signInAnonymously(auth)
-            unsubscribe()
-            resolve(credential.user.uid)
-          } catch {
-            unsubscribe()
-            reject(new Error('ผู้ใช้:ไม่สามารถเริ่มเซสชันแบบไม่ระบุตัวตนได้ กรุณาลองใหม่'))
-          }
-        },
-        () => {
-          unsubscribe()
-          reject(new Error('ผู้ใช้:ไม่สามารถตรวจสอบเซสชันได้ กรุณาลองใหม่'))
-        },
-      )
-    })
+    // ensureAnonymousUser is the single, module-level, de-duplicated entry point to
+    // anonymous sign-in — it is what makes this safe to call from a GameProvider effect that
+    // React (StrictMode) or a fresh page load may invoke more than once without ever
+    // producing two competing signInAnonymously calls (and therefore two different uids).
+    try {
+      const user = await ensureAnonymousUser(auth)
+      return user.uid
+    } catch {
+      throw new Error('ผู้ใช้:ไม่สามารถเริ่มเซสชันแบบไม่ระบุตัวตนได้ กรุณาลองใหม่')
+    }
   }
 
   async createRoom(teacherSessionId: string): Promise<Room> {
+    // The teacher's uid captured in React state can drift from the live auth.currentUser
+    // (see ensureAnonymousUser) — never trust it as-is for the value written to
+    // teacherSessionId, which is what every later isTeacher(roomCode) rule check compares
+    // against request.auth.uid.
+    const resolvedTeacherSessionId = await resolveOwnerUid(auth, teacherSessionId)
     let roomCode = generateRoomCode()
     for (let attempt = 0; attempt < 8; attempt += 1) {
       if (!(await getDoc(doc(db, 'rooms', roomCode))).exists()) break
@@ -164,25 +171,35 @@ export class FirebaseGameService implements GameService {
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
       winner: null,
-      teacherSessionId,
+      teacherSessionId: resolvedTeacherSessionId,
       teamCount: 0,
       teamsLocked: false,
       teams: [],
     }
-    await runTransaction(db, async (transaction) => {
-      const roomRef = doc(db, 'rooms', roomCode)
-      if ((await transaction.get(roomRef)).exists()) throw new Error('ผู้ใช้:รหัสห้องซ้ำ กรุณาลองสร้างอีกครั้ง')
-      transaction.set(roomRef, { ...room, createdAt: serverTimestamp() })
-    })
+    try {
+      await runTransaction(db, async (transaction) => {
+        const roomRef = doc(db, 'rooms', roomCode)
+        if ((await transaction.get(roomRef)).exists()) throw new Error('ผู้ใช้:รหัสห้องซ้ำ กรุณาลองสร้างอีกครั้ง')
+        transaction.set(roomRef, { ...room, createdAt: serverTimestamp() })
+      })
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+      if (code === 'permission-denied') logPermissionDenied('createRoom', resolvedTeacherSessionId, roomCode)
+      throw error
+    }
     return room
   }
 
-  async joinRoom(input: JoinInput, ownerUid: string): Promise<JoinResult> {
+  async joinRoom(input: JoinInput, requestedOwnerUid: string): Promise<JoinResult> {
     const roomCode = input.roomCode.trim().toUpperCase()
     const studentNumber = input.studentNumber.trim()
     const playerId = stablePlayerId(studentNumber)
     const roomRef = doc(db, 'rooms', roomCode)
     const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    // The uid captured in React state (from GameContext) can drift from the live
+    // auth.currentUser — never write a stale ownerUid to Firestore, since that's exactly
+    // what the security rules compare request.auth.uid against.
+    const ownerUid = await resolveOwnerUid(auth, requestedOwnerUid)
     try {
       return await runTransaction(db, async (transaction) => {
         const roomSnapshot = await transaction.get(roomRef)
@@ -225,7 +242,21 @@ export class FirebaseGameService implements GameService {
       })
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-      if (code === 'permission-denied') throw new Error('ผู้ใช้:เลขที่นักเรียนนี้ถูกใช้แล้ว')
+      if (code === 'permission-denied') {
+        // The transaction's own duplicate-number branch above already throws its own
+        // 'ผู้ใช้:...' Error *inside* the transaction before Firestore ever needs to deny
+        // anything, so a raw permission-denied reaching here means the security rules
+        // themselves refused the read/write — which happens when a genuinely new (never
+        // seen before) player's deterministic doc get is attempted while teamsLocked is
+        // true (the rules only grant that get to the teacher, the doc's existing owner, or
+        // a waiting-and-unlocked room). Re-read the room outside the transaction and let the
+        // pure resolver decide the cause instead of assuming a duplicate student number.
+        const roomSnapshot = await getDoc(roomRef)
+        const room = roomSnapshot.exists() ? mapRoom(roomSnapshot.data()) : null
+        logPermissionDenied('joinRoom', ownerUid, roomCode)
+        const message = resolveJoinPermissionDeniedMessage(room)
+        if (message) throw new Error(message)
+      }
       throw error
     }
   }

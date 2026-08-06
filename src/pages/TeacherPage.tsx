@@ -3,6 +3,7 @@ import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, Status
 import { useGame } from '../context/GameContext'
 import { useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
+import { resolveTeacherRoomSession } from '../lib/game'
 import { computeCurrentQuestionStats, computeTeamStats } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, saveTeacherSession } from '../services/sessionStorage'
@@ -78,9 +79,13 @@ const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
 
 export const TeacherPage = () => {
   const { service, uid } = useGame()
-  const storedSession = getTeacherSession()
-  const [teacherSessionId, setTeacherSessionId] = useState(storedSession?.teacherSessionId ?? uid)
-  const [roomCode, setRoomCode] = useState(storedSession?.roomCode ?? '')
+  // uid here is the stable, authoritative Firebase uid (GameContext only resolves it via
+  // ensureAnonymousUser). A locally stored session from an earlier browser identity must
+  // never override it — if the stored teacherSessionId doesn't match, that old room is
+  // treated as not owned by this browser rather than silently reused.
+  const initialTeacherSession = resolveTeacherRoomSession(getTeacherSession(), uid)
+  const [teacherSessionId, setTeacherSessionId] = useState(initialTeacherSession.teacherSessionId)
+  const [roomCode, setRoomCode] = useState(initialTeacherSession.roomCode)
   const roomState = useRoom(roomCode)
   const playersState = usePlayers(roomCode)
   const [busy, setBusy] = useState(false)

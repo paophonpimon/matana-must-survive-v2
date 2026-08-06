@@ -32,6 +32,16 @@ export interface GameService {
   unlockTeams(roomCode: string, teacherSessionId: string): Promise<void>
 }
 
+// Used by FirebaseGameService.joinRoom's catch block when the transaction's read of the
+// deterministic player doc is denied by security rules (a genuinely new player can't be
+// distinguished from a duplicate at the rules layer, since the doc doesn't exist yet). Given
+// the room state re-read *outside* the transaction, decide whether that denial was actually
+// caused by a locked room (the one case the rules intentionally deny for a brand-new player)
+// — returning null means "not that specific cause," so the caller must rethrow the original
+// Firebase error rather than ever inventing a false duplicate-student-number claim.
+export const resolveJoinPermissionDeniedMessage = (room: Pick<Room, 'teamsLocked'> | null): string | null =>
+  room?.teamsLocked ? 'ผู้ใช้:ทีมถูกล็อกแล้ว กรุณาติดต่อครู' : null
+
 export const friendlyError = (error: unknown): string => {
   if (error instanceof Error && error.message.startsWith('ผู้ใช้:')) return error.message.replace('ผู้ใช้:', '')
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''

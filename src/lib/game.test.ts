@@ -6,10 +6,11 @@ import {
   evaluateChoice,
   generateRoomCode,
   resolveStudentRoute,
+  resolveTeacherRoomSession,
   selectRoundQuestions,
   validateJoinInput,
 } from './game'
-import type { Player, Room } from '../types/game'
+import type { Player, Room, TeacherSession } from '../types/game'
 
 describe('การสุ่มคำถาม', () => {
   it('ได้ 10 ข้อ ไม่มีรหัสซ้ำ และได้สัดส่วนหมวดถูกต้อง', () => {
@@ -78,6 +79,29 @@ describe('รหัสห้องและ validation', () => {
     expect(validateJoinInput({ roomCode: 'ABC234', displayName: 'ชื่อ', studentNumber: '' })).toEqual({
       studentNumber: 'กรุณากรอกเลขที่นักเรียน',
     })
+  })
+})
+
+describe('resolveTeacherRoomSession', () => {
+  it('keeps the stored room when the stored teacherSessionId matches the current stable Firebase uid', () => {
+    const stored: TeacherSession = { teacherSessionId: 'uid-current', roomCode: 'ABC234', role: 'teacher' }
+    expect(resolveTeacherRoomSession(stored, 'uid-current')).toEqual({ teacherSessionId: 'uid-current', roomCode: 'ABC234' })
+  })
+
+  it('discards the stored room (does not treat it as owned) when the stored uid differs from the current uid', () => {
+    const stored: TeacherSession = { teacherSessionId: 'uid-from-a-previous-browser-identity', roomCode: 'ABC234', role: 'teacher' }
+    expect(resolveTeacherRoomSession(stored, 'uid-current')).toEqual({ teacherSessionId: 'uid-current', roomCode: '' })
+  })
+
+  it('a stored session can never override the current uid, even though it carries its own teacherSessionId field', () => {
+    const stored: TeacherSession = { teacherSessionId: 'stale-uid', roomCode: 'XYZ999', role: 'teacher' }
+    const result = resolveTeacherRoomSession(stored, 'authoritative-uid')
+    expect(result.teacherSessionId).toBe('authoritative-uid')
+    expect(result.teacherSessionId).not.toBe(stored.teacherSessionId)
+  })
+
+  it('falls back to the current uid with no room when nothing is stored yet', () => {
+    expect(resolveTeacherRoomSession(null, 'uid-current')).toEqual({ teacherSessionId: 'uid-current', roomCode: '' })
   })
 })
 
