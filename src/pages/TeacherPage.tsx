@@ -4,7 +4,7 @@ import { useGame } from '../context/GameContext'
 import { useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { resolveTeacherRoomSession } from '../lib/game'
-import { computeTeamCompetitionStats, MAGIC_ITEM_INFO } from '../lib/magic'
+import { computeTeamCompetitionStats, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, saveTeacherSession } from '../services/sessionStorage'
@@ -44,7 +44,7 @@ const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
           {questionIds.map((_, index) => (
             <th key={index} className="pb-3 pr-2 text-center">ข้อ {index + 1}</th>
           ))}
-          <th className="pb-3 pr-3 text-center">คะแนนดิบ</th>
+          <th className="pb-3 pr-3 text-center">คะแนนความรู้</th>
           <th className="pb-3 text-center">ไม่ได้ตอบ</th>
         </tr>
       </thead>
@@ -68,7 +68,7 @@ const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
                   </td>
                 )
               })}
-              <td className="py-2 pr-3 text-center font-semibold text-[#f2d58d]">{player.score}</td>
+              <td className="py-2 pr-3 text-center font-semibold text-[#f2d58d]">{player.score * 10}/100</td>
               <td className="py-2 text-center text-[#c0b7ab]">{unansweredCount}</td>
             </tr>
           )
@@ -99,6 +99,8 @@ export const TeacherPage = () => {
   const [resultsTab, setResultsTab] = useState<'team' | 'individual'>('team')
   const [now, setNow] = useState(Date.now())
   const advancingQuestion = useRef({ key: '', attemptedAt: 0 })
+  const advancingBossQuestion = useRef({ key: '', attemptedAt: 0 })
+  const closingQuestion = useRef({ key: '', attemptedAt: 0 })
 
   const sortedPlayers = useMemo(() => [...playersState.data].sort((a, b) => a.joinedAt - b.joinedAt), [playersState.data])
   const parsedDuration = Number(durationValue)
@@ -109,6 +111,18 @@ export const TeacherPage = () => {
   const remainingMs = roomState.data ? getRemainingMilliseconds(roomState.data, now) : 0
   const revealRemainingMs = roomState.data ? getRevealRemainingMilliseconds(roomState.data, now) : 0
   const currentQuestionId = roomState.data?.questionIds[roomState.data.currentQuestionIndex]
+
+  // Milestone 4: boss-phase timing mirrors the main flow's, fed a boss-shaped
+  // {questionStartedAt: bossQuestionStartedAt, questionDurationSeconds: bossQuestionDurationSeconds,
+  // questionClosedAt: null} object (boss has no early-close).
+  const isBossPhase = roomState.data?.phase === 'boss'
+  const bossTiming = roomState.data ? { questionStartedAt: roomState.data.bossQuestionStartedAt, questionDurationSeconds: roomState.data.bossQuestionDurationSeconds, questionClosedAt: null } : null
+  const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
+  const bossRevealRemainingMs = bossTiming ? getRevealRemainingMilliseconds(bossTiming, now) : 0
+  const currentBossQuestionId = roomState.data?.bossQuestionIds[roomState.data.bossQuestionIndex]
+  const bossAnsweredCount = currentBossQuestionId
+    ? playersState.data.filter((player) => player.bossAnswers.some((answer) => answer.questionId === currentBossQuestionId)).length
+    : 0
 
   // While a question is live, hide each player's just-answered (unrevealed) score bump from
   // the teacher view the same way the previous per-login-team scoreboard did — this now
@@ -161,9 +175,21 @@ export const TeacherPage = () => {
   const podiumFollowers = competitionStats.filter((team) => team.competitionAverage < highestAverage).slice(0, 2)
   const unassignedCount = sortedPlayers.filter((player) => player.teamId == null).length
 
+  // Milestone 2.2: teacher early-reveal / manual-advance controls. "All answered" only
+  // considers currently-registered players (sortedPlayers), matching currentQuestionStats.
+  const allAnsweredCurrentQuestion = sortedPlayers.length > 0 && currentQuestionStats.answeredCount === sortedPlayers.length
+  const canCloseQuestionEarly = Boolean(
+    roomState.data?.status === 'playing' && remainingMs > 0 && roomState.data.questionClosedAt == null && allAnsweredCurrentQuestion,
+  )
+  const canAdvanceNow = Boolean(roomState.data?.status === 'playing' && revealRemainingMs > 0)
+
   useEffect(() => {
     const room = roomState.data
-    if (!room || room.status !== 'playing') return
+    // Milestone 4: phase !== 'main' skips this effect during the boss phase — questionStartedAt
+    // is left stale (still question 5's) once boss starts, since advanceQuestion's boss-trigger
+    // branch has no reason to touch it; the separate boss auto-advance effect below owns timing
+    // while phase === 'boss'.
+    if (!room || room.status !== 'playing' || room.phase !== 'main') return
     const questionKey = `${room.currentRound}-${room.currentQuestionIndex}`
     if (advancingQuestion.current.key && advancingQuestion.current.key !== questionKey) advancingQuestion.current = { key: '', attemptedAt: 0 }
     const tick = (): void => {
@@ -182,6 +208,68 @@ export const TeacherPage = () => {
     const intervalId = window.setInterval(tick, 250)
     return () => window.clearInterval(intervalId)
   }, [roomCode, roomState.data, service, teacherSessionId])
+
+  // Milestone 4: boss-phase counterpart of the auto-advance effect above — same debounced
+  // deadline-driven "reveal, then advance" shape, reusing getQuestionDeadline/ANSWER_REVEAL_MILLISECONDS
+  // fed a boss-shaped {questionStartedAt: bossQuestionStartedAt, questionDurationSeconds:
+  // bossQuestionDurationSeconds, questionClosedAt: null} object (boss has no early-close).
+  useEffect(() => {
+    const room = roomState.data
+    if (!room || room.status !== 'playing' || room.phase !== 'boss') return
+    const bossKey = `${room.currentRound}-boss-${room.bossQuestionIndex}`
+    if (advancingBossQuestion.current.key && advancingBossQuestion.current.key !== bossKey) advancingBossQuestion.current = { key: '', attemptedAt: 0 }
+    const tick = (): void => {
+      const currentTime = Date.now()
+      setNow(currentTime)
+      const deadline = getQuestionDeadline({ questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null })
+      const recentlyAttempted = advancingBossQuestion.current.key === bossKey && currentTime - advancingBossQuestion.current.attemptedAt < 3_000
+      if (deadline == null || currentTime < deadline + ANSWER_REVEAL_MILLISECONDS || recentlyAttempted) return
+      advancingBossQuestion.current = { key: bossKey, attemptedAt: currentTime }
+      void service.advanceBossQuestion(roomCode, teacherSessionId, room.bossQuestionIndex).catch((reason) => {
+        advancingBossQuestion.current = { key: '', attemptedAt: 0 }
+        setError(friendlyError(reason))
+      })
+    }
+    tick()
+    const intervalId = window.setInterval(tick, 250)
+    return () => window.clearInterval(intervalId)
+  }, [roomCode, roomState.data, service, teacherSessionId])
+
+  // Milestone 2.2: manual "ไปข้อถัดไปทันที" — shares the SAME advancingQuestion ref/debounce as
+  // the automatic tick effect above, so a manual click and the automatic timer can never both
+  // fire advanceQuestion for the same question within the 3s window (advanceQuestion itself is
+  // also idempotent server-side via expectedQuestionIndex, but this avoids a redundant call and
+  // a possible duplicate error toast).
+  const handleAdvanceNow = (): void => {
+    const room = roomState.data
+    if (!room || room.status !== 'playing') return
+    const questionKey = `${room.currentRound}-${room.currentQuestionIndex}`
+    const recentlyAttempted = advancingQuestion.current.key === questionKey && Date.now() - advancingQuestion.current.attemptedAt < 3_000
+    if (recentlyAttempted) return
+    advancingQuestion.current = { key: questionKey, attemptedAt: Date.now() }
+    setError('')
+    void service.advanceQuestion(roomCode, teacherSessionId, room.currentQuestionIndex).catch((reason) => {
+      advancingQuestion.current = { key: '', attemptedAt: 0 }
+      setError(friendlyError(reason))
+    })
+  }
+
+  // Milestone 2.2: "ปิดรับคำตอบและเฉลยทันที" — same debounce shape as handleAdvanceNow, using its
+  // own ref so closing early and advancing to the next question never share (or clobber) one
+  // another's stale/double-click guard.
+  const handleCloseQuestionEarly = (): void => {
+    const room = roomState.data
+    if (!room || room.status !== 'playing') return
+    const questionKey = `${room.currentRound}-${room.currentQuestionIndex}`
+    const recentlyAttempted = closingQuestion.current.key === questionKey && Date.now() - closingQuestion.current.attemptedAt < 3_000
+    if (recentlyAttempted) return
+    closingQuestion.current = { key: questionKey, attemptedAt: Date.now() }
+    setError('')
+    void service.closeQuestionEarly(roomCode, teacherSessionId, room.currentQuestionIndex).catch((reason) => {
+      closingQuestion.current = { key: '', attemptedAt: 0 }
+      setError(friendlyError(reason))
+    })
+  }
 
   const rememberRoom = (nextTeacherSessionId: string, nextRoomCode: string): void => {
     setTeacherSessionId(nextTeacherSessionId)
@@ -368,7 +456,12 @@ export const TeacherPage = () => {
               <div className="grid grid-cols-2 gap-5 sm:flex sm:gap-8">
                 <div><small>สถานะ</small><StatusPill status={roomState.data.status} /></div>
                 <div><small>รอบที่</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.currentRound}</strong></div>
-                {roomState.data.status === 'playing' ? (
+                {roomState.data.status === 'playing' && isBossPhase ? (
+                  <>
+                    <div><small>ศึกด่านชิงมนตรา</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.bossQuestionIndex + 1}/3</strong></div>
+                    <div><small>{bossRevealRemainingMs > 0 ? 'กำลังแสดงผล' : 'เวลาคงเหลือ'}</small><strong className="block text-2xl text-[#f2d58d]">{bossRevealRemainingMs > 0 ? formatCountdown(bossRevealRemainingMs) : formatCountdown(bossRemainingMs)}</strong></div>
+                  </>
+                ) : roomState.data.status === 'playing' ? (
                   <>
                     <div><small>คำถาม</small><strong className="block text-2xl text-[#fff7df]">{Math.min(roomState.data.currentQuestionIndex + 1, 10)}/10</strong></div>
                     <div><small>{revealRemainingMs > 0 ? 'กำลังแสดงผล' : 'เวลาคงเหลือ'}</small><strong className="block text-2xl text-[#f2d58d]">{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</strong></div>
@@ -380,6 +473,20 @@ export const TeacherPage = () => {
             </section>
 
             {(error || (notice && !broadcastMode && !finalMode)) ? <div className={error ? 'error-message mt-4' : 'success-message mt-4'} role="status">{error || notice}</div> : null}
+
+            {/* Milestone 4: "announce the winner and reward on every screen" — persists for the
+                rest of the round (not auto-dismissed like the student toast) since this screen
+                is often the one projected for the whole class. */}
+            {roomState.data.bossCompleted && roomState.data.bossWinner ? (
+              <section className="winner-card mt-4" aria-live="polite">
+                <small>🏆 ผู้พิชิตด่านชิงมนตรา</small>
+                <strong>
+                  {roomState.data.bossWinner.displayName} จากทีม{roomState.data.bossWinner.teamName ?? '-'}
+                  {' — '}ตอบถูก {roomState.data.bossWinner.correctCount}/3 ใช้เวลา {(roomState.data.bossWinner.totalTimeMs / 1_000).toFixed(2)} วินาที
+                  {' — '}ทีมได้รับ {MAGIC_ITEM_INFO[roomState.data.bossWinner.rewardItemType].label}เพิ่ม 1 ครั้ง
+                </strong>
+              </section>
+            ) : null}
 
             {finalMode && teamStats.length > 0 ? (
               <section className="teacher-victory-stage" aria-labelledby="victory-stage-title">
@@ -429,6 +536,12 @@ export const TeacherPage = () => {
                   {roomState.data.status === 'playing' ? (
                     <div className="broadcast-header-actions">
                       <span className="live-score-pill"><i />LIVE</span>
+                      {canCloseQuestionEarly ? (
+                        <button className="secondary-button" type="button" onClick={handleCloseQuestionEarly}>ปิดรับคำตอบและเฉลยทันที</button>
+                      ) : null}
+                      {canAdvanceNow ? (
+                        <button className="secondary-button" type="button" onClick={handleAdvanceNow}>ไปข้อถัดไปทันที</button>
+                      ) : null}
                       <button className="emergency-stop-button" type="button" onClick={() => setConfirmAction('stop')} disabled={busy}>หยุดเกม</button>
                     </div>
                   ) : finalMode ? (
@@ -438,7 +551,16 @@ export const TeacherPage = () => {
                     </div>
                   ) : <span className="count-badge">{sortedPlayers.length} คน</span>}
                 </div>
-                {roomState.data.status === 'playing' ? (
+                {roomState.data.status === 'playing' && isBossPhase ? (
+                  // Milestone 4: correctness/ranking is deliberately withheld here — "do not
+                  // reveal the live overall ranking between boss questions" — only progress
+                  // (question number, time, how many have answered) is shown while boss is live.
+                  <dl className="broadcast-stats" aria-label="สถานการณ์ศึกด่านชิงมนตรา">
+                    <div><dt>ข้อของด่านชิงมนตรา</dt><dd>{roomState.data.bossQuestionIndex + 1}<span>/3</span></dd></div>
+                    <div><dt>{bossRevealRemainingMs > 0 ? 'ดูผลอีก' : 'เวลาคงเหลือ'}</dt><dd>{bossRevealRemainingMs > 0 ? formatCountdown(bossRevealRemainingMs) : formatCountdown(bossRemainingMs)}</dd></div>
+                    <div><dt>ตอบแล้วข้อนี้</dt><dd>{bossAnsweredCount}<span>/{sortedPlayers.length}</span></dd></div>
+                  </dl>
+                ) : roomState.data.status === 'playing' ? (
                   <dl className="broadcast-stats" aria-label="สถานการณ์ปัจจุบันของห้อง">
                     <div><dt>คำถามปัจจุบัน</dt><dd>{roomState.data.currentQuestionIndex + 1}<span>/10</span></dd></div>
                     <div><dt>{revealRemainingMs > 0 ? 'ดูเฉลยอีก' : 'เวลาคงเหลือ'}</dt><dd>{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</dd></div>
@@ -615,33 +737,48 @@ export const TeacherPage = () => {
                   {roomState.data.teams.map((team, index) => {
                     const magic = magicByTeamId.get(team.id)
                     const holderName = magic?.magicHolderPlayerId ? playerNameById.get(magic.magicHolderPlayerId) ?? '-' : '-'
-                    const hasShield = magic?.inventory.some((item) => item.itemType === 'rose_shield' && !item.consumed) ?? false
-                    const raw = teamStatsById.get(team.id)
+                    const heldTypes = magic ? MAGIC_ITEM_TYPES.filter((itemType) => magic.inventory[itemType].available > 0 || magic.inventory[itemType].consumed > 0) : []
                     const competition = competitionStats.find((entry) => entry.id === team.id)
+                    // Milestone 4: incoming (still-queued, unresolved) score_seal count targeting
+                    // this team this round — what makes "buffs, debuffs" visible to the teacher
+                    // before a question actually resolves, not just after.
+                    const incomingSealCount = magicEventsState.data.filter(
+                      (event) => event.round === roomState.data?.currentRound && event.status === 'queued' && event.itemType === 'score_seal' && event.targetTeamId === team.id,
+                    ).length
                     return (
                       <div key={team.id} className={`text-sm ${index > 0 ? 'border-t border-white/10 pt-4 sm:border-t-0 sm:pt-0' : ''}`}>
                         <div className="flex items-center justify-between gap-3">
                           <strong className="text-[#fff7df]">{team.name}</strong>
                           <span className="text-xs text-[#c0b7ab]">ผู้ถือคทา: {holderName}</span>
                         </div>
+                        {/* Milestone 4: shown separately per the score-scale requirement — knowledge
+                            score (raw, /100), magic adjustment (own x hostile multiplier), and the
+                            resulting competition score (uncapped). */}
                         <p className="mt-1 text-xs text-[#c0b7ab]">
-                          คะแนนดิบเฉลี่ย {(raw?.averageScore ?? 0).toFixed(1)} · คะแนนแข่งขันเฉลี่ย {(competition?.competitionAverage ?? 0).toFixed(1)}
+                          คะแนนความรู้ {(competition?.rawTotal ?? 0).toFixed(1)}/100 · มนตรา ×{((competition?.competitionTotal ?? 0) / (competition?.rawTotal || 1)).toFixed(2)} · คะแนนแข่งขัน {(competition?.competitionTotal ?? 0).toFixed(1)}
                         </p>
                         <ul className="mt-2 space-y-0.5">
-                          {!magic || magic.inventory.length === 0 ? (
+                          {heldTypes.length === 0 ? (
                             <li className="text-[#8b8377]">ยังไม่มีไอเทม</li>
-                          ) : magic.inventory.map((item, itemIndex) => (
-                            <li key={itemIndex} className={item.consumed ? 'text-[#8b8377] line-through' : 'text-[#fff7df]'}>
-                              {MAGIC_ITEM_INFO[item.itemType].label}{item.consumed ? ' (ใช้แล้ว)' : ''}
-                            </li>
-                          ))}
+                          ) : heldTypes.map((itemType) => {
+                            const entry = magic?.inventory[itemType]
+                            return (
+                              <li key={itemType} className="text-[#fff7df]">
+                                {MAGIC_ITEM_INFO[itemType].label} — พร้อมใช้ {entry?.available ?? 0}
+                                {entry && entry.consumed > 0 ? <span className="text-[#8b8377]">{` · ใช้ไปแล้ว ${entry.consumed}`}</span> : null}
+                              </li>
+                            )
+                          })}
                         </ul>
                         {magic?.queuedEffect ? (
                           <p className="mt-2 text-xs text-[#f2d58d]">
                             กำลังใช้ {MAGIC_ITEM_INFO[magic.queuedEffect.itemType].label} เป้าหมาย {teamNameById.get(magic.queuedEffect.targetTeamId) ?? '-'} · มีผลข้อที่ {magic.queuedEffect.affectedQuestionIndex + 1}
                           </p>
                         ) : null}
-                        {hasShield ? <p className="mt-1 text-xs text-[#7fdc9d]">พร้อมป้องกันด้วยเกราะกุหลาบ</p> : null}
+                        {incomingSealCount > 0 ? (
+                          <p className="mt-1 text-xs text-[#f3aaa7]">⚠️ กำลังถูกผนึกคะแนน {incomingSealCount} ครั้ง (รอผล)</p>
+                        ) : null}
+                        {magic && magic.inventory.rose_shield.available > 0 ? <p className="mt-1 text-xs text-[#7fdc9d]">พร้อมป้องกันด้วยเกราะกุหลาบ {magic.inventory.rose_shield.available} ชิ้น</p> : null}
                       </div>
                     )
                   })}

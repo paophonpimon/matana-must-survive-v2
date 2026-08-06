@@ -22,37 +22,51 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.ownerUid == request.auth.uid;
     }
 
-    // Security-hardening pass: mirrors lib/magic.ts's isEligibleQuestionIndex /
-    // getMagicActivationWindow so a holder's queuedEffect write can be validated
-    // server-side, not just trusted from the client. ANSWER_REVEAL_MILLISECONDS (4000) must
-    // stay in sync with src/lib/gameFlow.ts's constant of the same name.
+    // Milestone 4: inventory is now a fixed-shape count map ({power_surge, score_seal,
+    // rose_shield} -> {available, consumed}), not an array of item instances — this rules
+    // language has no way to search an arbitrary-length array for a predicate match, only
+    // compare fixed field paths, which is exactly why the app-level type was redesigned this
+    // way (see types/game.ts's MagicInventory).
+    function hasAnyMagicItem(inventory) {
+      return inventory.power_surge.available > 0 || inventory.power_surge.consumed > 0
+        || inventory.score_seal.available > 0 || inventory.score_seal.consumed > 0
+        || inventory.rose_shield.available > 0 || inventory.rose_shield.consumed > 0;
+    }
+
+    // "Choosing exactly one starting item": exactly one of the three entries gains +1
+    // available (consumed unchanged), and the other two entries are completely untouched.
+    function choseExactlyOneItem(before, after) {
+      return (
+        after.power_surge.available == before.power_surge.available + 1 && after.power_surge.consumed == before.power_surge.consumed
+        && after.score_seal == before.score_seal && after.rose_shield == before.rose_shield
+      ) || (
+        after.score_seal.available == before.score_seal.available + 1 && after.score_seal.consumed == before.score_seal.consumed
+        && after.power_surge == before.power_surge && after.rose_shield == before.rose_shield
+      ) || (
+        after.rose_shield.available == before.rose_shield.available + 1 && after.rose_shield.consumed == before.rose_shield.consumed
+        && after.power_surge == before.power_surge && after.score_seal == before.score_seal
+      );
+    }
+
+    // Mirrors lib/magic.ts's isEligibleQuestionIndex / getMagicActivationWindow so a holder's
+    // queuedEffect write can be validated server-side, not just trusted from the client.
     function isEligibleQuestionIndex(roomCode, index) {
       return index > 0 && index < room(roomCode).questionIds.size() - 1;
     }
 
-    function questionDeadlineMillis(roomCode) {
-      return room(roomCode).questionStartedAt.toMillis() + room(roomCode).questionDurationSeconds * 1000;
-    }
-
-    function isLobbyActivationWindow(roomCode, index) {
-      return room(roomCode).status == 'waiting' && index == 1;
-    }
-
-    function isRevealActivationWindow(roomCode, index) {
-      return room(roomCode).status == 'playing'
-        && room(roomCode).questionStartedAt != null
-        && index == room(roomCode).currentQuestionIndex + 1
-        && request.time.toMillis() >= questionDeadlineMillis(roomCode)
-        && request.time.toMillis() < questionDeadlineMillis(roomCode) + 4000;
-    }
-
-    // Question 1 (index 0) and the final question are never eligible; the only two legal
-    // windows are the lobby (before question 2) and the current question's reveal/intermission
-    // (before the next question) — anything else (mid-question, completed/closed room) is
-    // rejected by the isLobby/isReveal disjunction below returning false.
+    // Milestone 2.2: activation is a room.status == 'playing' concept only — selecting a
+    // starting item (lobby) never implies immediate use, and there is no lobby activation
+    // window anymore. Once playing, activation is valid for the WHOLE lifecycle of the current
+    // question (answering or reveal — no longer time-gated), always targeting
+    // currentQuestionIndex + 1.
+    // Milestone 4: phase == 'main' additionally guards against activation leaking into the
+    // 3-question boss phase (status stays 'playing' throughout both, currentQuestionIndex
+    // stays frozen during boss, so without this check the index-match alone wouldn't catch it).
     function isValidActivationWindow(roomCode, index) {
-      return isEligibleQuestionIndex(roomCode, index)
-        && (isLobbyActivationWindow(roomCode, index) || isRevealActivationWindow(roomCode, index));
+      return room(roomCode).status == 'playing'
+        && room(roomCode).phase == 'main'
+        && index == room(roomCode).currentQuestionIndex + 1
+        && isEligibleQuestionIndex(roomCode, index);
     }
 
     // Reads the sibling magic/{teamId} doc's state as it will exist *after* this same atomic
@@ -106,29 +120,49 @@ service cloud.firestore {
           && request.resource.data.score == 0
           && request.resource.data.currentQuestionIndex == 0
           && request.resource.data.submitted == false;
-        // Student self-update: hasOnly(['answers', 'score']) means every other field —
-        // ownerUid, studentNumber, displayName, teamId, status, currentQuestionIndex,
-        // submitted, joinedAt — must stay bit-identical to the existing doc, or the write is
-        // rejected outright. A student can never reassign their own team, impersonate
-        // another ownerUid, or alter identity fields after creation. The isTeacher branch
-        // below remains the only path that can ever change teamId (team randomize/lock).
+        // Student self-update: every other field — ownerUid, studentNumber, displayName,
+        // teamId, status, currentQuestionIndex, submitted, joinedAt — must stay bit-identical
+        // to the existing doc, or the write is rejected outright. A student can never reassign
+        // their own team, impersonate another ownerUid, or alter identity fields after
+        // creation. The isTeacher branch remains the only path that can ever change teamId
+        // (team randomize/lock).
+        //
+        // Milestone 4: which array a student may touch depends on room.phase — main-phase
+        // answers only ever touch ['answers', 'score'], boss-phase answers only ever touch
+        // ['bossAnswers']. This is what makes "boss answers do not affect the 100-point
+        // knowledge score" true at the rules layer too, not just in app code.
         allow update: if isTeacher(roomCode) || (
           signedIn()
           && resource.data.ownerUid == request.auth.uid
           && request.resource.data.ownerUid == resource.data.ownerUid
           && room(roomCode).status == 'playing'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'score'])
           && request.resource.data.currentQuestionIndex == resource.data.currentQuestionIndex
           && request.resource.data.submitted == resource.data.submitted
           && request.resource.data.status == resource.data.status
           && (
-            request.resource.data.answers.size() == resource.data.answers.size() + 1
-            || request.resource.data.answers.size() == resource.data.answers.size()
+            (
+              room(roomCode).phase == 'main'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'score'])
+              && (
+                request.resource.data.answers.size() == resource.data.answers.size() + 1
+                || request.resource.data.answers.size() == resource.data.answers.size()
+              )
+              && request.resource.data.score >= resource.data.score - 1
+              && request.resource.data.score <= resource.data.score + 1
+              && request.resource.data.score >= 0
+              && request.resource.data.score <= 10
+            )
+            ||
+            (
+              room(roomCode).phase == 'boss'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bossAnswers'])
+              && (
+                request.resource.data.bossAnswers.size() == resource.data.bossAnswers.size() + 1
+                || request.resource.data.bossAnswers.size() == resource.data.bossAnswers.size()
+              )
+              && request.resource.data.bossAnswers.size() <= 3
+            )
           )
-          && request.resource.data.score >= resource.data.score - 1
-          && request.resource.data.score <= resource.data.score + 1
-          && request.resource.data.score >= 0
-          && request.resource.data.score <= 10
         );
         allow delete: if false;
       }
@@ -151,14 +185,11 @@ service cloud.firestore {
         allow update: if isTeacher(roomCode) || (
           signedIn() && isPlayerOwner(roomCode, resource.data.magicHolderPlayerId) && (
             (
-              // Starting-item choice: exactly one valid item, only while waiting+locked, only
-              // once (inventory empty -> one entry), holder/team identity untouched.
-              resource.data.inventory.size() == 0
-              && request.resource.data.inventory.size() == 1
-              && request.resource.data.inventory[0].keys().hasOnly(['itemType', 'acquiredAt', 'consumed', 'consumedAt'])
-              && request.resource.data.inventory[0].itemType in ['power_surge', 'score_seal', 'rose_shield']
-              && request.resource.data.inventory[0].consumed == false
-              && request.resource.data.inventory[0].consumedAt == null
+              // Starting-item choice: team has never received any item yet (available or
+              // consumed, of any type), exactly one type gains exactly +1 available, only
+              // while waiting+locked, holder/team identity untouched.
+              !hasAnyMagicItem(resource.data.inventory)
+              && choseExactlyOneItem(resource.data.inventory, request.resource.data.inventory)
               && request.resource.data.magicHolderPlayerId == resource.data.magicHolderPlayerId
               && request.resource.data.teamId == resource.data.teamId
               && room(roomCode).status == 'waiting'
@@ -167,19 +198,21 @@ service cloud.firestore {
             )
             ||
             (
-              // Activation: the item must be the team's one real, unused inventory item; the
-              // target/self-target rule must match the item type; the affected question must be
-              // an eligible next question, requested only during a valid activation window
-              // (never question 1/10, never mid-question); no unknown fields; holder/team
-              // identity untouched (diff hasOnly(['queuedEffect']) below already guarantees
-              // this structurally, since nothing else is in the diff).
+              // Activation: the item type must have at least one currently-available count for
+              // this team; the target/self-target rule must match the item type; the affected
+              // question must be an eligible next question, requested only during a valid
+              // activation window (never question 1/10, never mid-question, never during the
+              // boss phase); no unknown fields; inventory itself is untouched here (consumption
+              // happens later, at resolution, which is teacher-only) — hasOnly(['queuedEffect'])
+              // below already guarantees this structurally, since nothing else is in the diff.
+              // Milestone 4: multiple teams may queue a score_seal at the same target — there is
+              // no "already targeted" restriction here anymore, matching the app-level stacking
+              // change (seals resolve multiplicatively, see computeHostileMultiplier).
               resource.data.queuedEffect == null
               && request.resource.data.queuedEffect != null
               && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt'])
               && request.resource.data.queuedEffect.itemType in ['power_surge', 'score_seal']
-              && resource.data.inventory.size() == 1
-              && resource.data.inventory[0].itemType == request.resource.data.queuedEffect.itemType
-              && resource.data.inventory[0].consumed == false
+              && resource.data.inventory[request.resource.data.queuedEffect.itemType].available > 0
               && request.resource.data.queuedEffect.sourceTeamId == teamId
               && (
                 (request.resource.data.queuedEffect.itemType == 'power_surge' && request.resource.data.queuedEffect.targetTeamId == teamId)
@@ -202,7 +235,11 @@ service cloud.firestore {
       // transition (applied/blocked/expired) is teacher-only, via the same resolution/reset
       // operations noted above.
       match /magicEvents/{eventId} {
-        allow read: if isTeacher(roomCode);
+        // Milestone 4: all team members (not just the teacher) must be able to see incoming
+        // seal counts, queued power_surge status, and resolved shield/seal outcomes for their
+        // own and opposing teams — this is the same documented signedIn()-broad-read trade-off
+        // already used for magic/{teamId} and rosters/{teamId}.
+        allow read: if signedIn();
         // A holder may create their own team's audit record, but never independently of a real
         // activation: 'queued' records must exactly match the queuedEffect transition landing in
         // the *same atomic write* (checked via getAfter() — this is what makes forging a scoring

@@ -4,17 +4,29 @@ import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
-import { useRoom, usePlayer, useTeamAnswerProgress, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
+import { useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
 import { areAnswersLocked, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
-import { getMagicActivationWindow } from '../lib/magic'
+import { getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
 import { friendlyError } from '../services'
-import { getPlayerSession } from '../services/sessionStorage'
+import { getPlayerSession, hasShownBossWinnerBanner, markBossWinnerBannerShown } from '../services/sessionStorage'
+import type { BossWinner } from '../types/game'
 
 const formatCountdown = (milliseconds: number): string => {
   const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000))
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
+}
+
+const BOSS_REWARD_ICONS: Record<BossWinner['rewardItemType'], string> = {
+  power_surge: '⚡',
+  score_seal: '🔒',
+  rose_shield: '🛡️',
+}
+
+const formatMultiplier = (multiplier: number): string => {
+  if (multiplier === 1) return '×1'
+  return Number.isInteger(multiplier) ? `×${multiplier}` : `×${multiplier.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}`
 }
 
 export const GamePage = () => {
@@ -29,6 +41,7 @@ export const GamePage = () => {
   const rosterState = useTeamRoster(normalizedCode, teamId)
   const progressState = useTeamAnswerProgress(normalizedCode, teamId)
   const magicState = useTeamMagic(normalizedCode, teamId)
+  const magicEventsState = useMagicEvents(normalizedCode)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [pendingChoiceId, setPendingChoiceId] = useState('')
@@ -37,17 +50,33 @@ export const GamePage = () => {
   const room = roomState.data
   const player = playerState.data
   const assignedTeam = room?.teams.find((team) => team.id === player?.teamId)
+  const isBossPhase = room?.phase === 'boss'
   const questionIndex = room?.currentQuestionIndex ?? 0
   const questionId = room?.questionIds[questionIndex]
   const question = questionId ? questionsById.get(questionId) : undefined
   const savedAnswer = player?.answers.find((answer) => answer.questionId === questionId)
   const selectedChoiceId = pendingChoiceId || savedAnswer?.selectedChoiceId || ''
-  const remainingMs = room ? getRemainingMilliseconds(room, now) : 0
-  const revealRemainingMs = room ? getRevealRemainingMilliseconds(room, now) : 0
+  const remainingMs = room && !isBossPhase ? getRemainingMilliseconds(room, now) : 0
+  const revealRemainingMs = room && !isBossPhase ? getRevealRemainingMilliseconds(room, now) : 0
   const timeExpired = remainingMs <= 0
   const hasAnswered = Boolean(savedAnswer || pendingChoiceId)
   const answerWasCorrect = Boolean(selectedChoiceId && selectedChoiceId === question?.correctChoiceId)
   const progress = Math.min(100, (questionIndex / 10) * 100)
+  const knowledgeScore100 = (player?.score ?? 0) * 10
+
+  // ศึกด่านชิงมนตรา (Milestone 4): reuses the SAME gameFlow.ts timer helpers as the main flow,
+  // fed a boss-shaped {questionStartedAt, questionDurationSeconds, questionClosedAt: null}
+  // object — boss has no early-close, so questionClosedAt is always null here.
+  const bossTiming = room ? { questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null } : null
+  const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
+  const bossRevealRemainingMs = bossTiming ? getRevealRemainingMilliseconds(bossTiming, now) : 0
+  const bossTimeExpired = bossRemainingMs <= 0
+  const bossQuestionId = room?.bossQuestionIds[room.bossQuestionIndex]
+  const bossQuestion = bossQuestionId ? questionsById.get(bossQuestionId) : undefined
+  const bossSavedAnswer = player?.bossAnswers.find((answer) => answer.questionId === bossQuestionId)
+  const bossSelectedChoiceId = pendingChoiceId || bossSavedAnswer?.selectedChoiceId || ''
+  const bossHasAnswered = Boolean(bossSavedAnswer || pendingChoiceId)
+  const bossAnswerWasCorrect = Boolean(bossSelectedChoiceId && bossSelectedChoiceId === bossQuestion?.correctChoiceId)
 
   // Y is the full locked roster (disconnected members included, since it's membership-based
   // not connection-based); X counts progress entries for the room's *current* questionId AND
@@ -62,21 +91,44 @@ export const GamePage = () => {
   const teamAnsweredCount = room && questionId
     ? progressState.data.filter((entry) => entry.questionId === questionId && entry.currentRound === room.currentRound).length
     : 0
-  const activationWindow = room ? getMagicActivationWindow(room, now) : { valid: false, affectedQuestionIndex: null }
-  const canActivateMagicNow = Boolean(room && room.status === 'playing' && timeExpired && revealRemainingMs > 0)
+  // Milestone 2.2/4: activation is available for the whole lifecycle of the current question
+  // (answering or reveal) — no longer gated on timeExpired/revealRemainingMs. getMagicActivationWindow
+  // is deliberately boss-phase-unaware (see lib/magic.ts), so phase === 'main' is checked here too.
+  const activationWindow = room ? getMagicActivationWindow(room) : { valid: false, affectedQuestionIndex: null }
+  const canActivateMagicNow = activationWindow.valid && room?.phase === 'main'
+
+  // Milestone 4 section 3: the post-reveal raw/magic/competition breakdown for the question
+  // that JUST resolved — persisted server-side onto the team's magic doc (see
+  // TeamMagicBreakdown's doc comment in types/game.ts for why students can't compute this
+  // themselves). Shown only while it actually matches the question that just closed.
+  const breakdown = magicState.data?.lastResolvedBreakdown
+  const showBreakdown = Boolean(!isBossPhase && breakdown && breakdown.questionIndex === questionIndex && timeExpired)
 
   useEffect(() => {
     if (room?.status !== 'playing') return
     setNow(Date.now())
     const intervalId = window.setInterval(() => setNow(Date.now()), 250)
     return () => window.clearInterval(intervalId)
-  }, [room?.status, room?.questionStartedAt])
+  }, [room?.status, room?.questionStartedAt, room?.bossQuestionStartedAt])
 
   useEffect(() => {
     setPendingChoiceId('')
     setError('')
     setSaving(false)
-  }, [questionId])
+  }, [questionId, bossQuestionId])
+
+  // Milestone 4: "announce the winner and reward on every screen" — a one-time banner shown to
+  // every student the moment the boss phase resolves, deduped per round via sessionStorage so
+  // it never reappears on a same-tab refresh (see services/sessionStorage.ts).
+  const [bossWinnerBanner, setBossWinnerBanner] = useState<BossWinner | null>(null)
+  useEffect(() => {
+    if (!room?.bossCompleted || !room.bossWinner) return
+    if (hasShownBossWinnerBanner(normalizedCode, room.currentRound)) return
+    markBossWinnerBannerShown(normalizedCode, room.currentRound)
+    setBossWinnerBanner(room.bossWinner)
+    const timeoutId = window.setTimeout(() => setBossWinnerBanner(null), 6_000)
+    return () => window.clearTimeout(timeoutId)
+  }, [room?.bossCompleted, room?.bossWinner, room?.currentRound, normalizedCode])
 
   useEffect(() => {
     if (!room || !player) return
@@ -90,6 +142,11 @@ export const GamePage = () => {
     const labels = { basic: 'พื้นฐานเรื่อง', characters: 'ตัวละคร', plot: 'เนื้อเรื่อง', poetry: 'วรรณศิลป์', theme: 'แก่นเรื่อง' }
     return question ? labels[question.category] : ''
   }, [question])
+
+  const bossCategoryLabel = useMemo(() => {
+    const labels = { basic: 'พื้นฐานเรื่อง', characters: 'ตัวละคร', plot: 'เนื้อเรื่อง', poetry: 'วรรณศิลป์', theme: 'แก่นเรื่อง' }
+    return bossQuestion ? labels[bossQuestion.category] : ''
+  }, [bossQuestion])
 
   const answerQuestion = async (choiceId: string): Promise<void> => {
     if (!room || !player || !question || areAnswersLocked(saving, timeExpired) || selectedChoiceId === choiceId) return
@@ -110,8 +167,37 @@ export const GamePage = () => {
     }
   }
 
+  const answerBossQuestion = async (choiceId: string): Promise<void> => {
+    if (!room || !player || !bossQuestion || areAnswersLocked(saving, bossTimeExpired) || bossSelectedChoiceId === choiceId) return
+    setSaving(true)
+    setError('')
+    setPendingChoiceId(choiceId)
+    try {
+      await service.saveBossAnswer(normalizedCode, player.id, {
+        questionId: bossQuestion.id,
+        selectedChoiceId: choiceId,
+        expectedBossIndex: room.bossQuestionIndex,
+      })
+    } catch (reason) {
+      setError(friendlyError(reason))
+      setPendingChoiceId('')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <ScenePage compact>
+      {bossWinnerBanner ? (
+        <div className="magic-toast-stack" aria-live="assertive">
+          <div className="magic-toast magic-toast-winner">
+            <span className="magic-toast-icon" aria-hidden="true">🏆</span>
+            <p>
+              {`🏆 ผู้พิชิตด่านชิงมนตรา\n${bossWinnerBanner.displayName} จากทีม${bossWinnerBanner.teamName ?? ''}\nตอบถูก ${bossWinnerBanner.correctCount}/3 ใช้เวลา ${(bossWinnerBanner.totalTimeMs / 1_000).toFixed(2)} วินาที\nทีมได้รับ ${BOSS_REWARD_ICONS[bossWinnerBanner.rewardItemType]} ${MAGIC_ITEM_INFO[bossWinnerBanner.rewardItemType].label}เพิ่ม 1 ครั้ง`}
+            </p>
+          </div>
+        </div>
+      ) : null}
       <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] sm:px-7">
         {roomState.loading || playerState.loading ? (
           <LoadingPanel text="กำลังนำคำถามกลับมา..." />
@@ -121,6 +207,57 @@ export const GamePage = () => {
           <ErrorPanel message={roomState.error || playerState.error || 'ไม่พบข้อมูลห้องหรือข้อมูลผู้เล่นของคุณ'} action={<Link className="primary-button w-full" to="/join">กลับหน้าเข้าร่วม</Link>} />
         ) : room.status === 'completed' ? (
           <LoadingPanel text="กำลังสรุปคะแนน..." />
+        ) : isBossPhase ? (
+          !bossQuestion ? (
+            <LoadingPanel text="กำลังเรียกด่านชิงมนตรา..." />
+          ) : (
+            <>
+              <header className="game-header">
+                <div className="min-w-0"><p className="text-xs text-[#aaa298]">ผู้เล่น</p><strong className="block truncate text-[#fff7df]">{player.displayName}</strong><small className="block truncate text-[#c0b7ab]">{assignedTeam?.name ?? 'ยังไม่ได้จัดทีม'}</small></div>
+                <div className="text-right"><p className="text-xs text-[#aaa298]">ศึกด่านชิงมนตรา</p><strong className={`question-timer ${bossRemainingMs <= 3_000 ? 'question-timer-urgent' : ''}`}>{bossTimeExpired ? 'หมดเวลา' : formatCountdown(bossRemainingMs)}</strong></div>
+              </header>
+
+              <section className="mt-4" aria-label={`ด่านชิงมนตรา ข้อ ${room.bossQuestionIndex + 1} จาก 3 ข้อ`}>
+                <div className="mb-2 flex justify-between text-sm"><span className="text-[#f2d58d]">✦ ศึกด่านชิงมนตรา — ข้อที่ {room.bossQuestionIndex + 1} จาก 3</span><span className="text-[#c9a55f]">ไม่กระทบคะแนนความรู้</span></div>
+                <div className="progress-track"><div className="progress-fill" style={{ width: `${((room.bossQuestionIndex + 1) / 3) * 100}%` }} /></div>
+              </section>
+
+              <section className={`question-card mt-5 ${bossHasAnswered ? 'answer-saved' : ''}`}>
+                <div className="flex items-center justify-between gap-3"><span className="category-chip">{bossCategoryLabel}</span><span className="text-sm text-[#aaa298]">ตอบได้ครั้งเดียวจนกว่าจะหมดเวลา</span></div>
+                <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{bossQuestion.question}</h1>
+                <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                  {bossQuestion.choices.map((choice, index) => (
+                    <button
+                      key={choice.id}
+                      className={`choice-button ${bossSelectedChoiceId === choice.id ? 'choice-selected' : ''} ${bossTimeExpired && bossSelectedChoiceId === choice.id ? bossAnswerWasCorrect ? 'choice-result-correct' : 'choice-result-wrong' : ''}`}
+                      type="button"
+                      onClick={() => void answerBossQuestion(choice.id)}
+                      disabled={areAnswersLocked(saving, bossTimeExpired)}
+                    >
+                      <span>{['ก', 'ข', 'ค', 'ง'][index]}</span><strong>{choice.text}</strong>
+                    </button>
+                  ))}
+                </div>
+                <div className="feedback-region mt-5" aria-live="assertive">
+                  {error ? <p className="error-message">{error}</p> : bossTimeExpired ? bossSelectedChoiceId ? (
+                    <div className={bossAnswerWasCorrect ? 'answer-result-correct' : 'answer-result-wrong'}>
+                      <strong>{bossAnswerWasCorrect ? '✓ ตอบถูก' : '✕ ตอบผิด'}</strong>
+                      <span>เวลาที่ใช้ {((bossSavedAnswer?.responseTimeMs ?? 0) / 1_000).toFixed(2)} วินาที</span>
+                      <small>{bossRevealRemainingMs > 0 ? `ไปข้อถัดไปใน ${Math.ceil(bossRevealRemainingMs / 1_000)} วินาที` : 'กำลังไปข้อถัดไป'}</small>
+                    </div>
+                  ) : (
+                    <div className="answer-result-missed"><strong>ไม่ได้ตอบภายในเวลา</strong></div>
+                  ) : saving ? (
+                    <p>กำลังบันทึกคำตอบ...</p>
+                  ) : bossHasAnswered ? (
+                    <p className="answer-waiting"><span aria-hidden="true">✓</span> บันทึกแล้ว</p>
+                  ) : null}
+                </div>
+              </section>
+
+              <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">ผลของด่านชิงมนตราจะไม่ถูกเปิดเผยจนกว่าจะจบทั้ง 3 ข้อ อันดับระหว่างทางจะไม่แสดงให้เห็น</p>
+            </>
+          )
         ) : !question ? (
           <ErrorPanel message="ไม่พบคำถามของรอบนี้ กรุณาแจ้งครูผู้ควบคุมกิจกรรม" />
         ) : (
@@ -154,12 +291,12 @@ export const GamePage = () => {
               <div className="feedback-region mt-5" aria-live="assertive">
                 {error ? <p className="error-message">{error}</p> : timeExpired ? selectedChoiceId ? (
                   <div className={answerWasCorrect ? 'answer-result-correct' : 'answer-result-wrong'}>
-                    <strong>{answerWasCorrect ? '✓ ตอบถูก +1 คะแนน' : '✕ ตอบผิด'}</strong>
-                    <span>คะแนนสะสมของคุณ {player.score}/10</span>
+                    <strong>{answerWasCorrect ? '✓ ตอบถูก +10 คะแนน' : '✕ ตอบผิด'}</strong>
+                    <span>คะแนนความรู้สะสมของคุณ {knowledgeScore100}/100</span>
                     <small>{revealRemainingMs > 0 ? `ไปข้อถัดไปใน ${Math.ceil(revealRemainingMs / 1_000)} วินาที` : 'กำลังไปคำถามข้อถัดไป'}</small>
                   </div>
                 ) : (
-                  <div className="answer-result-missed"><strong>ไม่ได้ตอบภายในเวลา</strong><span>คะแนนสะสมของคุณ {player.score}/10</span></div>
+                  <div className="answer-result-missed"><strong>ไม่ได้ตอบภายในเวลา</strong><span>คะแนนความรู้สะสมของคุณ {knowledgeScore100}/100</span></div>
                 ) : saving ? (
                   <p>กำลังบันทึกคำตอบ...</p>
                 ) : hasAnswered ? (
@@ -167,6 +304,17 @@ export const GamePage = () => {
                 ) : null}
               </div>
             </section>
+
+            {showBreakdown && breakdown ? (
+              <section className="glass-panel mt-4 p-4 text-sm" aria-live="polite">
+                <p className="eyebrow">สรุปคะแนนทีมข้อนี้</p>
+                <dl className="mt-2 grid grid-cols-3 gap-2 text-center">
+                  <div><dt className="text-xs text-[#aaa298]">คะแนนดิบทีม</dt><dd className="mt-1 text-lg font-semibold text-[#fff7df]">{breakdown.rawScore.toFixed(1)}</dd></div>
+                  <div><dt className="text-xs text-[#aaa298]">มนตรา</dt><dd className="mt-1 text-lg font-semibold text-[#f2d58d]">{formatMultiplier(breakdown.ownMultiplier)} / {formatMultiplier(breakdown.hostileMultiplier)}</dd></div>
+                  <div><dt className="text-xs text-[#aaa298]">คะแนนแข่งขัน</dt><dd className="mt-1 text-lg font-semibold text-[#9ee6b4]">{breakdown.competitionScore.toFixed(1)}</dd></div>
+                </dl>
+              </section>
+            ) : null}
 
             {rosterState.data ? (
               <section className="mt-4 text-center text-sm text-[#c9a55f]" aria-live="polite">
@@ -176,7 +324,7 @@ export const GamePage = () => {
               </section>
             ) : null}
 
-            <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">เมื่อหมดเวลา ระบบจะแสดงว่าตอบถูกหรือผิดพร้อมคะแนนสะสมของคุณ แล้วทุกคนจึงเปลี่ยนข้อพร้อมกัน คำตอบของคุณเป็นความลับ เพื่อนร่วมทีมไม่เห็นคำตอบของคุณ</p>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">เมื่อหมดเวลา ระบบจะแสดงว่าตอบถูกหรือผิดพร้อมคะแนนความรู้สะสมของคุณ แล้วทุกคนจึงเปลี่ยนข้อพร้อมกัน คำตอบของคุณเป็นความลับ เพื่อนร่วมทีมไม่เห็นคำตอบของคุณ</p>
 
             {player.teamId ? (
               <MagicPanel
@@ -184,6 +332,10 @@ export const GamePage = () => {
                 magicLoading={magicState.loading}
                 teams={room.teams}
                 isHolder={magicState.data?.magicHolderPlayerId === player.id}
+                roomStatus={room.status}
+                roomCode={normalizedCode}
+                currentRound={room.currentRound}
+                events={magicEventsState.data}
                 canActivateNow={canActivateMagicNow}
                 affectedQuestionIndex={activationWindow.valid ? activationWindow.affectedQuestionIndex : null}
                 onChoose={(itemType) => service.chooseStartingItem(normalizedCode, player.teamId as string, player.id, itemType)}

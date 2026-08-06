@@ -5,7 +5,6 @@ import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
 import { useRoom, usePlayer, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
 import { resolveStudentRoute } from '../lib/game'
-import { getMagicActivationWindow } from '../lib/magic'
 import { getPlayerSession } from '../services/sessionStorage'
 
 export const LobbyPage = () => {
@@ -28,7 +27,6 @@ export const LobbyPage = () => {
 
   const room = roomState.data
   const player = playerState.data
-  const activationWindow = room ? getMagicActivationWindow(room) : { valid: false, affectedQuestionIndex: null }
 
   return (
     <ScenePage image="/images/hero-curse.png" imageAlt="กุหลาบของมัทนาที่ยังถูกพันธนาการ" imagePosition="50% 58%">
@@ -88,13 +86,20 @@ export const LobbyPage = () => {
             </section>
 
             {player.teamId ? (
+              // Milestone 2.2: activation is a status==='playing' concept only — the lobby only
+              // ever offers starting-item *selection*, never activation, so canActivateNow is
+              // always false here and affectedQuestionIndex is never applicable.
               <MagicPanel
                 magic={magicState.data}
                 magicLoading={magicState.loading}
                 teams={room.teams}
                 isHolder={magicState.data?.magicHolderPlayerId === player.id}
-                canActivateNow={room.status === 'waiting'}
-                affectedQuestionIndex={activationWindow.valid ? activationWindow.affectedQuestionIndex : null}
+                roomStatus={room.status}
+                roomCode={normalizedCode}
+                currentRound={room.currentRound}
+                events={[]}
+                canActivateNow={false}
+                affectedQuestionIndex={null}
                 onChoose={(itemType) => service.chooseStartingItem(normalizedCode, player.teamId as string, player.id, itemType)}
                 onActivate={(itemType, targetTeamId) => service.activateItem(normalizedCode, player.teamId as string, player.id, itemType, targetTeamId)}
               />

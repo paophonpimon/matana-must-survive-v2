@@ -29,6 +29,18 @@ export interface AnswerRecord {
   responseTimeMs: number
 }
 
+// Milestone 4: boss-phase answers. Deliberately the same shape as AnswerRecord but a
+// completely separate array on Player — this is what makes "boss answers do not affect the
+// 100-point knowledge score" true by construction: nothing in the boss save path ever touches
+// player.answers or player.score, and nothing in the main scoring path ever reads bossAnswers.
+export interface BossAnswerRecord {
+  questionId: string
+  selectedChoiceId: string
+  isCorrect: boolean
+  answeredAt: number
+  responseTimeMs: number
+}
+
 export interface Winner {
   teamId: string
   teamName: string
@@ -39,10 +51,41 @@ export interface Winner {
   round: number
 }
 
+// Milestone 4: denormalized onto Room (like Winner above) rather than left as a bare
+// playerId — once teams are locked, a student can only `get` their OWN player doc under
+// firestore.rules (no `list`, no arbitrary-id `get`), so there is no rules-legal way for a
+// student's client to resolve an opposing team's winner's displayName/teamName from a bare id.
+// Room itself is broadly readable, so storing the announcement fields directly here is what
+// makes "announce the winner and reward on every screen" actually implementable for students.
+export interface BossWinner {
+  playerId: string
+  displayName: string
+  studentNumber: string
+  teamId: string | null
+  teamName: string | null
+  correctCount: number
+  totalTimeMs: number
+  rewardItemType: MagicItemType
+}
+
 export interface TeamMeta {
   id: string
   name: string
 }
+
+// Milestone 4: 'main' is the normal 10-question flow; 'boss' is the 3-question
+// "ศึกด่านชิงมนตรา" side-phase inserted between main question 5 and main question 6.
+// room.status stays 'playing' throughout both — phase only distinguishes which question
+// pool/timer fields are currently live, so every existing status==='playing' gate (magic
+// activation eligibility, broadcast mode, saveAnswer, etc.) keeps working unchanged for boss
+// too, without needing a new RoomStatus value threaded through the whole codebase.
+export type GamePhase = 'main' | 'boss'
+
+export const BOSS_QUESTION_COUNT = 3
+export const DEFAULT_BOSS_QUESTION_DURATION_SECONDS = 10
+// Boss is inserted after finishing this main question index (0-based) — "before main question
+// 6" means after question 5 (index 4).
+export const BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX = 4
 
 export interface Room {
   roomCode: string
@@ -54,6 +97,12 @@ export interface Room {
   currentQuestionIndex: number
   questionDurationSeconds: number
   questionStartedAt: number | null
+  // Milestone 2.2: set by the teacher's "ปิดรับคำตอบและเฉลยทันที" early-close action. When set,
+  // it overrides the normal questionStartedAt + questionDurationSeconds deadline as the
+  // effective deadline (see lib/gameFlow.ts's getQuestionDeadline) — answers lock immediately,
+  // reveal begins immediately, and the reveal countdown runs from this timestamp instead. Reset
+  // to null whenever a question starts or the room advances to the next one.
+  questionClosedAt: number | null
   questionIds: string[]
   previousQuestionIds: string[]
   winner: Winner | null
@@ -61,6 +110,19 @@ export interface Room {
   teamCount: number
   teamsLocked: boolean
   teams: TeamMeta[]
+  // Milestone 4: boss-phase state. bossQuestionIds/bossQuestionIndex/bossQuestionStartedAt
+  // mirror questionIds/currentQuestionIndex/questionStartedAt so the SAME gameFlow.ts timer
+  // helpers apply to boss questions unchanged (reusing the synchronized question/timer
+  // architecture literally, not just conceptually). bossCompleted is the round-scoped
+  // idempotency guard for ranking+reward resolution — set exactly once, on the transaction that
+  // resolves the 3rd boss question, and reset to false on every new round.
+  phase: GamePhase
+  bossQuestionIds: string[]
+  bossQuestionIndex: number
+  bossQuestionStartedAt: number | null
+  bossQuestionDurationSeconds: number
+  bossCompleted: boolean
+  bossWinner: BossWinner | null
 }
 
 export interface Player {
@@ -71,8 +133,14 @@ export interface Player {
   joinedAt: number
   currentRound: number
   currentQuestionIndex: number
+  // Raw correct-answer count out of 10 (unchanged Milestone 1 format — never rescaled in
+  // storage). Every "X/100 knowledge score" display multiplies this by 10 at render time only,
+  // so every existing rule/bound (score <= 10) and computation keeps working unchanged.
   score: number
   answers: AnswerRecord[]
+  // Milestone 4: boss-phase answers, round-scoped (reset to [] on every new round). Never read
+  // by knowledge-score or competition-score computations.
+  bossAnswers: BossAnswerRecord[]
   submitted: boolean
   finishedAt: number | null
   elapsedMs: number | null
@@ -110,18 +178,31 @@ export type Unsubscribe = () => void
 // Milestone 2: team magic items. These affect only the competition score shown on the
 // teacher leaderboard — never player.score, answer.isCorrect, or any individual record.
 export type MagicItemType = 'power_surge' | 'score_seal' | 'rose_shield'
-// power_surge  = มนตร์ทวีพลัง (own team, next eligible question: x1.5)
-// score_seal   = มนตร์ผนึกคะแนน (chosen opponent, next eligible question: x0.5)
-// rose_shield  = เกราะกุหลาบ (passive: blocks + consumes one incoming score_seal)
+// power_surge  = มนตร์ทวีพลัง (own team, next eligible question: x2 — Milestone 4)
+// score_seal   = มนตร์ผนึกคะแนน (chosen opponent, next eligible question: x0.5, stacks multiplicatively)
+// rose_shield  = เกราะกุหลาบ (passive: blocks + consumes one incoming score_seal, one shield per seal)
 
 export type MagicEventStatus = 'queued' | 'applied' | 'blocked' | 'expired' | 'rejected'
 
-export interface MagicInventoryItem {
-  itemType: MagicItemType
-  acquiredAt: number
-  consumed: boolean
-  consumedAt: number | null
+// Milestone 4: counts, not individual instances. A team can now hold more than one of the same
+// item (the boss mini-game can award a duplicate), and `available`/`consumed` are plain counts
+// per item type rather than an array of {consumed: boolean} entries. This is also what makes
+// firestore.rules able to validate "does this team have an unconsumed item of type X" at all —
+// a fixed-shape map with a known field per item type is checkable with a direct field-path
+// comparison; an arbitrary-length array of instances is not expressible in the rules language
+// without an unbounded/unsound search.
+export interface MagicInventoryEntry {
+  available: number
+  consumed: number
 }
+
+export type MagicInventory = Record<MagicItemType, MagicInventoryEntry>
+
+export const createEmptyMagicInventory = (): MagicInventory => ({
+  power_surge: { available: 0, consumed: 0 },
+  score_seal: { available: 0, consumed: 0 },
+  rose_shield: { available: 0, consumed: 0 },
+})
 
 export interface QueuedMagicEffect {
   id: string
@@ -132,11 +213,30 @@ export interface QueuedMagicEffect {
   createdAt: number
 }
 
+// Milestone 4: "after reveal, show a clear calculation" (raw team score / magic multiplier /
+// competition score) must be visible to every team member, but a student can only ever `get`
+// their OWN player doc under firestore.rules (no `list`), so correctness can't be aggregated
+// across teammates client-side the way the teacher's dashboard already does. Persisting the
+// resolved breakdown here — on the team's own already-broadly-readable magic doc, reset to null
+// every round alongside inventory/queuedEffect — is what makes that requirement satisfiable
+// without granting students any new access to other players' individual answers/correctness.
+export interface TeamMagicBreakdown {
+  questionIndex: number
+  memberCount: number
+  correctCount: number
+  rawScore: number
+  ownMultiplier: number
+  sealCount: number
+  hostileMultiplier: number
+  competitionScore: number
+}
+
 export interface TeamMagicState {
   teamId: string
   magicHolderPlayerId: string | null
-  inventory: MagicInventoryItem[]
+  inventory: MagicInventory
   queuedEffect: QueuedMagicEffect | null
+  lastResolvedBreakdown: TeamMagicBreakdown | null
 }
 
 export interface MagicEvent {

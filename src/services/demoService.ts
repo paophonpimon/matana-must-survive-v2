@@ -1,15 +1,24 @@
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { getMagicActivationWindow, pickHolders } from '../lib/magic'
+import { getRemainingMilliseconds } from '../lib/gameFlow'
+import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
+import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickHolders } from '../lib/magic'
 import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
-import type { AnswerInput, AnswerResult, GameService } from './gameService'
+import type { AnswerInput, AnswerResult, BossAnswerInput, GameService } from './gameService'
+import {
+  BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
+  DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  createEmptyMagicInventory,
+} from '../types/game'
 import type {
   AnswerProgressEntry,
+  BossAnswerRecord,
   JoinInput,
   JoinResult,
   MagicEvent,
   MagicItemType,
   Player,
+  QueuedMagicEffect,
   Room,
   TeamMagicState,
   TeamRosterSummary,
@@ -29,7 +38,16 @@ interface DemoState {
   rooms: Record<string, DemoRoomState>
 }
 
-const STORAGE_KEY = 'matana_demo_state_v5'
+// Milestone 4: bumped from v5 — the magic inventory shape changed from an array of individual
+// item instances to a per-item-type count map (see types/game.ts's MagicInventory), and Room/
+// Player both gained new required fields (boss-phase state, bossAnswers). This is dev/demo data
+// only, so rather than writing array-to-map migration code, older saved state under the old key
+// is simply left alone and a fresh seed is created under the new key.
+// Exported (not just module-private) so tests can read/write the live demo state directly
+// without hardcoding a version string that silently goes stale — and stops matching what the
+// service actually reads — every time this key is bumped.
+export const DEMO_STORAGE_KEY = 'matana_demo_state_v6'
+const STORAGE_KEY = DEMO_STORAGE_KEY
 const UPDATE_EVENT = 'matana-demo-update'
 const DEMO_ROOM_CODE = 'MATANA'
 const SHARED_STATE_PATH = '/__matana_demo_state'
@@ -63,11 +81,27 @@ const createPlayer = (
   currentQuestionIndex: 0,
   score: 0,
   answers: [],
+  bossAnswers: [],
   submitted: false,
   finishedAt: null,
   elapsedMs: null,
   status: 'waiting',
   ownerUid,
+})
+
+// Shared by createSeedState and createRoom — the boss-phase fields a brand-new room always
+// starts with. Factored out so the two call sites can never drift on what "fresh" means.
+const createFreshBossFields = (): Pick<
+  Room,
+  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner'
+> => ({
+  phase: 'main',
+  bossQuestionIds: [],
+  bossQuestionIndex: 0,
+  bossQuestionStartedAt: null,
+  bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  bossCompleted: false,
+  bossWinner: null,
 })
 
 const createSeedState = (): DemoState => {
@@ -81,6 +115,8 @@ const createSeedState = (): DemoState => {
     currentQuestionIndex: 0,
     questionDurationSeconds: 30,
     questionStartedAt: null,
+    questionClosedAt: null,
+    ...createFreshBossFields(),
     questionIds: selectRoundQuestions(questions),
     previousQuestionIds: [],
     winner: null,
@@ -111,9 +147,21 @@ const normalizeState = (state: DemoState): DemoState => {
     room.currentQuestionIndex ??= 0
     room.questionDurationSeconds ??= 30
     room.questionStartedAt ??= room.status === 'playing' ? room.startedAt : null
+    // Milestone 2.2: older saved demo state won't have this field at all.
+    room.questionClosedAt ??= null
     room.teamCount ??= 0
     room.teamsLocked ??= false
     room.teams ??= []
+    // Milestone 4: defensive defaults in case a v6 room somehow predates one of these fields
+    // being added (STORAGE_KEY was already bumped for the inventory shape change, but this
+    // costs nothing and matches the established pattern for every prior field addition here).
+    room.phase ??= 'main'
+    room.bossQuestionIds ??= []
+    room.bossQuestionIndex ??= 0
+    room.bossQuestionStartedAt ??= null
+    room.bossQuestionDurationSeconds ??= DEFAULT_BOSS_QUESTION_DURATION_SECONDS
+    room.bossCompleted ??= false
+    room.bossWinner ??= null
     roomState.magic ??= {}
     roomState.magicEvents ??= []
     // Older saved demo state (before this migration) won't have these keys at all — default
@@ -126,6 +174,7 @@ const normalizeState = (state: DemoState): DemoState => {
     // silently treat them as `undefined`.
     roomState.magicEvents.forEach((event) => { event.round ??= 1 })
     Object.values(roomState.answerProgress).forEach((entry) => { entry.currentRound ??= 1 })
+    Object.values(roomState.players).forEach((player) => { player.bossAnswers ??= [] })
   })
   return state
 }
@@ -220,38 +269,64 @@ const listen = (callback: () => void): Unsubscribe => {
   }
 }
 
-const consumeInventoryItem = (magic: TeamMagicState, itemType: MagicItemType, now: number): void => {
-  const item = magic.inventory.find((entry) => entry.itemType === itemType && !entry.consumed)
-  if (item) {
-    item.consumed = true
-    item.consumedAt = now
+const consumeInventoryItem = (magic: TeamMagicState, itemType: MagicItemType): void => {
+  const entry = magic.inventory[itemType]
+  if (entry.available > 0) {
+    entry.available -= 1
+    entry.consumed += 1
   }
 }
 
 // Runs when leaving `resolvedQuestionIndex` (either advancing to the next question or
-// completing the round). For every team whose queuedEffect targeted that question: resolve it
-// against the current player answers, update the matching magicEvents record in place, and
-// clear the queued slot. Shields only ever block a hostile score_seal — never a team's own
-// power_surge — and a shield check never touches the source team's own item consumption.
+// completing the round). Milestone 4: multiple DIFFERENT teams may each have a score_seal
+// queued against the SAME target+question (stacking is now allowed — there is no longer an
+// "already targeted" restriction at activation time), so resolution is split into passes:
+// (1) clear every queued slot + consume each source team's own item regardless of outcome,
+// (2) power_surge always applies (a team's own buff is never blockable), (3) score_seals are
+// grouped by target team and resolved against that team's available shields — each available
+// shield blocks exactly one seal (consuming it); any seals beyond the available shield count
+// still apply. Sorted by sourceTeamId for deterministic (test-reproducible) shield-consumption
+// order — which specific seal ends up 'blocked' vs 'applied' depends on this order, but the
+// FINAL multiplier never does, since only the blocked-vs-applied COUNT matters there.
 const resolveQuestionMagic = (roomState: DemoRoomState, resolvedQuestionIndex: number, now: number): void => {
+  const effectsThisQuestion: Array<{ magic: TeamMagicState; effect: QueuedMagicEffect }> = []
   for (const team of roomState.room.teams) {
     const magic = roomState.magic[team.id]
     const effect = magic?.queuedEffect
     if (!magic || !effect || effect.affectedQuestionIndex !== resolvedQuestionIndex) continue
+    effectsThisQuestion.push({ magic, effect })
+  }
+  if (effectsThisQuestion.length === 0) return
+
+  for (const { magic, effect } of effectsThisQuestion) {
+    magic.queuedEffect = null
+    consumeInventoryItem(magic, effect.itemType)
+  }
+
+  for (const { effect } of effectsThisQuestion) {
+    if (effect.itemType !== 'power_surge') continue
     const event = roomState.magicEvents.find((item) => item.id === effect.id)
-    if (effect.itemType === 'power_surge') {
-      consumeInventoryItem(magic, 'power_surge', now)
-      if (event) {
-        event.status = 'applied'
-        event.resolvedAt = now
-      }
-    } else {
-      const targetMagic = roomState.magic[effect.targetTeamId]
-      const shieldItem = targetMagic?.inventory.find((item) => item.itemType === 'rose_shield' && !item.consumed)
-      consumeInventoryItem(magic, 'score_seal', now)
-      if (shieldItem) {
-        shieldItem.consumed = true
-        shieldItem.consumedAt = now
+    if (event) {
+      event.status = 'applied'
+      event.resolvedAt = now
+    }
+  }
+
+  const sealsByTarget = new Map<string, Array<{ effect: QueuedMagicEffect }>>()
+  for (const entry of effectsThisQuestion) {
+    if (entry.effect.itemType !== 'score_seal') continue
+    const list = sealsByTarget.get(entry.effect.targetTeamId) ?? []
+    list.push({ effect: entry.effect })
+    sealsByTarget.set(entry.effect.targetTeamId, list)
+  }
+  sealsByTarget.forEach((seals, targetTeamId) => {
+    const targetMagic = roomState.magic[targetTeamId]
+    const sorted = [...seals].sort((a, b) => a.effect.sourceTeamId.localeCompare(b.effect.sourceTeamId))
+    for (const { effect } of sorted) {
+      const event = roomState.magicEvents.find((item) => item.id === effect.id)
+      if (targetMagic && targetMagic.inventory.rose_shield.available > 0) {
+        targetMagic.inventory.rose_shield.available -= 1
+        targetMagic.inventory.rose_shield.consumed += 1
         if (event) {
           event.status = 'blocked'
           event.resolvedAt = now
@@ -261,8 +336,7 @@ const resolveQuestionMagic = (roomState: DemoRoomState, resolvedQuestionIndex: n
         event.resolvedAt = now
       }
     }
-    magic.queuedEffect = null
-  }
+  })
 }
 
 // Round reset (prepareNextRound/stopRound/closeRoom): any effect still 'queued' never got the
@@ -314,6 +388,8 @@ export class DemoGameService implements GameService {
       currentQuestionIndex: 0,
       questionDurationSeconds: 30,
       questionStartedAt: null,
+      questionClosedAt: null,
+      ...createFreshBossFields(),
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
       winner: null,
@@ -424,13 +500,14 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     if (!roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
-    const teamsWithoutStartingItem = roomState.room.teams.filter((team) => (roomState.magic[team.id]?.inventory.length ?? 0) === 0)
+    const teamsWithoutStartingItem = roomState.room.teams.filter((team) => !hasAnyMagicItem(roomState.magic[team.id]?.inventory ?? createEmptyMagicInventory()))
     if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
     roomState.room.status = 'playing'
     roomState.room.startedAt = Date.now()
     roomState.room.currentQuestionIndex = 0
     roomState.room.questionDurationSeconds = Math.max(5, Math.min(600, Math.round(questionDurationSeconds)))
     roomState.room.questionStartedAt = roomState.room.startedAt
+    roomState.room.questionClosedAt = null
     Object.values(roomState.players).forEach((player) => {
       player.status = 'playing'
     })
@@ -442,15 +519,54 @@ export class DemoGameService implements GameService {
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
-    if (roomState.room.status !== 'playing' || roomState.room.currentQuestionIndex !== expectedQuestionIndex) return
-    const nextQuestionIndex = expectedQuestionIndex + 1
+    // Milestone 4: phase !== 'main' guards against a stale/duplicate call landing WHILE the
+    // boss phase is in progress — currentQuestionIndex deliberately does not change during
+    // boss, so without this the index-match check alone would not catch a second call.
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'main' || roomState.room.currentQuestionIndex !== expectedQuestionIndex) return
     const now = Date.now()
     resolveQuestionMagic(roomState, expectedQuestionIndex, now)
+
+    // Milestone 4 section 3: persist every team's raw/magic/competition breakdown for the
+    // question just left — not just magic-touched teams — so every team member can see it
+    // (students can't compute this themselves; see TeamMagicBreakdown's doc comment in
+    // types/game.ts for why it has to be stored, not derived client-side).
+    const resolvedQuestionId = roomState.room.questionIds[expectedQuestionIndex]
+    if (resolvedQuestionId) {
+      const allPlayers = Object.values(roomState.players)
+      roomState.room.teams.forEach((team) => {
+        const magic = roomState.magic[team.id]
+        if (!magic) return
+        magic.lastResolvedBreakdown = computeTeamQuestionBreakdown(
+          allPlayers,
+          team,
+          resolvedQuestionId,
+          expectedQuestionIndex,
+          roomState.magicEvents,
+          roomState.room.currentRound,
+        )
+      })
+    }
+
+    if (expectedQuestionIndex === BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX && !roomState.room.bossCompleted) {
+      // "ศึกด่านชิงมนตรา" — inserted before main question 6, reusing the same synchronized
+      // question/timer architecture via bossQuestionIds/bossQuestionIndex/bossQuestionStartedAt.
+      // currentQuestionIndex stays at 4 for the duration; advanceBossQuestion is what eventually
+      // moves it to 5 once the 3rd boss question resolves.
+      roomState.room.phase = 'boss'
+      roomState.room.bossQuestionIds = selectBossQuestions(questions, roomState.room.questionIds)
+      roomState.room.bossQuestionIndex = 0
+      roomState.room.bossQuestionStartedAt = now
+      await writeState(state)
+      return
+    }
+
+    const nextQuestionIndex = expectedQuestionIndex + 1
     if (nextQuestionIndex >= roomState.room.questionIds.length) {
       roomState.room.status = 'completed'
       roomState.room.completedAt = now
       roomState.room.currentQuestionIndex = roomState.room.questionIds.length
       roomState.room.questionStartedAt = null
+      roomState.room.questionClosedAt = null
       Object.values(roomState.players).forEach((player) => {
         player.currentQuestionIndex = roomState.room.questionIds.length
         player.submitted = true
@@ -461,7 +577,125 @@ export class DemoGameService implements GameService {
     } else {
       roomState.room.currentQuestionIndex = nextQuestionIndex
       roomState.room.questionStartedAt = now
+      roomState.room.questionClosedAt = null
     }
+    await writeState(state)
+  }
+
+  // Milestone 4: parallel to saveAnswer, but writes to player.bossAnswers only — never
+  // player.answers/score, which is what makes "boss answers do not affect the 100-point
+  // knowledge score" true by construction. Uses the SAME getRemainingMilliseconds helper,
+  // fed a boss-shaped {questionStartedAt, questionDurationSeconds, questionClosedAt: null}
+  // object, so the deadline math is identical to the main flow's (boss has no early-close, so
+  // questionClosedAt is always null here).
+  async saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'boss') {
+      throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงศึกด่านชิงมนตรา')
+    }
+    if (roomState.room.bossQuestionIndex !== answer.expectedBossIndex) {
+      throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
+    }
+    const bossTiming = {
+      questionStartedAt: roomState.room.bossQuestionStartedAt,
+      questionDurationSeconds: roomState.room.bossQuestionDurationSeconds,
+      questionClosedAt: null,
+    }
+    if (!roomState.room.bossQuestionStartedAt || getRemainingMilliseconds(bossTiming, Date.now()) <= 0) {
+      throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+    }
+    if (roomState.room.bossQuestionIds[answer.expectedBossIndex] !== answer.questionId) {
+      throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
+    }
+    const question = questionsById.get(answer.questionId)
+    const evaluated = evaluateChoice(question, answer.selectedChoiceId)
+    if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+    const record: BossAnswerRecord = {
+      questionId: answer.questionId,
+      selectedChoiceId: answer.selectedChoiceId,
+      isCorrect: evaluated.isCorrect,
+      answeredAt: Date.now(),
+      responseTimeMs: Date.now() - (roomState.room.bossQuestionStartedAt ?? Date.now()),
+    }
+    const existingIndex = player.bossAnswers.findIndex((item) => item.questionId === answer.questionId)
+    if (existingIndex >= 0) player.bossAnswers[existingIndex] = record
+    else player.bossAnswers.push(record)
+    await writeState(state)
+  }
+
+  // Milestone 4: parallel to advanceQuestion, but for the 3-question boss phase. On the 3rd
+  // question, resolves ranking + reward exactly once (guarded by room.bossCompleted — a
+  // stale/duplicate call after the first successful resolution is a silent no-op, so a refresh
+  // or retry can never reroll the tie-break or award a second item), then returns the room to
+  // phase 'main' at the question right after where boss was triggered.
+  async advanceBossQuestion(roomCode: string, teacherSessionId: string, expectedBossIndex: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'boss' || roomState.room.bossQuestionIndex !== expectedBossIndex) return
+    const now = Date.now()
+    const nextBossIndex = expectedBossIndex + 1
+
+    if (nextBossIndex >= roomState.room.bossQuestionIds.length) {
+      if (!roomState.room.bossCompleted) {
+        const ranking = computeBossRanking(Object.values(roomState.players), roomState.room.bossQuestionIds, roomState.room.bossQuestionDurationSeconds)
+        if (ranking.winner) {
+          const winnerPlayer = roomState.players[ranking.winner.playerId]
+          const magic = winnerPlayer?.teamId ? roomState.magic[winnerPlayer.teamId] : undefined
+          const rewardItemType = pickRandomMagicItem()
+          if (magic) magic.inventory[rewardItemType].available += 1
+          // Denormalized onto the room (not just a bare playerId) — see BossWinner's doc
+          // comment in types/game.ts for why: a student can't look up an opposing team's
+          // player doc by id once teams are locked, so the announcement fields have to live
+          // somewhere already broadly readable.
+          roomState.room.bossWinner = {
+            playerId: ranking.winner.playerId,
+            displayName: ranking.winner.displayName,
+            studentNumber: ranking.winner.studentNumber,
+            teamId: ranking.winner.teamId,
+            teamName: roomState.room.teams.find((team) => team.id === ranking.winner?.teamId)?.name ?? null,
+            correctCount: ranking.winner.correctCount,
+            totalTimeMs: ranking.winner.totalTimeMs,
+            rewardItemType,
+          }
+        }
+        roomState.room.bossCompleted = true
+      }
+      roomState.room.phase = 'main'
+      roomState.room.currentQuestionIndex = BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1
+      roomState.room.questionStartedAt = now
+      roomState.room.questionClosedAt = null
+    } else {
+      roomState.room.bossQuestionIndex = nextBossIndex
+      roomState.room.bossQuestionStartedAt = now
+    }
+    await writeState(state)
+  }
+
+  // Milestone 2.2: transactional (single-writeState, all-or-nothing like every other demo
+  // mutation) early-close — the teacher may cut answering short once everyone currently
+  // registered has answered. Setting questionClosedAt is what makes getQuestionDeadline (and
+  // therefore every timer derived from it, on both the teacher and student side) treat the
+  // question as over immediately: answers lock, reveal begins, and the reveal countdown runs
+  // from this timestamp instead of the original deadline. Guarded exactly like advanceQuestion
+  // (status + expectedQuestionIndex) so a stale/duplicate click is a silent no-op, and
+  // additionally guarded on questionClosedAt already being set so a second click can never
+  // "re-close" (and therefore never re-run the all-answered check against changed state).
+  async closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'playing' || roomState.room.currentQuestionIndex !== expectedQuestionIndex) return
+    if (roomState.room.questionClosedAt != null) return
+    const questionId = roomState.room.questionIds[expectedQuestionIndex]
+    const allAnswered = Object.values(roomState.players).every((player) => player.answers.some((answer) => answer.questionId === questionId))
+    if (!allAnswered) throw new Error('ผู้ใช้:ยังมีผู้เล่นบางคนยังไม่ได้ตอบคำถามข้อนี้')
+    roomState.room.questionClosedAt = Date.now()
     await writeState(state)
   }
 
@@ -481,6 +715,10 @@ export class DemoGameService implements GameService {
       completedAt: null,
       currentQuestionIndex: 0,
       questionStartedAt: null,
+      questionClosedAt: null,
+      // Milestone 4: a new round starts with a clean boss/magic state — bossCompleted resets
+      // so the boss phase can trigger again after main question 5 this round.
+      ...createFreshBossFields(),
       previousQuestionIds,
       questionIds: selectRoundQuestions(questions, previousQuestionIds),
       winner: null,
@@ -491,6 +729,7 @@ export class DemoGameService implements GameService {
         currentQuestionIndex: 0,
         score: 0,
         answers: [],
+        bossAnswers: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -502,7 +741,7 @@ export class DemoGameService implements GameService {
     // starting-item choice as happening fresh each time "before the teacher starts the game".
     // The holder itself is untouched — only a fresh lockTeams re-picks holders.
     expireQueuedEffects(roomState, Date.now())
-    Object.values(roomState.magic).forEach((magic) => { magic.inventory = [] })
+    Object.values(roomState.magic).forEach((magic) => { magic.inventory = createEmptyMagicInventory(); magic.lastResolvedBreakdown = null })
     await writeState(state)
   }
 
@@ -522,6 +761,10 @@ export class DemoGameService implements GameService {
       completedAt: null,
       currentQuestionIndex: 0,
       questionStartedAt: null,
+      questionClosedAt: null,
+      // Milestone 4: a new round starts with a clean boss/magic state — bossCompleted resets
+      // so the boss phase can trigger again after main question 5 this round.
+      ...createFreshBossFields(),
       previousQuestionIds,
       questionIds: selectRoundQuestions(questions, previousQuestionIds),
       winner: null,
@@ -532,6 +775,7 @@ export class DemoGameService implements GameService {
         currentQuestionIndex: 0,
         score: 0,
         answers: [],
+        bossAnswers: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -539,7 +783,7 @@ export class DemoGameService implements GameService {
       })
     })
     expireQueuedEffects(roomState, Date.now())
-    Object.values(roomState.magic).forEach((magic) => { magic.inventory = [] })
+    Object.values(roomState.magic).forEach((magic) => { magic.inventory = createEmptyMagicInventory(); magic.lastResolvedBreakdown = null })
     await writeState(state)
   }
 
@@ -629,8 +873,9 @@ export class DemoGameService implements GameService {
       latestRoomState.magic[team.id] = {
         teamId: team.id,
         magicHolderPlayerId: holders[team.id] ?? null,
-        inventory: [],
+        inventory: createEmptyMagicInventory(),
         queuedEffect: null,
+        lastResolvedBreakdown: null,
       }
     })
     await writeState(latestState)
@@ -654,8 +899,12 @@ export class DemoGameService implements GameService {
     if (roomState.room.status === 'completed') throw new Error('ผู้ใช้:ภารกิจรอบนี้สิ้นสุดแล้ว')
     if (roomState.room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจยังไม่เริ่มหรือสิ้นสุดแล้ว')
     if (player.submitted || roomState.room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
-    const deadline = (roomState.room.questionStartedAt ?? 0) + roomState.room.questionDurationSeconds * 1_000
-    if (!roomState.room.questionStartedAt || Date.now() >= deadline) throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+    // getRemainingMilliseconds (not manual deadline math) so a teacher's early close
+    // (questionClosedAt) is honored here too — otherwise a late/slow client could still submit
+    // an answer up until the ORIGINAL deadline even after the teacher closed the question early.
+    if (!roomState.room.questionStartedAt || getRemainingMilliseconds(roomState.room, Date.now()) <= 0) {
+      throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+    }
     if (roomState.room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
     }
@@ -707,8 +956,8 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting' || !roomState.room.teamsLocked) {
       throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
     }
-    if (magic.inventory.length > 0) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
-    magic.inventory = [{ itemType, acquiredAt: Date.now(), consumed: false, consumedAt: null }]
+    if (hasAnyMagicItem(magic.inventory)) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
+    magic.inventory[itemType].available += 1
     await writeState(state)
   }
 
@@ -725,6 +974,10 @@ export class DemoGameService implements GameService {
     const magic = roomState.magic[teamId]
     if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
     if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+    // Milestone 4: magic is a main-phase-only concept — the boss mini-game has its own,
+    // separate 3-question flow, and status stays 'playing' throughout both, so this check is
+    // what actually prevents activation from leaking into the boss phase.
+    if (roomState.room.phase !== 'main') throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
 
     const window = getMagicActivationWindow(roomState.room)
     if (!window.valid || window.affectedQuestionIndex == null) {
@@ -732,8 +985,7 @@ export class DemoGameService implements GameService {
     }
     const affectedQuestionIndex = window.affectedQuestionIndex
 
-    const inventoryItem = magic.inventory.find((item) => item.itemType === itemType && !item.consumed)
-    if (!inventoryItem) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
+    if (magic.inventory[itemType].available <= 0) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
 
     const resolvedTargetTeamId = itemType === 'power_surge' ? teamId : targetTeamId
     const now = Date.now()
@@ -778,16 +1030,9 @@ export class DemoGameService implements GameService {
         await writeState(state)
         throw new Error('ผู้ใช้:ไม่พบทีมเป้าหมาย')
       }
-      const alreadyTargeted = Object.values(roomState.magic).some((otherMagic) =>
-        otherMagic.queuedEffect?.itemType === 'score_seal'
-        && otherMagic.queuedEffect.targetTeamId === targetTeamId
-        && otherMagic.queuedEffect.affectedQuestionIndex === affectedQuestionIndex,
-      )
-      if (alreadyTargeted) {
-        rejectEvent()
-        await writeState(state)
-        throw new Error('ผู้ใช้:ทีมเป้าหมายถูกใช้ไอเทมฝ่ายตรงข้ามในข้อนี้ไปแล้ว')
-      }
+      // Milestone 4: multiple teams may seal the same target — seals stack multiplicatively
+      // (see computeHostileMultiplier in lib/magic.ts), so there is no longer an
+      // "already targeted" rejection here.
     }
 
     const effectId = `magic-${createId()}`

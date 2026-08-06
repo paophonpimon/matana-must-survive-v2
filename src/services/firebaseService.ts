@@ -18,22 +18,32 @@ import {
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { getMagicActivationWindow, pickHolders } from '../lib/magic'
+import { getRemainingMilliseconds } from '../lib/gameFlow'
+import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
+import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickHolders } from '../lib/magic'
 import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
-import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type GameService } from './gameService'
+import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService } from './gameService'
+import {
+  BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
+  DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  createEmptyMagicInventory,
+} from '../types/game'
 import type {
   AnswerProgressEntry,
   AnswerRecord,
+  BossAnswerRecord,
+  BossWinner,
   JoinInput,
   JoinResult,
   MagicEvent,
   MagicEventStatus,
-  MagicInventoryItem,
+  MagicInventory,
   MagicItemType,
   Player,
   QueuedMagicEffect,
   Room,
+  TeamMagicBreakdown,
   TeamMagicState,
   TeamMeta,
   TeamRosterSummary,
@@ -58,6 +68,21 @@ const toMillis = (value: unknown): number | null => {
   if (typeof value === 'number') return value
   if (value && typeof (value as Timestamp).toMillis === 'function') return (value as Timestamp).toMillis()
   return null
+}
+
+const mapBossWinner = (value: unknown): BossWinner | null => {
+  if (!value || typeof value !== 'object') return null
+  const winner = value as Record<string, unknown>
+  return {
+    playerId: String(winner.playerId ?? ''),
+    displayName: String(winner.displayName ?? ''),
+    studentNumber: String(winner.studentNumber ?? ''),
+    teamId: winner.teamId == null ? null : String(winner.teamId),
+    teamName: winner.teamName == null ? null : String(winner.teamName),
+    correctCount: Number(winner.correctCount ?? 0),
+    totalTimeMs: Number(winner.totalTimeMs ?? 0),
+    rewardItemType: winner.rewardItemType as MagicItemType,
+  }
 }
 
 const mapWinner = (value: unknown): Winner | null => {
@@ -89,6 +114,7 @@ const mapRoom = (data: DocumentData): Room => ({
   currentQuestionIndex: Number(data.currentQuestionIndex ?? 0),
   questionDurationSeconds: Number(data.questionDurationSeconds ?? 30),
   questionStartedAt: toMillis(data.questionStartedAt),
+  questionClosedAt: toMillis(data.questionClosedAt),
   questionIds: Array.isArray(data.questionIds) ? data.questionIds.map(String) : [],
   previousQuestionIds: Array.isArray(data.previousQuestionIds) ? data.previousQuestionIds.map(String) : [],
   winner: mapWinner(data.winner),
@@ -96,6 +122,22 @@ const mapRoom = (data: DocumentData): Room => ({
   teamCount: Number(data.teamCount ?? 0),
   teamsLocked: Boolean(data.teamsLocked),
   teams: Array.isArray(data.teams) ? data.teams.map(mapTeamMeta) : [],
+  phase: data.phase === 'boss' ? 'boss' : 'main',
+  bossQuestionIds: Array.isArray(data.bossQuestionIds) ? data.bossQuestionIds.map(String) : [],
+  bossQuestionIndex: Number(data.bossQuestionIndex ?? 0),
+  bossQuestionStartedAt: toMillis(data.bossQuestionStartedAt),
+  bossQuestionDurationSeconds: Number(data.bossQuestionDurationSeconds ?? DEFAULT_BOSS_QUESTION_DURATION_SECONDS),
+  bossCompleted: Boolean(data.bossCompleted),
+  bossWinner: mapBossWinner(data.bossWinner),
+})
+
+// Shared by player.answers and player.bossAnswers (Milestone 4) — identical shape.
+const mapAnswerRecordLike = (answer: Record<string, unknown>): AnswerRecord | BossAnswerRecord => ({
+  questionId: String(answer.questionId),
+  selectedChoiceId: String(answer.selectedChoiceId),
+  isCorrect: Boolean(answer.isCorrect),
+  answeredAt: toMillis(answer.answeredAt) ?? Number(answer.answeredAt ?? Date.now()),
+  responseTimeMs: Number(answer.responseTimeMs ?? 0),
 })
 
 const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): Player => {
@@ -109,15 +151,8 @@ const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string;
     currentRound: Number(data.currentRound ?? 1),
     currentQuestionIndex: Number(data.currentQuestionIndex ?? 0),
     score: Number(data.score ?? 0),
-    answers: Array.isArray(data.answers)
-      ? data.answers.map((answer: Record<string, unknown>) => ({
-          questionId: String(answer.questionId),
-          selectedChoiceId: String(answer.selectedChoiceId),
-          isCorrect: Boolean(answer.isCorrect),
-          answeredAt: toMillis(answer.answeredAt) ?? Number(answer.answeredAt ?? Date.now()),
-          responseTimeMs: Number(answer.responseTimeMs ?? 0),
-        }))
-      : [],
+    answers: Array.isArray(data.answers) ? data.answers.map(mapAnswerRecordLike) : [],
+    bossAnswers: Array.isArray(data.bossAnswers) ? data.bossAnswers.map(mapAnswerRecordLike) : [],
     submitted: Boolean(data.submitted),
     finishedAt: toMillis(data.finishedAt),
     elapsedMs: data.elapsedMs == null ? null : Number(data.elapsedMs),
@@ -138,14 +173,21 @@ const stablePlayerId = (studentNumber: string): string => {
 const createMagicId = (): string =>
   typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 
-const mapMagicInventoryItem = (value: unknown): MagicInventoryItem => {
-  const item = (value ?? {}) as Record<string, unknown>
-  return {
-    itemType: item.itemType as MagicItemType,
-    acquiredAt: Number(item.acquiredAt ?? 0),
-    consumed: Boolean(item.consumed),
-    consumedAt: item.consumedAt == null ? null : Number(item.consumedAt),
-  }
+// Milestone 4: inventory is a fixed-shape count map, not an array of instances — see
+// types/game.ts's MagicInventory for why (mainly: firestore.rules can only validate a
+// fixed-path field, not an unbounded array search).
+const mapMagicInventory = (value: unknown): MagicInventory => {
+  const raw = (value ?? {}) as Record<string, { available?: unknown; consumed?: unknown } | undefined>
+  const empty = createEmptyMagicInventory()
+  const result = createEmptyMagicInventory()
+  ;(Object.keys(empty) as MagicItemType[]).forEach((itemType) => {
+    const entry = raw[itemType]
+    result[itemType] = {
+      available: Number(entry?.available ?? 0),
+      consumed: Number(entry?.consumed ?? 0),
+    }
+  })
+  return result
 }
 
 const mapQueuedMagicEffect = (value: unknown): QueuedMagicEffect | null => {
@@ -161,13 +203,29 @@ const mapQueuedMagicEffect = (value: unknown): QueuedMagicEffect | null => {
   }
 }
 
+const mapTeamMagicBreakdown = (value: unknown): TeamMagicBreakdown | null => {
+  if (!value || typeof value !== 'object') return null
+  const breakdown = value as Record<string, unknown>
+  return {
+    questionIndex: Number(breakdown.questionIndex ?? 0),
+    memberCount: Number(breakdown.memberCount ?? 0),
+    correctCount: Number(breakdown.correctCount ?? 0),
+    rawScore: Number(breakdown.rawScore ?? 0),
+    ownMultiplier: Number(breakdown.ownMultiplier ?? 1),
+    sealCount: Number(breakdown.sealCount ?? 0),
+    hostileMultiplier: Number(breakdown.hostileMultiplier ?? 1),
+    competitionScore: Number(breakdown.competitionScore ?? 0),
+  }
+}
+
 const mapTeamMagic = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): TeamMagicState => {
   const data = snapshot.data()
   return {
     teamId: snapshot.id,
     magicHolderPlayerId: data.magicHolderPlayerId == null ? null : String(data.magicHolderPlayerId),
-    inventory: Array.isArray(data.inventory) ? data.inventory.map(mapMagicInventoryItem) : [],
+    inventory: mapMagicInventory(data.inventory),
     queuedEffect: mapQueuedMagicEffect(data.queuedEffect),
+    lastResolvedBreakdown: mapTeamMagicBreakdown(data.lastResolvedBreakdown),
   }
 }
 
@@ -226,44 +284,73 @@ const mapAnswerProgressEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | 
 // effect's source (consuming its own item) and as another team's hostile target (its shield
 // consumed) in the same pass, so mutations are accumulated here first and the caller applies
 // exactly one update per touched doc — never two, which would let the second clobber the first.
+//
+// Milestone 4: multiple DIFFERENT teams may each have a score_seal queued against the SAME
+// target+question (stacking is allowed — there is no "already targeted" restriction at
+// activation time anymore), so resolution is split into passes: (1) clear every queued slot +
+// consume each source team's own item regardless of outcome, (2) power_surge always applies (a
+// team's own buff is never blockable), (3) score_seals are grouped by target team and resolved
+// against that team's available shields — each available shield blocks exactly one seal
+// (consuming it); any seals beyond the available shield count still apply. Sorted by
+// sourceTeamId for deterministic (test-reproducible) shield-consumption order — which specific
+// seal ends up 'blocked' vs 'applied' depends on this order, but the FINAL multiplier never
+// does, since only the blocked-vs-applied COUNT matters there.
 const computeMagicResolution = (
   magicByTeamId: Map<string, TeamMagicState>,
   resolvedQuestionIndex: number,
-  now: number,
 ): { touchedTeamIds: Set<string>; eventOutcomes: Map<string, 'applied' | 'blocked'> } => {
   const touchedTeamIds = new Set<string>()
   const eventOutcomes = new Map<string, 'applied' | 'blocked'>()
 
   const consumeOne = (teamId: string, itemType: MagicItemType): void => {
-    const item = magicByTeamId.get(teamId)?.inventory.find((entry) => entry.itemType === itemType && !entry.consumed)
-    if (item) {
-      item.consumed = true
-      item.consumedAt = now
+    const entry = magicByTeamId.get(teamId)?.inventory[itemType]
+    if (entry && entry.available > 0) {
+      entry.available -= 1
+      entry.consumed += 1
       touchedTeamIds.add(teamId)
     }
   }
 
+  const effectsThisQuestion: Array<{ magic: TeamMagicState; effect: QueuedMagicEffect }> = []
   for (const magic of magicByTeamId.values()) {
     const effect = magic.queuedEffect
     if (!effect || effect.affectedQuestionIndex !== resolvedQuestionIndex) continue
+    effectsThisQuestion.push({ magic, effect })
+  }
+  if (effectsThisQuestion.length === 0) return { touchedTeamIds, eventOutcomes }
+
+  for (const { magic, effect } of effectsThisQuestion) {
     touchedTeamIds.add(magic.teamId)
     magic.queuedEffect = null
-    if (effect.itemType === 'power_surge') {
-      consumeOne(magic.teamId, 'power_surge')
-      eventOutcomes.set(effect.id, 'applied')
-    } else {
-      consumeOne(magic.teamId, 'score_seal')
-      const shieldItem = magicByTeamId.get(effect.targetTeamId)?.inventory.find((entry) => entry.itemType === 'rose_shield' && !entry.consumed)
-      if (shieldItem) {
-        shieldItem.consumed = true
-        shieldItem.consumedAt = now
-        touchedTeamIds.add(effect.targetTeamId)
+    consumeOne(magic.teamId, effect.itemType)
+  }
+
+  for (const { effect } of effectsThisQuestion) {
+    if (effect.itemType === 'power_surge') eventOutcomes.set(effect.id, 'applied')
+  }
+
+  const sealsByTarget = new Map<string, QueuedMagicEffect[]>()
+  for (const { effect } of effectsThisQuestion) {
+    if (effect.itemType !== 'score_seal') continue
+    const list = sealsByTarget.get(effect.targetTeamId) ?? []
+    list.push(effect)
+    sealsByTarget.set(effect.targetTeamId, list)
+  }
+  sealsByTarget.forEach((seals, targetTeamId) => {
+    const targetMagic = magicByTeamId.get(targetTeamId)
+    const sorted = [...seals].sort((a, b) => a.sourceTeamId.localeCompare(b.sourceTeamId))
+    for (const effect of sorted) {
+      const shieldEntry = targetMagic?.inventory.rose_shield
+      if (shieldEntry && shieldEntry.available > 0) {
+        shieldEntry.available -= 1
+        shieldEntry.consumed += 1
+        touchedTeamIds.add(targetTeamId)
         eventOutcomes.set(effect.id, 'blocked')
       } else {
         eventOutcomes.set(effect.id, 'applied')
       }
     }
-  }
+  })
 
   return { touchedTeamIds, eventOutcomes }
 }
@@ -294,7 +381,7 @@ const resetMagicForNewRound = async (roomCode: string): Promise<void> => {
   const batch = writeBatch(db)
   magicSnapshots.docs.forEach((document) => {
     const magic = mapTeamMagic(document)
-    batch.update(document.ref, { inventory: [], queuedEffect: null })
+    batch.update(document.ref, { inventory: createEmptyMagicInventory(), queuedEffect: null, lastResolvedBreakdown: null })
     if (magic.queuedEffect) {
       batch.update(doc(db, 'rooms', roomCode, 'magicEvents', magic.queuedEffect.id), { status: 'expired', resolvedAt: serverTimestamp() })
     }
@@ -317,6 +404,22 @@ const logPermissionDenied = (operation: string, contextUid: string, roomCode: st
     roomCode,
   })
 }
+
+// Milestone 4: the boss-phase fields a brand-new room always starts with, or that a new round
+// resets to — factored out so createRoom / prepareNextRound / stopRound can never drift on
+// what "fresh" means.
+const createFreshBossFields = (): Pick<
+  Room,
+  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner'
+> => ({
+  phase: 'main',
+  bossQuestionIds: [],
+  bossQuestionIndex: 0,
+  bossQuestionStartedAt: null,
+  bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  bossCompleted: false,
+  bossWinner: null,
+})
 
 export class FirebaseGameService implements GameService {
   readonly isDemo = false
@@ -355,6 +458,8 @@ export class FirebaseGameService implements GameService {
       currentQuestionIndex: 0,
       questionDurationSeconds: 30,
       questionStartedAt: null,
+      questionClosedAt: null,
+      ...createFreshBossFields(),
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
       winner: null,
@@ -418,6 +523,7 @@ export class FirebaseGameService implements GameService {
           currentQuestionIndex: 0,
           score: 0,
           answers: [],
+          bossAnswers: [],
           submitted: false,
           finishedAt: null,
           elapsedMs: null,
@@ -524,7 +630,7 @@ export class FirebaseGameService implements GameService {
       if (roomForMagicCheck.teams.length > 0) {
         const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
         const magicByTeamId = new Map(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
-        const teamsWithoutStartingItem = roomForMagicCheck.teams.filter((team) => (magicByTeamId.get(team.id)?.inventory.length ?? 0) === 0)
+        const teamsWithoutStartingItem = roomForMagicCheck.teams.filter((team) => !hasAnyMagicItem(magicByTeamId.get(team.id)?.inventory ?? createEmptyMagicInventory()))
         if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
       }
     }
@@ -544,6 +650,7 @@ export class FirebaseGameService implements GameService {
         currentQuestionIndex: 0,
         questionDurationSeconds: Math.max(5, Math.min(600, Math.round(questionDurationSeconds))),
         questionStartedAt: serverTimestamp(),
+        questionClosedAt: null,
         winner: null,
       })
     })
@@ -554,12 +661,15 @@ export class FirebaseGameService implements GameService {
 
   async advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void> {
     const roomRef = doc(db, 'rooms', roomCode)
-    const finished = await runTransaction(db, async (transaction) => {
+    const result = await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(roomRef)
       if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
-      if (room.status !== 'playing' || room.currentQuestionIndex !== expectedQuestionIndex) return false
+      // Milestone 4: phase !== 'main' guards against a stale/duplicate call landing WHILE the
+      // boss phase is in progress — currentQuestionIndex deliberately does not change during
+      // boss, so without this the index-match check alone would not catch a second call.
+      if (room.status !== 'playing' || room.phase !== 'main' || room.currentQuestionIndex !== expectedQuestionIndex) return null
 
       // Resolve magic effects queued for the question being left IN THIS SAME TRANSACTION as
       // the room's advance below — so the two either both commit or neither does. All reads
@@ -576,7 +686,7 @@ export class FirebaseGameService implements GameService {
         const magicByTeamId = new Map<string, TeamMagicState>(
           magicSnapshots.filter((magicSnapshot) => magicSnapshot.exists()).map((magicSnapshot) => [magicSnapshot.id, mapTeamMagic(magicSnapshot)]),
         )
-        const { touchedTeamIds, eventOutcomes } = computeMagicResolution(magicByTeamId, expectedQuestionIndex, Date.now())
+        const { touchedTeamIds, eventOutcomes } = computeMagicResolution(magicByTeamId, expectedQuestionIndex)
         touchedTeamIds.forEach((teamId) => {
           const magic = magicByTeamId.get(teamId)
           if (!magic) return
@@ -587,6 +697,22 @@ export class FirebaseGameService implements GameService {
         })
       }
 
+      const resolvedQuestionId = room.questionIds[expectedQuestionIndex] ?? null
+
+      // "ศึกด่านชิงมนตรา" — inserted before main question 6, reusing the same synchronized
+      // question/timer architecture via bossQuestionIds/bossQuestionIndex/bossQuestionStartedAt.
+      // currentQuestionIndex stays at 4 for the duration; advanceBossQuestion is what eventually
+      // moves it to 5 once the 3rd boss question resolves.
+      if (expectedQuestionIndex === BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX && !room.bossCompleted) {
+        transaction.update(roomRef, {
+          phase: 'boss',
+          bossQuestionIds: selectBossQuestions(questions, room.questionIds),
+          bossQuestionIndex: 0,
+          bossQuestionStartedAt: serverTimestamp(),
+        })
+        return { finished: false, resolvedQuestionId, teams: room.teams, currentRound: room.currentRound }
+      }
+
       const nextQuestionIndex = expectedQuestionIndex + 1
       if (nextQuestionIndex >= room.questionIds.length) {
         transaction.update(roomRef, {
@@ -594,14 +720,36 @@ export class FirebaseGameService implements GameService {
           completedAt: serverTimestamp(),
           currentQuestionIndex: room.questionIds.length,
           questionStartedAt: null,
+          questionClosedAt: null,
         })
-        return true
+        return { finished: true, resolvedQuestionId, teams: room.teams, currentRound: room.currentRound }
       }
-      transaction.update(roomRef, { currentQuestionIndex: nextQuestionIndex, questionStartedAt: serverTimestamp() })
-      return false
+      transaction.update(roomRef, { currentQuestionIndex: nextQuestionIndex, questionStartedAt: serverTimestamp(), questionClosedAt: null })
+      return { finished: false, resolvedQuestionId, teams: room.teams, currentRound: room.currentRound }
     })
-    if (!finished) return
+    if (!result) return
+
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+
+    // Milestone 4 section 3: persist every team's raw/magic/competition breakdown for the
+    // question just left (not just magic-touched teams) — students can't compute this
+    // themselves (no `list` access to teammates' answers), so it has to be written somewhere
+    // already broadly readable. Deliberately NOT part of the transaction above: it's a derived
+    // display value recomputable from players + magicEvents at any time, not part of the
+    // scoring integrity boundary that transaction protects.
+    if (result.resolvedQuestionId && result.teams.length > 0) {
+      const magicEventSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magicEvents'))
+      const players = playerSnapshots.docs.map((document) => mapPlayer(document))
+      const events = magicEventSnapshots.docs.map((document) => mapMagicEvent(document))
+      const breakdownBatch = writeBatch(db)
+      result.teams.forEach((team) => {
+        const breakdown = computeTeamQuestionBreakdown(players, team, result.resolvedQuestionId as string, expectedQuestionIndex, events, result.currentRound)
+        breakdownBatch.update(doc(db, 'rooms', roomCode, 'magic', team.id), { lastResolvedBreakdown: breakdown })
+      })
+      await breakdownBatch.commit()
+    }
+
+    if (!result.finished) return
     const batch = writeBatch(db)
     playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, {
       currentQuestionIndex: 10,
@@ -611,6 +759,149 @@ export class FirebaseGameService implements GameService {
       elapsedMs: null,
     }))
     await batch.commit()
+  }
+
+  // Milestone 4: parallel to saveAnswer, but writes to player.bossAnswers only — never
+  // player.answers/score, which is what makes "boss answers do not affect the 100-point
+  // knowledge score" true by construction. Uses the SAME getRemainingMilliseconds helper, fed
+  // a boss-shaped {questionStartedAt, questionDurationSeconds, questionClosedAt: null} object,
+  // so the deadline math is identical to the main flow's (boss has no early-close, so
+  // questionClosedAt is always null here).
+  async saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.status !== 'playing' || room.phase !== 'boss') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงศึกด่านชิงมนตรา')
+      if (room.bossQuestionIndex !== answer.expectedBossIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
+      const bossTiming = { questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null }
+      if (!room.bossQuestionStartedAt || getRemainingMilliseconds(bossTiming, Date.now()) <= 0) {
+        throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+      }
+      if (room.bossQuestionIds[answer.expectedBossIndex] !== answer.questionId) {
+        throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
+      }
+      const question = questionsById.get(answer.questionId)
+      const evaluated = evaluateChoice(question, answer.selectedChoiceId)
+      if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+      const record: BossAnswerRecord = {
+        questionId: answer.questionId,
+        selectedChoiceId: answer.selectedChoiceId,
+        isCorrect: evaluated.isCorrect,
+        answeredAt: Date.now(),
+        responseTimeMs: Date.now() - (room.bossQuestionStartedAt ?? Date.now()),
+      }
+      const bossAnswers = [...player.bossAnswers]
+      const existingIndex = bossAnswers.findIndex((item) => item.questionId === answer.questionId)
+      if (existingIndex >= 0) bossAnswers[existingIndex] = record
+      else bossAnswers.push(record)
+      transaction.update(playerRef, { bossAnswers })
+    })
+  }
+
+  // Milestone 4: parallel to advanceQuestion, but for the 3-question boss phase. On the 3rd
+  // question, resolves ranking + reward exactly once (guarded by room.bossCompleted — a
+  // stale/duplicate call after the first successful resolution is a silent no-op, so a refresh
+  // or retry can never reroll the tie-break or award a second item). Player ids are enumerated
+  // OUTSIDE the transaction (bounded by roster size, like advanceQuestion's magic-doc reads),
+  // but every player's actual DATA is read fresh, inside the transaction via transaction.get()
+  // — so if the transaction retries due to contention, ranking is recomputed from current state
+  // every time, never from a stale pre-read.
+  async advanceBossQuestion(roomCode: string, teacherSessionId: string, expectedBossIndex: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerSnapshotsForIds = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    const playerIds = playerSnapshotsForIds.docs.map((document) => document.id)
+
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'playing' || room.phase !== 'boss' || room.bossQuestionIndex !== expectedBossIndex) return
+      const nextBossIndex = expectedBossIndex + 1
+
+      if (nextBossIndex < room.bossQuestionIds.length) {
+        transaction.update(roomRef, { bossQuestionIndex: nextBossIndex, bossQuestionStartedAt: serverTimestamp() })
+        return
+      }
+
+      let bossWinner = room.bossWinner
+      if (!room.bossCompleted) {
+        const playerSnapshots = await Promise.all(playerIds.map((id) => transaction.get(doc(db, 'rooms', roomCode, 'players', id))))
+        const players = playerSnapshots.filter((playerSnapshot) => playerSnapshot.exists()).map((playerSnapshot) => mapPlayer(playerSnapshot))
+        const ranking = computeBossRanking(players, room.bossQuestionIds, room.bossQuestionDurationSeconds)
+        if (ranking.winner) {
+          const winnerPlayer = players.find((player) => player.id === ranking.winner?.playerId)
+          if (winnerPlayer?.teamId) {
+            const magicRef = doc(db, 'rooms', roomCode, 'magic', winnerPlayer.teamId)
+            const magicSnapshot = await transaction.get(magicRef)
+            if (magicSnapshot.exists()) {
+              const magic = mapTeamMagic(magicSnapshot)
+              const rewardItemType = pickRandomMagicItem()
+              const nextInventory: MagicInventory = {
+                ...magic.inventory,
+                [rewardItemType]: { ...magic.inventory[rewardItemType], available: magic.inventory[rewardItemType].available + 1 },
+              }
+              transaction.update(magicRef, { inventory: nextInventory })
+              // Denormalized onto the room (see BossWinner's doc comment in types/game.ts) —
+              // once teams are locked a student can only `get` their OWN player doc, so there
+              // is no rules-legal way to resolve an opposing team's winner's name/team from a
+              // bare playerId; announcing on every screen requires the data to already live
+              // somewhere broadly readable.
+              bossWinner = {
+                playerId: ranking.winner.playerId,
+                displayName: ranking.winner.displayName,
+                studentNumber: ranking.winner.studentNumber,
+                teamId: ranking.winner.teamId,
+                teamName: room.teams.find((team) => team.id === ranking.winner?.teamId)?.name ?? null,
+                correctCount: ranking.winner.correctCount,
+                totalTimeMs: ranking.winner.totalTimeMs,
+                rewardItemType,
+              }
+            }
+          }
+        }
+      }
+      transaction.update(roomRef, {
+        phase: 'main',
+        currentQuestionIndex: BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1,
+        questionStartedAt: serverTimestamp(),
+        questionClosedAt: null,
+        bossCompleted: true,
+        bossWinner,
+      })
+    })
+  }
+
+  // Milestone 2.2: teacher early-close. The "everyone currently registered has answered"
+  // check reads the whole players collection, which (like startRoom's starting-item check)
+  // can't be done from inside a Firestore transaction — so it's a best-effort pre-check outside
+  // the transaction, and the actual write is a small, cheaply-idempotent transaction guarded by
+  // status + expectedQuestionIndex + questionClosedAt already being null, matching
+  // advanceQuestion's own stale/duplicate-click protection.
+  async closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const roomSnapshotForCheck = await getDoc(roomRef)
+    if (!roomSnapshotForCheck.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    const roomForCheck = mapRoom(roomSnapshotForCheck.data())
+    if (roomForCheck.status === 'playing' && roomForCheck.currentQuestionIndex === expectedQuestionIndex && roomForCheck.questionClosedAt == null) {
+      const questionId = roomForCheck.questionIds[expectedQuestionIndex]
+      const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+      const allAnswered = playerSnapshots.docs.every((playerDocument) => mapPlayer(playerDocument).answers.some((answer) => answer.questionId === questionId))
+      if (!allAnswered) throw new Error('ผู้ใช้:ยังมีผู้เล่นบางคนยังไม่ได้ตอบคำถามข้อนี้')
+    }
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'playing' || room.currentQuestionIndex !== expectedQuestionIndex) return
+      if (room.questionClosedAt != null) return
+      transaction.update(roomRef, { questionClosedAt: serverTimestamp() })
+    })
   }
 
   async prepareNextRound(roomCode: string, teacherSessionId: string): Promise<void> {
@@ -631,9 +922,11 @@ export class FirebaseGameService implements GameService {
       completedAt: null,
       currentQuestionIndex: 0,
       questionStartedAt: null,
+      questionClosedAt: null,
       previousQuestionIds: room.questionIds,
       questionIds,
       winner: null,
+      ...createFreshBossFields(),
     })
     playerSnapshots.docs.forEach((playerDocument) => {
       batch.update(playerDocument.ref, {
@@ -641,6 +934,7 @@ export class FirebaseGameService implements GameService {
         currentQuestionIndex: 0,
         score: 0,
         answers: [],
+        bossAnswers: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -669,9 +963,11 @@ export class FirebaseGameService implements GameService {
       completedAt: null,
       currentQuestionIndex: 0,
       questionStartedAt: null,
+      questionClosedAt: null,
       previousQuestionIds: room.questionIds,
       questionIds,
       winner: null,
+      ...createFreshBossFields(),
     })
     playerSnapshots.docs.forEach((playerDocument) => {
       batch.update(playerDocument.ref, {
@@ -679,6 +975,7 @@ export class FirebaseGameService implements GameService {
         currentQuestionIndex: 0,
         score: 0,
         answers: [],
+        bossAnswers: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -795,8 +1092,9 @@ export class FirebaseGameService implements GameService {
       magicBatch.set(doc(db, 'rooms', roomCode, 'magic', team.id), {
         teamId: team.id,
         magicHolderPlayerId: holders[team.id] ?? null,
-        inventory: [],
+        inventory: createEmptyMagicInventory(),
         queuedEffect: null,
+        lastResolvedBreakdown: null,
       })
     })
     await magicBatch.commit()
@@ -825,8 +1123,12 @@ export class FirebaseGameService implements GameService {
       if (room.status === 'completed') throw new Error('ผู้ใช้:ภารกิจรอบนี้สิ้นสุดแล้ว')
       if (room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจยังไม่เริ่มหรือสิ้นสุดแล้ว')
       if (player.submitted || room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
-      const deadline = (room.questionStartedAt ?? 0) + room.questionDurationSeconds * 1_000
-      if (!room.questionStartedAt || Date.now() >= deadline) throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+      // getRemainingMilliseconds (not manual deadline math) so a teacher's early close
+      // (questionClosedAt) is honored here too — otherwise a late/slow client could still
+      // submit an answer up until the ORIGINAL deadline even after an early close.
+      if (!room.questionStartedAt || getRemainingMilliseconds(room, Date.now()) <= 0) {
+        throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
+      }
       if (room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
         throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
       }
@@ -887,10 +1189,12 @@ export class FirebaseGameService implements GameService {
       if (room.status !== 'waiting' || !room.teamsLocked) {
         throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
       }
-      if (magic.inventory.length > 0) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
-      transaction.update(magicRef, {
-        inventory: [{ itemType, acquiredAt: Date.now(), consumed: false, consumedAt: null }],
-      })
+      if (hasAnyMagicItem(magic.inventory)) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
+      const nextInventory: MagicInventory = {
+        ...magic.inventory,
+        [itemType]: { ...magic.inventory[itemType], available: magic.inventory[itemType].available + 1 },
+      }
+      transaction.update(magicRef, { inventory: nextInventory })
     })
   }
 
@@ -913,6 +1217,10 @@ export class FirebaseGameService implements GameService {
       if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
       const magic = mapTeamMagic(magicSnapshot)
       if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+      // Milestone 4: magic is a main-phase-only concept — the boss mini-game has its own,
+      // separate 3-question flow, and status stays 'playing' throughout both, so this check is
+      // what actually prevents activation from leaking into the boss phase.
+      if (room.phase !== 'main') throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
 
       const window = getMagicActivationWindow(room)
       if (!window.valid || window.affectedQuestionIndex == null) {
@@ -920,8 +1228,7 @@ export class FirebaseGameService implements GameService {
       }
       const affectedQuestionIndex = window.affectedQuestionIndex
 
-      const inventoryItem = magic.inventory.find((item) => item.itemType === itemType && !item.consumed)
-      if (!inventoryItem) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
+      if (magic.inventory[itemType].available <= 0) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
 
       const eventId = `magic-${createMagicId()}`
       const eventRef = doc(db, 'rooms', roomCode, 'magicEvents', eventId)
@@ -961,21 +1268,9 @@ export class FirebaseGameService implements GameService {
           logRejectedEvent(targetTeamId)
           throw new Error('ผู้ใช้:ไม่พบทีมเป้าหมาย')
         }
-        const otherTeams = room.teams.filter((team) => team.id !== teamId)
-        const otherMagicSnapshots = await Promise.all(
-          otherTeams.map((team) => transaction.get(doc(db, 'rooms', roomCode, 'magic', team.id))),
-        )
-        const alreadyTargeted = otherMagicSnapshots.some((snapshot) => {
-          if (!snapshot.exists()) return false
-          const otherMagic = mapTeamMagic(snapshot)
-          return otherMagic.queuedEffect?.itemType === 'score_seal'
-            && otherMagic.queuedEffect.targetTeamId === targetTeamId
-            && otherMagic.queuedEffect.affectedQuestionIndex === affectedQuestionIndex
-        })
-        if (alreadyTargeted) {
-          logRejectedEvent(targetTeamId)
-          throw new Error('ผู้ใช้:ทีมเป้าหมายถูกใช้ไอเทมฝ่ายตรงข้ามในข้อนี้ไปแล้ว')
-        }
+        // Milestone 4: multiple teams may seal the same target — seals stack multiplicatively
+        // (see computeHostileMultiplier in lib/magic.ts), so there is no longer an
+        // "already targeted" rejection here.
       }
 
       // itemType === 'power_surge' targets the source team itself; score_seal's targetTeamId

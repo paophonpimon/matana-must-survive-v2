@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Auth, User } from 'firebase/auth'
 
 const signInAnonymouslyMock = vi.fn()
+const setPersistenceMock = vi.fn()
 
 vi.mock('firebase/auth', () => ({
   signInAnonymously: (...args: unknown[]) => signInAnonymouslyMock(...args),
+  setPersistence: (...args: unknown[]) => setPersistenceMock(...args),
+  browserSessionPersistence: 'browserSessionPersistence-sentinel',
 }))
 
 const makeUser = (uid: string): User => ({ uid }) as User
@@ -15,6 +18,8 @@ const makeAuth = (currentUser: User | null = null): Auth => ({ currentUser }) as
 describe('ensureAnonymousUser', () => {
   beforeEach(async () => {
     signInAnonymouslyMock.mockReset()
+    setPersistenceMock.mockReset()
+    setPersistenceMock.mockResolvedValue(undefined)
     const { __resetEnsureAnonymousUserForTests } = await import('./firebaseAuth')
     __resetEnsureAnonymousUserForTests()
   })
@@ -31,6 +36,45 @@ describe('ensureAnonymousUser', () => {
 
     expect(user.uid).toBe('existing-uid')
     expect(signInAnonymouslyMock).not.toHaveBeenCalled()
+  })
+
+  // Milestone 2.2: each tab must get its own anonymous uid, not the one Firebase's default
+  // (cross-tab) persistence would otherwise auto-restore.
+  it('sets browserSessionPersistence before ever calling signInAnonymously', async () => {
+    const { ensureAnonymousUser } = await import('./firebaseAuth')
+    const auth = makeAuth(null)
+    const callOrder: string[] = []
+    setPersistenceMock.mockImplementation(async () => { callOrder.push('setPersistence') })
+    signInAnonymouslyMock.mockImplementation(async () => { callOrder.push('signInAnonymously'); return { user: makeUser('fresh-uid') } })
+
+    await ensureAnonymousUser(auth)
+
+    expect(setPersistenceMock).toHaveBeenCalledWith(auth, 'browserSessionPersistence-sentinel')
+    expect(callOrder).toEqual(['setPersistence', 'signInAnonymously'])
+  })
+
+  // Persistence must be applied even when a currentUser is already present — a stale
+  // auth.currentUser could itself be a value the SDK auto-restored under the OLD (shared)
+  // persistence, before this tab ever got a chance to switch it, so skipping the persistence
+  // call here would leave that leak unaddressed on every subsequent call too.
+  it('sets browserSessionPersistence even when auth.currentUser is already populated', async () => {
+    const { ensureAnonymousUser } = await import('./firebaseAuth')
+    const auth = makeAuth(makeUser('existing-uid'))
+
+    await ensureAnonymousUser(auth)
+
+    expect(setPersistenceMock).toHaveBeenCalledWith(auth, 'browserSessionPersistence-sentinel')
+  })
+
+  it('only requests persistence once across repeated calls, not once per call', async () => {
+    const { ensureAnonymousUser } = await import('./firebaseAuth')
+    const auth = makeAuth(makeUser('existing-uid'))
+
+    await ensureAnonymousUser(auth)
+    await ensureAnonymousUser(auth)
+    await ensureAnonymousUser(auth)
+
+    expect(setPersistenceMock).toHaveBeenCalledTimes(1)
   })
 
   it('invokes signInAnonymously exactly once for two concurrent calls on a fresh profile', async () => {
@@ -99,6 +143,8 @@ describe('ensureAnonymousUser', () => {
 describe('resolveOwnerUid', () => {
   beforeEach(async () => {
     signInAnonymouslyMock.mockReset()
+    setPersistenceMock.mockReset()
+    setPersistenceMock.mockResolvedValue(undefined)
     const { __resetEnsureAnonymousUserForTests } = await import('./firebaseAuth')
     __resetEnsureAnonymousUserForTests()
   })

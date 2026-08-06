@@ -11,6 +11,7 @@ const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
   currentQuestionIndex: 0,
   score: 0,
   answers: [],
+  bossAnswers: [],
   submitted: false,
   finishedAt: null,
   elapsedMs: null,

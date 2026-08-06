@@ -11,6 +11,15 @@ export interface AnswerResult {
   winner: Winner | null
 }
 
+// Milestone 4: deliberately shaped like AnswerInput but with `expectedBossIndex` instead of
+// `expectedQuestionIndex` — boss questions have their own separate 0..2 index, never conflated
+// with the main round's currentQuestionIndex.
+export interface BossAnswerInput {
+  questionId: string
+  selectedChoiceId: string
+  expectedBossIndex: number
+}
+
 export interface GameService {
   readonly isDemo: boolean
   readonly demoRoomCode?: string
@@ -23,6 +32,9 @@ export interface GameService {
   subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void, onError: (message: string) => void): Unsubscribe
   startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
+  closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
+  saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void>
+  advanceBossQuestion(roomCode: string, teacherSessionId: string, expectedBossIndex: number): Promise<void>
   stopRound(roomCode: string, teacherSessionId: string): Promise<void>
   prepareNextRound(roomCode: string, teacherSessionId: string): Promise<void>
   closeRoom(roomCode: string, teacherSessionId: string): Promise<void>

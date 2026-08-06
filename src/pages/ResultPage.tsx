@@ -2,7 +2,9 @@ import { useEffect } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { useRoom, usePlayer } from '../hooks/useGameData'
+import { MAGIC_ITEM_INFO } from '../lib/magic'
 import { getPlayerSession } from '../services/sessionStorage'
+import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS } from '../types/game'
 import type { Player, Room } from '../types/game'
 
 const previewRoom: Room = {
@@ -15,6 +17,7 @@ const previewRoom: Room = {
   currentQuestionIndex: 9,
   questionDurationSeconds: 30,
   questionStartedAt: null,
+  questionClosedAt: null,
   questionIds: [],
   previousQuestionIds: [],
   winner: null,
@@ -22,6 +25,13 @@ const previewRoom: Room = {
   teamCount: 1,
   teamsLocked: true,
   teams: [{ id: 'team-1', name: 'ทีม 1' }],
+  phase: 'main',
+  bossQuestionIds: [],
+  bossQuestionIndex: 0,
+  bossQuestionStartedAt: null,
+  bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  bossCompleted: false,
+  bossWinner: null,
 }
 
 const previewPlayer: Player = {
@@ -34,6 +44,7 @@ const previewPlayer: Player = {
   currentQuestionIndex: 9,
   score: 0,
   answers: [],
+  bossAnswers: [],
   submitted: true,
   finishedAt: 0,
   elapsedMs: 0,
@@ -106,7 +117,17 @@ export const ResultPage = () => {
                 </div>
               )}
             </div>
-            <div className="score-reveal mt-6"><small>ตอบถูก</small><strong>{score}<span>/10</span></strong><small>ข้อ</small></div>
+            <div className="score-reveal mt-6"><small>คะแนนความรู้</small><strong>{score * 10}<span>/100</span></strong><small>{score} จาก 10 ข้อ</small></div>
+            {room.bossCompleted && room.bossWinner ? (
+              <div className="winner-card mt-4">
+                <small>🏆 ผู้พิชิตด่านชิงมนตรา</small>
+                <strong>
+                  {room.bossWinner.displayName} จากทีม{room.bossWinner.teamName ?? '-'}
+                  {' — '}ตอบถูก {room.bossWinner.correctCount}/3 ใช้เวลา {(room.bossWinner.totalTimeMs / 1_000).toFixed(2)} วินาที
+                  {' — '}ทีมได้รับ {MAGIC_ITEM_INFO[room.bossWinner.rewardItemType].label}เพิ่ม 1 ครั้ง
+                </strong>
+              </div>
+            ) : null}
             <div className="waiting-banner mt-6"><span className="pulse-dot" aria-hidden="true" /><span><strong>โปรดรอครูเปิดภารกิจรอบใหม่</strong><small>หน้านี้จะแสดงเฉพาะคะแนนของคุณ และเปลี่ยนอัตโนมัติเมื่อครูเตรียมรอบใหม่</small></span></div>
             <button className="secondary-button mt-4 w-full" type="button" disabled>รอครูเปิดภารกิจรอบใหม่</button>
           </section>

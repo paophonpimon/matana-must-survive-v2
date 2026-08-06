@@ -1,4 +1,4 @@
-import { signInAnonymously, type Auth, type User } from 'firebase/auth'
+import { browserSessionPersistence, setPersistence, signInAnonymously, type Auth, type User } from 'firebase/auth'
 
 // Module-level (not per-call, not per-component) so it is a true process-wide singleton: every
 // caller — regardless of how many times React StrictMode re-runs an effect, or how many
@@ -8,7 +8,23 @@ import { signInAnonymously, type Auth, type User } from 'firebase/auth'
 // uids, leaving GameContext holding a uid that no longer matches auth.currentUser.
 let inFlightSignIn: Promise<User> | null = null
 
+// Milestone 2.2: Firebase Auth's default persistence is shared across every tab/window on the
+// same origin (indexedDB/localStorage-backed) — that's what let a teacher tab and a student tab
+// in the same browser silently end up signed in as the SAME anonymous uid. Switching to
+// browserSessionPersistence scopes the signed-in identity to this one tab instead. This must
+// happen before auth.currentUser is ever read or signInAnonymously is ever called — a tab that
+// checks auth.currentUser first could still observe a uid the SDK auto-restored under the old
+// (shared) persistence before our session-scoped persistence took effect. Cached per module
+// load so repeated calls don't re-issue the request.
+let persistenceReady: Promise<void> | null = null
+
+const ensureSessionPersistence = (auth: Auth): Promise<void> => {
+  persistenceReady ??= setPersistence(auth, browserSessionPersistence)
+  return persistenceReady
+}
+
 export const ensureAnonymousUser = async (auth: Auth): Promise<User> => {
+  await ensureSessionPersistence(auth)
   if (auth.currentUser) return auth.currentUser
   if (inFlightSignIn) return inFlightSignIn
 
@@ -41,4 +57,5 @@ export const resolveOwnerUid = async (auth: Auth, candidateUid: string): Promise
 // application code.
 export const __resetEnsureAnonymousUserForTests = (): void => {
   inFlightSignIn = null
+  persistenceReady = null
 }

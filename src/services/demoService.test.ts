@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { questionsById } from '../data/questions'
-import { computeTeamCompetitionStats } from '../lib/magic'
+import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
+import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX } from '../types/game'
 import type { AnswerProgressEntry, MagicEvent, Player, Room, TeamMagicState, TeamRosterSummary } from '../types/game'
-import { DemoGameService } from './demoService'
+import { DEMO_STORAGE_KEY, DemoGameService } from './demoService'
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>()
@@ -44,6 +46,23 @@ const getHolderId = async (service: DemoGameService, roomCode: string, teamId: s
   return holderId
 }
 
+// Milestone 4: leaving main question 5 (index BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX) enters the
+// 3-question boss phase (status stays 'playing', currentQuestionIndex frozen at 4) before the
+// room moves on to question 6 — any test loop that walks through all 10 questions must drain the
+// boss phase at that point too, or the room simply never advances past it.
+const advanceQuestionThroughBoss = async (
+  service: DemoGameService,
+  roomCode: string,
+  teacherSessionId: string,
+  expectedQuestionIndex: number,
+): Promise<void> => {
+  await service.advanceQuestion(roomCode, teacherSessionId, expectedQuestionIndex)
+  if (expectedQuestionIndex !== BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX) return
+  for (let bossIndex = 0; bossIndex < BOSS_QUESTION_COUNT; bossIndex += 1) {
+    await service.advanceBossQuestion(roomCode, teacherSessionId, bossIndex)
+  }
+}
+
 // startRoom requires every team's holder to have chosen a starting item — this drives every
 // currently-empty team's holder to pick มนตร์ทวีพลัง (power_surge) so pre-existing flow tests
 // that only care about the normal answer/scoring path can reach 'playing' without needing to
@@ -53,7 +72,7 @@ const chooseAllStartingItems = async (service: DemoGameService, roomCode: string
   const stop = service.subscribeAllTeamMagic(roomCode, (value) => { magic.value = value })
   await vi.waitFor(() => expect(magic.value.length).toBeGreaterThan(0))
   for (const team of magic.value) {
-    if (team.magicHolderPlayerId && team.inventory.length === 0) {
+    if (team.magicHolderPlayerId && !hasAnyMagicItem(team.inventory)) {
       await service.chooseStartingItem(roomCode, team.teamId, team.magicHolderPlayerId, 'power_surge')
     }
   }
@@ -286,7 +305,7 @@ describe('Demo timed classroom flow', () => {
     for (let index = 0; index < room.questionIds.length; index += 1) {
       await answerAt(service, room, high, index, index < 9)
       if (index < 4) await answerAt(service, room, low, index, true)
-      await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+      await advanceQuestionThroughBoss(service, room.roomCode, 'teacher-1', index)
     }
 
     const liveRoom: { value: Room | null } = { value: null }
@@ -319,7 +338,7 @@ describe('Demo timed classroom flow', () => {
       expectedQuestionIndex: 0,
     })).rejects.toThrow()
     await answerAt(service, room, player, 0, true)
-    for (let index = 0; index < 10; index += 1) await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+    for (let index = 0; index < 10; index += 1) await advanceQuestionThroughBoss(service, room.roomCode, 'teacher-1', index)
     await service.prepareNextRound(room.roomCode, 'teacher-1')
 
     const resetPlayer: { value: Player | null } = { value: null }
@@ -448,8 +467,9 @@ describe('Demo timed classroom flow', () => {
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
-      await vi.waitFor(() => expect(magic.value?.inventory).toHaveLength(1))
-      expect(magic.value?.inventory[0].itemType).toBe('rose_shield')
+      await vi.waitFor(() => expect(magic.value ? hasAnyMagicItem(magic.value.inventory) : false).toBe(true))
+      expect(magic.value?.inventory.rose_shield.available).toBe(1)
+      expect(magic.value?.inventory.power_surge.available).toBe(0)
       stop()
     })
 
@@ -462,6 +482,8 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       await service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge')
       await expect(service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge'))
@@ -473,7 +495,7 @@ describe('Demo timed classroom flow', () => {
       stop()
     })
 
-    it('rejects an invalid hostile target (self, or a team already targeted this question)', async () => {
+    it('rejects an invalid hostile target (self, or no target chosen) but allows multiple teams to seal the same target/question', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -485,20 +507,25 @@ describe('Demo timed classroom flow', () => {
       const holder2 = await getHolderId(service, room.roomCode, 'team-2')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'score_seal')
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'score_seal')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       await expect(service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-1'))
         .rejects.toThrow('เลือกทีมตัวเองเป็นเป้าหมายไม่ได้')
       await expect(service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal'))
         .rejects.toThrow('กรุณาเลือกทีมเป้าหมาย')
 
-      // team-1 successfully targets team-3 for question index 1 (the lobby's next-eligible
-      // question) — team-2 then can't also target team-3 for the same question.
+      // Milestone 4: multiple teams may seal the SAME target/question — no longer rejected.
       await service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-3')
-      await expect(service.activateItem(room.roomCode, 'team-2', holder2, 'score_seal', 'team-3'))
-        .rejects.toThrow('ทีมเป้าหมายถูกใช้ไอเทมฝ่ายตรงข้ามในข้อนี้ไปแล้ว')
+      await service.activateItem(room.roomCode, 'team-2', holder2, 'score_seal', 'team-3')
+
+      const events: { value: MagicEvent[] } = { value: [] }
+      const stop = service.subscribeMagicEvents(room.roomCode, (value) => { events.value = value })
+      await vi.waitFor(() => expect(events.value.filter((event) => event.status === 'queued' && event.targetTeamId === 'team-3')).toHaveLength(2))
+      stop()
     })
 
-    it('applies a 150% own-team multiplier and a 50% hostile multiplier, leaves individual raw scores untouched, and the competition score is reproducible from the event log', async () => {
+    it('applies a x2 own-team multiplier and a x0.5 hostile multiplier, leaves individual raw scores untouched, and the competition score is reproducible from the event log', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
@@ -532,19 +559,20 @@ describe('Demo timed classroom flow', () => {
       await service.chooseStartingItem(room.roomCode, team2, holder2, 'score_seal')
       await service.chooseStartingItem(room.roomCode, team3, holder3, 'power_surge')
 
-      // Both activated from the lobby, so both target question index 1 (question 2).
+      await chooseAllStartingItems(service, room.roomCode) // no-op: all three already chosen
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      // Both activated right at the start of question 1 (index 0), so both target question
+      // index 1 (question 2) — activation is playing-only now, always currentQuestionIndex + 1.
       await service.activateItem(room.roomCode, team1, holder1, 'power_surge')
       await service.activateItem(room.roomCode, team2, holder2, 'score_seal', team3)
 
-      await chooseAllStartingItems(service, room.roomCode) // no-op: all three already chosen
-      await service.startRoom(room.roomCode, 'teacher-1', 60)
       // Question index 0: no queued effect targets it — answer it and move past.
       await answerAt(service, room, p1, 0, true)
       await answerAt(service, room, p2, 0, true)
       await answerAt(service, room, p3, 0, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
-      // Question index 1: the targeted question. team-1 (p1) answers correctly (raw 1, x1.5);
-      // team-3 (p3) answers correctly too (raw 1, x0.5 from team-2's un-shielded score_seal).
+      // Question index 1: the targeted question. team-1 (p1) answers correctly (raw 10, x2);
+      // team-3 (p3) answers correctly too (raw 10, x0.5 from team-2's un-shielded score_seal).
       await answerAt(service, room, p1, 1, true)
       await answerAt(service, room, p3, 1, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
@@ -572,10 +600,10 @@ describe('Demo timed classroom flow', () => {
       expect(first).toEqual(second) // reproducible from the event log alone
 
       const stats = first as ReturnType<typeof computeTeamCompetitionStats>
-      // p1's team: q0 raw 1 (no multiplier) + q1 raw 1 * 1.5 = 2.5
-      expect(stats.find((team) => team.id === team1)?.competitionTotal).toBeCloseTo(2.5)
-      // p3's team: q0 raw 1 (no multiplier) + q1 raw 1 * 0.5 = 1.5 (hostile applied, no shield)
-      expect(stats.find((team) => team.id === team3)?.competitionTotal).toBeCloseTo(1.5)
+      // p1's team (1 member): q0 raw 10 (no multiplier) + q1 raw 10 * 2 = 20 -> total 30
+      expect(stats.find((team) => team.id === team1)?.competitionTotal).toBeCloseTo(30)
+      // p3's team (1 member): q0 raw 10 (no multiplier) + q1 raw 10 * 0.5 = 5 (hostile applied, no shield) -> total 15
+      expect(stats.find((team) => team.id === team3)?.competitionTotal).toBeCloseTo(15)
 
       stopPlayers()
       stopEvents()
@@ -593,8 +621,8 @@ describe('Demo timed classroom flow', () => {
       const holder2 = await getHolderId(service, room.roomCode, 'team-2')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'score_seal')
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'rose_shield')
-      await service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-2')
       await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-2')
 
       await answerAt(service, room, p1, 0, true)
       await answerAt(service, room, p2, 0, true)
@@ -614,11 +642,11 @@ describe('Demo timed classroom flow', () => {
       await vi.waitFor(() => {
         expect(events.value.find((event) => event.itemType === 'score_seal')?.status).toBe('blocked')
       })
-      expect(magic.value?.inventory.find((item) => item.itemType === 'rose_shield')?.consumed).toBe(true)
+      expect(magic.value?.inventory.rose_shield.consumed).toBe(1)
 
       const stats = computeTeamCompetitionStats(players.value, liveRoom.value?.teams ?? [], liveRoom.value?.questionIds ?? [], events.value, liveRoom.value?.currentRound ?? 1)
-      // team-2's q1 raw point is untouched by the blocked hostile effect (multiplier stays 1).
-      expect(stats.find((team) => team.id === 'team-2')?.competitionTotal).toBe(2)
+      // team-2 (1 member): q0 raw 10 + q1 raw 10, untouched by the blocked hostile effect (multiplier stays 1) -> total 20.
+      expect(stats.find((team) => team.id === 'team-2')?.competitionTotal).toBe(20)
 
       stopEvents()
       stopMagic()
@@ -638,14 +666,25 @@ describe('Demo timed classroom flow', () => {
 
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      // Advance to question index 8 (question 9) — the reveal window there would target
-      // index 9 (question 10), which must never be an eligible activation target.
+      // Advance to question index 8 (question 9) — activating there would target index 9
+      // (question 10), which must never be an eligible activation target, at any point during
+      // question 9's lifecycle (activation is no longer time-gated).
+      //
+      // Milestone 4: leaving main question 5 (index BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX = 4)
+      // inserts the 3-question boss phase before the room can reach question 6 — status stays
+      // 'playing' but currentQuestionIndex freezes at 4 until all 3 boss questions resolve.
+      // advanceQuestionThroughBoss drains that phase (mirroring how the teacher's real
+      // auto-advance timers drive it in TeacherPage.tsx) so this loop still lands on index 8
+      // afterward; production code is untouched — the boss trigger inside advanceQuestion still
+      // fires exactly as before, this only teaches the test to wait it out.
       for (let index = 0; index < 8; index += 1) {
         await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(index))
-        await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+        await advanceQuestionThroughBoss(service, room.roomCode, 'teacher-1', index)
       }
+      // Confirms the boss phase actually resolved and main question 6 (index 5) resumed, not
+      // just that the loop completed.
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
       await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(8))
-      vi.spyOn(Date, 'now').mockReturnValue((liveRoom.value?.questionStartedAt ?? 0) + 5_001)
 
       await expect(service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge'))
         .rejects.toThrow('ไม่สามารถใช้ไอเทมได้ในขณะนี้')
@@ -661,16 +700,18 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'score_seal', 'team-2')
 
       // Simulate a fresh page load: a brand-new subscription (not the one used to activate).
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => {
-        expect(magic.value?.inventory).toHaveLength(1)
+        expect(magic.value ? hasAnyMagicItem(magic.value.inventory) : false).toBe(true)
         expect(magic.value?.queuedEffect).not.toBeNull()
       })
-      expect(magic.value?.inventory[0]).toMatchObject({ itemType: 'score_seal', consumed: false })
+      expect(magic.value?.inventory.score_seal).toMatchObject({ available: 1, consumed: 0 })
       expect(magic.value?.queuedEffect).toMatchObject({ itemType: 'score_seal', targetTeamId: 'team-2', affectedQuestionIndex: 1 })
       stop()
     })
@@ -685,8 +726,8 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
-      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // lobby window -> targets index 1
       await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
       await answerAt(service, room, p1, 0, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
       await answerAt(service, room, p1, 1, true)
@@ -703,8 +744,8 @@ describe('Demo timed classroom flow', () => {
       const round1Teams = liveRoom.value?.teams ?? []
       const round1Questions = liveRoom.value?.questionIds ?? []
       const round1Stats = computeTeamCompetitionStats(players.value, round1Teams, round1Questions, events.value, 1)
-      // q0 raw 1 (no multiplier) + q1 raw 1 * 1.5 = 2.5 — the multiplier applies within round 1.
-      expect(round1Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBeCloseTo(2.5)
+      // 1 member: q0 raw 10 (no multiplier) + q1 raw 10 * 2 = 20 -> total 30 — the multiplier applies within round 1.
+      expect(round1Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBeCloseTo(30)
 
       // Move to round 2: player.score/answers reset, magic inventory resets, but the round-1
       // 'applied' event is NOT deleted from the log — it stays for history.
@@ -728,9 +769,9 @@ describe('Demo timed classroom flow', () => {
       const round2Questions = liveRoom.value?.questionIds ?? []
       const round2Stats = computeTeamCompetitionStats(players.value, round2Teams, round2Questions, events.value, 2)
       // Same event log (round-1's applied event still present), but scoped to round 2: no
-      // multiplier leaks in, so competitionTotal must equal the plain raw total (2), not 2.5.
-      expect(round2Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBe(2)
-      expect(round2Stats.find((team) => team.id === 'team-1')?.rawTotal).toBe(2)
+      // multiplier leaks in, so competitionTotal must equal the plain raw total (20), not 30.
+      expect(round2Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBe(20)
+      expect(round2Stats.find((team) => team.id === 'team-1')?.rawTotal).toBe(20)
 
       stopEvents()
       stopPlayers()
@@ -766,9 +807,9 @@ describe('Demo timed classroom flow', () => {
       // selectRoundQuestions's own anti-repeat guard only blocks reproducing the *entire*
       // previous 10-question set, not a single overlapping question, so this can happen
       // naturally; forcing it here makes the regression deterministic instead of flaky.
-      const rawState = JSON.parse(localStorage.getItem('matana_demo_state_v5') as string)
+      const rawState = JSON.parse(localStorage.getItem(DEMO_STORAGE_KEY) as string)
       rawState.rooms[room.roomCode].room.questionIds[0] = round1QuestionId
-      localStorage.setItem('matana_demo_state_v5', JSON.stringify(rawState))
+      localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(rawState))
       window.dispatchEvent(new Event('matana-demo-update'))
       await vi.waitFor(() => expect(liveRoom.value?.questionIds[0]).toBe(round1QuestionId))
 
@@ -821,8 +862,8 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
-      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
       await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
       await answerAt(service, room, p1, 0, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
       await answerAt(service, room, p1, 1, true)
@@ -843,7 +884,7 @@ describe('Demo timed classroom flow', () => {
       expect(roomAfterFailure.value?.currentQuestionIndex).toBe(1)
       // The item must still be queued and unconsumed — resolution never partially landed.
       expect(magicAfterFailure.value?.queuedEffect).not.toBeNull()
-      expect(magicAfterFailure.value?.inventory[0].consumed).toBe(false)
+      expect(magicAfterFailure.value?.inventory.power_surge.consumed).toBe(0)
       expect(eventsAfterFailure.value.find((event) => event.itemType === 'power_surge')?.status).toBe('queued')
 
       // Retry (no failure injected this time): must succeed exactly once, consuming the item
@@ -851,13 +892,202 @@ describe('Demo timed classroom flow', () => {
       await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
       await vi.waitFor(() => expect(roomAfterFailure.value?.currentQuestionIndex).toBe(2))
       expect(magicAfterFailure.value?.queuedEffect).toBeNull()
-      expect(magicAfterFailure.value?.inventory[0].consumed).toBe(true)
+      expect(magicAfterFailure.value?.inventory.power_surge.consumed).toBe(1)
       const appliedEvents = eventsAfterFailure.value.filter((event) => event.itemType === 'power_surge' && event.status === 'applied')
       expect(appliedEvents).toHaveLength(1) // exactly one applied event — no duplicate from the retry
 
       stopRoom()
       stopMagic()
       stopEvents()
+    })
+  })
+
+  describe('Milestone 2.2 gameplay UX corrections', () => {
+    it('choosing a starting item stores exactly one unconsumed item and never queues an effect', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await vi.waitFor(() => expect(magic.value ? hasAnyMagicItem(magic.value.inventory) : false).toBe(true))
+
+      expect(magic.value?.inventory.power_surge).toMatchObject({ available: 1, consumed: 0 })
+      expect(magic.value?.queuedEffect).toBeNull() // selecting never implies using
+      stop()
+    })
+
+    it('rejects activation from the waiting lobby, before the room has started playing', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+
+      // Still in the lobby (never called startRoom) — activation must be unavailable.
+      await expect(service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge'))
+        .rejects.toThrow('ไม่สามารถใช้ไอเทมได้ในขณะนี้')
+    })
+
+    it('activation during question 4 (index 3) targets question 5 (index 4), matching the documented examples', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      for (let index = 0; index < 3; index += 1) {
+        await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(index))
+        await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+      }
+      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(3)) // question 4
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await vi.waitFor(() => expect(magic.value?.queuedEffect).not.toBeNull())
+      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(4) // question 5
+
+      stopRoom()
+      stopMagic()
+    })
+
+    it('lets the teacher close the question early once every currently registered player has answered', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const p2 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      // Only p1 has answered — closing early must be rejected.
+      await answerAt(service, room, p1, 0, true)
+      await expect(service.closeQuestionEarly(room.roomCode, 'teacher-1', 0))
+        .rejects.toThrow('ยังมีผู้เล่นบางคนยังไม่ได้ตอบคำถามข้อนี้')
+
+      // Once everyone has answered, closing early succeeds.
+      await answerAt(service, room, p2, 0, true)
+      await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      // toBeTruthy(), not not.toBeNull(): liveRoom.value starts null, so the optional-chained
+      // read is undefined (not null) before the first snapshot — not.toBeNull() would pass
+      // vacuously on that empty render instead of waiting for the real questionClosedAt value.
+      await vi.waitFor(() => expect(liveRoom.value?.questionClosedAt).toBeTruthy())
+      stopRoom()
+    })
+
+    it('an early close immediately locks out further answers and starts the reveal countdown from that moment', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      // A long duration — if the deadline math ignored questionClosedAt, this question would
+      // still legitimately accept answers for another ~59 seconds.
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await answerAt(service, room, p1, 0, true)
+      await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.questionClosedAt).toBeTruthy())
+      const closedAt = liveRoom.value?.questionClosedAt as number
+
+      expect(getRemainingMilliseconds(liveRoom.value as Room, closedAt + 1)).toBe(0)
+      expect(getRevealRemainingMilliseconds(liveRoom.value as Room, closedAt)).toBe(ANSWER_REVEAL_MILLISECONDS)
+
+      // Trying to change the answer after the early close is rejected exactly like a normal
+      // timeout — answers are locked immediately, server-side, not just in the UI.
+      await expect(
+        service.saveAnswer(room.roomCode, p1.id, { questionId: room.questionIds[0], selectedChoiceId: 'x', expectedQuestionIndex: 0 }),
+      ).rejects.toThrow('หมดเวลาตอบคำถามข้อนี้แล้ว')
+
+      stopRoom()
+    })
+
+    it('advancing to the next question resets questionClosedAt to null', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await answerAt(service, room, p1, 0, true)
+      await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.questionClosedAt).toBeTruthy())
+
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(1))
+      expect(liveRoom.value?.questionClosedAt).toBeNull()
+
+      stopRoom()
+    })
+
+    it('a stale/duplicate closeQuestionEarly call after the question already closed is a silent no-op, not a second write', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await answerAt(service, room, p1, 0, true)
+      await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.questionClosedAt).toBeTruthy())
+      const firstClosedAt = liveRoom.value?.questionClosedAt
+
+      await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0) // duplicate click
+      expect(liveRoom.value?.questionClosedAt).toBe(firstClosedAt) // unchanged, not re-stamped
+
+      stopRoom()
+    })
+
+    // Milestone 2.2 explicitly requires automatic reveal/advance to keep working unchanged when
+    // the teacher does nothing — this is the existing timed-flow guarantee from Milestone 1,
+    // re-affirmed here after the questionClosedAt plumbing was added everywhere in the deadline
+    // computation.
+    it('automatic advancement after the reveal duration still works when the teacher never intervenes', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 5)
+      await answerAt(service, room, p1, 0, true)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(0))
+      expect(liveRoom.value?.questionClosedAt).toBeNull() // no early close happened
+
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(1))
+
+      stopRoom()
     })
   })
 

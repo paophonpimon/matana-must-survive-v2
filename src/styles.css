@@ -627,6 +627,18 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .petal-field { position: fixed; inset: 0; z-index: 5; overflow: hidden; pointer-events: none; }
 .petal-field i { --size: calc(8px + (var(--petal) * 1px)); position: absolute; top: -3rem; left: calc(7% + (var(--petal) * 9%)); width: var(--size); height: calc(var(--size) * 0.65); border-radius: 70% 30% 70% 30%; background: linear-gradient(135deg, #e67a88, #9e294a); opacity: 0.68; animation: petal-fall calc(7s + (var(--petal) * 0.7s)) linear calc(var(--petal) * -1.2s) infinite; }
 
+/* Milestone 4: lightweight, self-dismissing magic-effect popup (incoming seal / power surge /
+   shield block) — fixed to the viewport so it's visible regardless of scroll position, shown
+   once per event via sessionStorage (see services/sessionStorage.ts). */
+.magic-toast-stack { position: fixed; top: max(1rem, env(safe-area-inset-top)); left: 50%; z-index: 60; display: grid; gap: 0.6rem; width: min(92vw, 26rem); transform: translateX(-50%); pointer-events: none; }
+.magic-toast { display: flex; align-items: flex-start; gap: 0.7rem; border: 1px solid rgba(226,189,101,0.4); border-radius: 0.9rem; padding: 0.85rem 1rem; color: #fff7df; background: linear-gradient(145deg, rgba(28,20,52,0.96), rgba(15,11,34,0.96)); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 0 1px rgba(255,255,255,0.06); backdrop-filter: blur(10px); animation: gentle-rise 220ms ease-out both; pointer-events: auto; }
+.magic-toast-icon { flex: none; font-size: 1.3rem; line-height: 1; }
+.magic-toast p { margin: 0; font-size: 0.86rem; line-height: 1.5; white-space: pre-line; }
+.magic-toast-seal { border-color: rgba(211,100,104,0.5); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #d36468; }
+.magic-toast-surge { border-color: rgba(226,189,101,0.55); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #e2bd65; }
+.magic-toast-shield { border-color: rgba(111,220,145,0.5); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #6fdc91; }
+.magic-toast-winner { border-color: rgba(246,210,119,0.6); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #f6d277, 0 0 2rem rgba(224,169,59,0.25); }
+
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes counter-spin { to { transform: rotate(-360deg); } }
 @keyframes pulse-glow { 0%, 100% { opacity: 0.6; transform: scale(0.95); } 50% { opacity: 1; transform: scale(1.08); } }
