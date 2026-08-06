@@ -1,19 +1,35 @@
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
+import { getMagicActivationWindow, pickHolders } from '../lib/magic'
 import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, GameService } from './gameService'
-import type { JoinInput, JoinResult, Player, Room, Unsubscribe } from '../types/game'
+import type {
+  AnswerProgressEntry,
+  JoinInput,
+  JoinResult,
+  MagicEvent,
+  MagicItemType,
+  Player,
+  Room,
+  TeamMagicState,
+  TeamRosterSummary,
+  Unsubscribe,
+} from '../types/game'
 
 interface DemoRoomState {
   room: Room
   players: Record<string, Player>
+  magic: Record<string, TeamMagicState>
+  magicEvents: MagicEvent[]
+  rosters: Record<string, TeamRosterSummary>
+  answerProgress: Record<string, AnswerProgressEntry>
 }
 
 interface DemoState {
   rooms: Record<string, DemoRoomState>
 }
 
-const STORAGE_KEY = 'matana_demo_state_v3'
+const STORAGE_KEY = 'matana_demo_state_v5'
 const UPDATE_EVENT = 'matana-demo-update'
 const DEMO_ROOM_CODE = 'MATANA'
 const SHARED_STATE_PATH = '/__matana_demo_state'
@@ -86,17 +102,24 @@ const createSeedState = (): DemoState => {
     const id = stablePlayerId(studentNumber)
     players[id] = createPlayer(id, displayName, studentNumber, `demo-student-${index + 1}`)
   })
-  return { rooms: { [DEMO_ROOM_CODE]: { room, players } } }
+  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {} } } }
 }
 
 const normalizeState = (state: DemoState): DemoState => {
-  Object.values(state.rooms).forEach(({ room }) => {
+  Object.values(state.rooms).forEach((roomState) => {
+    const { room } = roomState
     room.currentQuestionIndex ??= 0
     room.questionDurationSeconds ??= 30
     room.questionStartedAt ??= room.status === 'playing' ? room.startedAt : null
     room.teamCount ??= 0
     room.teamsLocked ??= false
     room.teams ??= []
+    roomState.magic ??= {}
+    roomState.magicEvents ??= []
+    // Older saved demo state (before this migration) won't have these keys at all — default
+    // to empty rather than crashing.
+    roomState.rosters ??= {}
+    roomState.answerProgress ??= {}
   })
   return state
 }
@@ -191,6 +214,66 @@ const listen = (callback: () => void): Unsubscribe => {
   }
 }
 
+const consumeInventoryItem = (magic: TeamMagicState, itemType: MagicItemType, now: number): void => {
+  const item = magic.inventory.find((entry) => entry.itemType === itemType && !entry.consumed)
+  if (item) {
+    item.consumed = true
+    item.consumedAt = now
+  }
+}
+
+// Runs when leaving `resolvedQuestionIndex` (either advancing to the next question or
+// completing the round). For every team whose queuedEffect targeted that question: resolve it
+// against the current player answers, update the matching magicEvents record in place, and
+// clear the queued slot. Shields only ever block a hostile score_seal — never a team's own
+// power_surge — and a shield check never touches the source team's own item consumption.
+const resolveQuestionMagic = (roomState: DemoRoomState, resolvedQuestionIndex: number, now: number): void => {
+  for (const team of roomState.room.teams) {
+    const magic = roomState.magic[team.id]
+    const effect = magic?.queuedEffect
+    if (!magic || !effect || effect.affectedQuestionIndex !== resolvedQuestionIndex) continue
+    const event = roomState.magicEvents.find((item) => item.id === effect.id)
+    if (effect.itemType === 'power_surge') {
+      consumeInventoryItem(magic, 'power_surge', now)
+      if (event) {
+        event.status = 'applied'
+        event.resolvedAt = now
+      }
+    } else {
+      const targetMagic = roomState.magic[effect.targetTeamId]
+      const shieldItem = targetMagic?.inventory.find((item) => item.itemType === 'rose_shield' && !item.consumed)
+      consumeInventoryItem(magic, 'score_seal', now)
+      if (shieldItem) {
+        shieldItem.consumed = true
+        shieldItem.consumedAt = now
+        if (event) {
+          event.status = 'blocked'
+          event.resolvedAt = now
+        }
+      } else if (event) {
+        event.status = 'applied'
+        event.resolvedAt = now
+      }
+    }
+    magic.queuedEffect = null
+  }
+}
+
+// Round reset (prepareNextRound/stopRound/closeRoom): any effect still 'queued' never got the
+// chance to resolve — mark it 'expired' rather than silently dropping it, so the audit trail
+// stays complete.
+const expireQueuedEffects = (roomState: DemoRoomState, now: number): void => {
+  for (const magic of Object.values(roomState.magic)) {
+    if (!magic.queuedEffect) continue
+    const event = roomState.magicEvents.find((item) => item.id === magic.queuedEffect?.id)
+    if (event) {
+      event.status = 'expired'
+      event.resolvedAt = now
+    }
+    magic.queuedEffect = null
+  }
+}
+
 export class DemoGameService implements GameService {
   readonly isDemo = true
   readonly demoRoomCode = DEMO_ROOM_CODE
@@ -233,7 +316,7 @@ export class DemoGameService implements GameService {
       teamsLocked: false,
       teams: [],
     }
-    state.rooms[roomCode] = { room, players: {} }
+    state.rooms[roomCode] = { room, players: {}, magic: {}, magicEvents: [], rosters: {}, answerProgress: {} }
     await writeState(state)
     return room
   }
@@ -287,6 +370,45 @@ export class DemoGameService implements GameService {
     return listen(() => { void emit() })
   }
 
+  subscribeTeamMagic(roomCode: string, teamId: string, listener: (magic: TeamMagicState | null) => void): Unsubscribe {
+    const emit = async (): Promise<void> => listener((await readState()).rooms[roomCode.toUpperCase()]?.magic[teamId] ?? null)
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeAllTeamMagic(roomCode: string, listener: (magic: TeamMagicState[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const magic = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.magic ?? {})
+      listener(magic)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeMagicEvents(roomCode: string, listener: (events: MagicEvent[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const events = [...((await readState()).rooms[roomCode.toUpperCase()]?.magicEvents ?? [])].sort((a, b) => b.createdAt - a.createdAt)
+      listener(events)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeTeamRoster(roomCode: string, teamId: string, listener: (roster: TeamRosterSummary | null) => void): Unsubscribe {
+    const emit = async (): Promise<void> => listener((await readState()).rooms[roomCode.toUpperCase()]?.rosters[teamId] ?? null)
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeTeamAnswerProgress(roomCode: string, teamId: string, listener: (entries: AnswerProgressEntry[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const entries = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.answerProgress ?? {}).filter((entry) => entry.teamId === teamId)
+      listener(entries)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
   async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
@@ -296,6 +418,8 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     if (!roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
+    const teamsWithoutStartingItem = roomState.room.teams.filter((team) => (roomState.magic[team.id]?.inventory.length ?? 0) === 0)
+    if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
     roomState.room.status = 'playing'
     roomState.room.startedAt = Date.now()
     roomState.room.currentQuestionIndex = 0
@@ -315,6 +439,7 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'playing' || roomState.room.currentQuestionIndex !== expectedQuestionIndex) return
     const nextQuestionIndex = expectedQuestionIndex + 1
     const now = Date.now()
+    resolveQuestionMagic(roomState, expectedQuestionIndex, now)
     if (nextQuestionIndex >= roomState.room.questionIds.length) {
       roomState.room.status = 'completed'
       roomState.room.completedAt = now
@@ -366,6 +491,12 @@ export class DemoGameService implements GameService {
         status: 'waiting',
       })
     })
+    // A new round means Q1-Q10 indices reset, so any still-queued effect from the old round is
+    // meaningless — expire it for the audit trail. Inventory resets too: requirement 2 frames
+    // starting-item choice as happening fresh each time "before the teacher starts the game".
+    // The holder itself is untouched — only a fresh lockTeams re-picks holders.
+    expireQueuedEffects(roomState, Date.now())
+    Object.values(roomState.magic).forEach((magic) => { magic.inventory = [] })
     await writeState(state)
   }
 
@@ -401,6 +532,8 @@ export class DemoGameService implements GameService {
         status: 'waiting',
       })
     })
+    expireQueuedEffects(roomState, Date.now())
+    Object.values(roomState.magic).forEach((magic) => { magic.inventory = [] })
     await writeState(state)
   }
 
@@ -413,6 +546,7 @@ export class DemoGameService implements GameService {
     Object.values(roomState.players).forEach((player) => {
       player.status = 'stopped'
     })
+    expireQueuedEffects(roomState, Date.now())
     await writeState(state)
   }
 
@@ -429,14 +563,26 @@ export class DemoGameService implements GameService {
     if (playerIds.length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังจัดทีมไม่ได้')
     if (teamCount > playerIds.length) throw new Error('ผู้ใช้:จำนวนทีมต้องไม่เกินจำนวนผู้เล่น')
     const assignment = distributeTeamsEvenly(playerIds, teamCount)
-    // Apply the room's team labels and every player's teamId together before the single
-    // writeState call below, so no observer ever sees teams assigned while players aren't
-    // (or vice versa) — this is the in-memory equivalent of one atomic Firestore batch.
+    const teams = buildTeamMetas(teamCount)
+    // Apply the room's team labels, every player's teamId, AND the display-only roster
+    // summary together before the single writeState call below, so no observer ever sees
+    // teams assigned while players (or the roster built from them) aren't — this is the
+    // in-memory equivalent of one atomic Firestore batch. The roster is rebuilt wholesale
+    // from this exact assignment every time, including re-randomizes before lock, so it can
+    // never observably lag or diverge from what it was built from.
     roomState.room.teamCount = teamCount
-    roomState.room.teams = buildTeamMetas(teamCount)
+    roomState.room.teams = teams
     playerIds.forEach((playerId) => {
       roomState.players[playerId].teamId = assignment[playerId]
     })
+    const rosters: Record<string, TeamRosterSummary> = {}
+    teams.forEach((team) => { rosters[team.id] = { teamId: team.id, teamName: team.name, members: [] } })
+    playerIds.forEach((playerId) => {
+      const teamId = assignment[playerId]
+      const player = roomState.players[playerId]
+      rosters[teamId]?.members.push({ playerId, displayName: player.displayName })
+    })
+    roomState.rosters = rosters
     await writeState(state)
   }
 
@@ -456,14 +602,32 @@ export class DemoGameService implements GameService {
 
     const latestState = await readState()
     const latestRoomState = latestState.rooms[roomCode]
-    const hasUnassigned = latestRoomState
-      ? Object.values(latestRoomState.players).some((player) => player.teamId == null)
-      : false
-    if (hasUnassigned && latestRoomState) {
+    if (!latestRoomState) return
+    const hasUnassigned = Object.values(latestRoomState.players).some((player) => player.teamId == null)
+    if (hasUnassigned) {
       latestRoomState.room.teamsLocked = false
       await writeState(latestState)
       throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
     }
+
+    // Success: (re)select exactly one holder per team and give every team a fresh, empty
+    // magic state — "re-locking after unlock may select holders again."
+    const memberIdsByTeam: Record<string, string[]> = {}
+    latestRoomState.room.teams.forEach((team) => { memberIdsByTeam[team.id] = [] })
+    Object.values(latestRoomState.players).forEach((player) => {
+      if (player.teamId && memberIdsByTeam[player.teamId]) memberIdsByTeam[player.teamId].push(player.id)
+    })
+    const holders = pickHolders(memberIdsByTeam)
+    latestRoomState.magic = {}
+    latestRoomState.room.teams.forEach((team) => {
+      latestRoomState.magic[team.id] = {
+        teamId: team.id,
+        magicHolderPlayerId: holders[team.id] ?? null,
+        inventory: [],
+        queuedEffect: null,
+      }
+    })
+    await writeState(latestState)
   }
 
   async unlockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
@@ -509,7 +673,135 @@ export class DemoGameService implements GameService {
     if (existingAnswerIndex >= 0) player.answers[existingAnswerIndex] = record
     else player.answers.push(record)
     player.score += (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
+    // Overwrite (never append) this player's own progress entry — first answer or changing
+    // the choice for the same question both land here, so "X" can never double-count a
+    // teammate. Once the room moves to the next question, this entry's questionId no longer
+    // matches room.currentQuestionIndex's question, so it stops counting toward the new
+    // question's total with no explicit reset needed.
+    if (player.teamId) {
+      roomState.answerProgress[playerId] = {
+        playerId,
+        teamId: player.teamId,
+        questionId: answer.questionId,
+        answeredAt: record.answeredAt,
+      }
+    }
     await writeState(state)
     return { player, winner: null }
+  }
+
+  async chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    const magic = roomState.magic[teamId]
+    if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+    if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+    if (roomState.room.status !== 'waiting' || !roomState.room.teamsLocked) {
+      throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+    }
+    if (magic.inventory.length > 0) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
+    magic.inventory = [{ itemType, acquiredAt: Date.now(), consumed: false, consumedAt: null }]
+    await writeState(state)
+  }
+
+  async activateItem(
+    roomCode: string,
+    teamId: string,
+    playerId: string,
+    itemType: 'power_surge' | 'score_seal',
+    targetTeamId?: string,
+  ): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    const magic = roomState.magic[teamId]
+    if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+    if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+
+    const window = getMagicActivationWindow(roomState.room)
+    if (!window.valid || window.affectedQuestionIndex == null) {
+      throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
+    }
+    const affectedQuestionIndex = window.affectedQuestionIndex
+
+    const inventoryItem = magic.inventory.find((item) => item.itemType === itemType && !item.consumed)
+    if (!inventoryItem) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
+
+    const resolvedTargetTeamId = itemType === 'power_surge' ? teamId : targetTeamId
+    const now = Date.now()
+
+    // A legitimate holder attempt that fails validation still gets an audit record — this is
+    // what makes "duplicate activation rejected" / "wrong target rejected" visible in the
+    // teacher's event history, not just a toast the student saw.
+    const rejectEvent = (): void => {
+      roomState.magicEvents.push({
+        id: `magic-${createId()}`,
+        itemType,
+        actorPlayerId: playerId,
+        sourceTeamId: teamId,
+        targetTeamId: resolvedTargetTeamId ?? null,
+        affectedQuestionIndex,
+        status: 'rejected',
+        createdAt: now,
+        resolvedAt: now,
+      })
+    }
+
+    if (magic.queuedEffect) {
+      rejectEvent()
+      await writeState(state)
+      throw new Error('ผู้ใช้:ทีมนี้มีไอเทมที่กำลังรอผลอยู่แล้ว')
+    }
+
+    if (itemType === 'score_seal') {
+      if (!targetTeamId) {
+        rejectEvent()
+        await writeState(state)
+        throw new Error('ผู้ใช้:กรุณาเลือกทีมเป้าหมาย')
+      }
+      if (targetTeamId === teamId) {
+        rejectEvent()
+        await writeState(state)
+        throw new Error('ผู้ใช้:เลือกทีมตัวเองเป็นเป้าหมายไม่ได้')
+      }
+      if (!roomState.room.teams.some((team) => team.id === targetTeamId)) {
+        rejectEvent()
+        await writeState(state)
+        throw new Error('ผู้ใช้:ไม่พบทีมเป้าหมาย')
+      }
+      const alreadyTargeted = Object.values(roomState.magic).some((otherMagic) =>
+        otherMagic.queuedEffect?.itemType === 'score_seal'
+        && otherMagic.queuedEffect.targetTeamId === targetTeamId
+        && otherMagic.queuedEffect.affectedQuestionIndex === affectedQuestionIndex,
+      )
+      if (alreadyTargeted) {
+        rejectEvent()
+        await writeState(state)
+        throw new Error('ผู้ใช้:ทีมเป้าหมายถูกใช้ไอเทมฝ่ายตรงข้ามในข้อนี้ไปแล้ว')
+      }
+    }
+
+    const effectId = `magic-${createId()}`
+    magic.queuedEffect = {
+      id: effectId,
+      itemType,
+      sourceTeamId: teamId,
+      targetTeamId: resolvedTargetTeamId as string,
+      affectedQuestionIndex,
+      createdAt: now,
+    }
+    roomState.magicEvents.push({
+      id: effectId,
+      itemType,
+      actorPlayerId: playerId,
+      sourceTeamId: teamId,
+      targetTeamId: resolvedTargetTeamId ?? null,
+      affectedQuestionIndex,
+      status: 'queued',
+      createdAt: now,
+      resolvedAt: null,
+    })
+    await writeState(state)
   }
 }

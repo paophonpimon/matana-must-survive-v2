@@ -68,3 +68,25 @@ export const computeCurrentQuestionStats = (
   }
   return { answeredCount, correctCount }
 }
+
+// Per-team current-question progress ("ตอบแล้ว X/Y"), distinct from computeTeamStats's
+// submittedCount (full-game completion, "เล่นจบ X/Y") — a member who has answered only the
+// current question counts toward this, not that.
+export const computeTeamCurrentQuestionCounts = (
+  players: Player[],
+  teams: TeamMeta[],
+  questionId: string | undefined,
+): Map<string, number> => {
+  const counts = new Map<string, number>()
+  if (!questionId) {
+    teams.forEach((team) => counts.set(team.id, 0))
+    return counts
+  }
+  teams.forEach((team) => {
+    const answeredCount = players.filter(
+      (player) => player.teamId === team.id && player.answers.some((answer) => answer.questionId === questionId),
+    ).length
+    counts.set(team.id, answeredCount)
+  })
+  return counts
+}

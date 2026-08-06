@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { useGame } from '../context/GameContext'
-import { useRoom, usePlayers } from '../hooks/useGameData'
+import { useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { resolveTeacherRoomSession } from '../lib/game'
-import { computeCurrentQuestionStats, computeTeamStats } from '../lib/teamScoring'
+import { computeTeamCompetitionStats, MAGIC_ITEM_INFO } from '../lib/magic'
+import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, saveTeacherSession } from '../services/sessionStorage'
 import type { Player } from '../types/game'
@@ -118,21 +119,40 @@ export const TeacherPage = () => {
     return playersState.data.map((player) => ({ ...player, score: getTeacherVisibleScore(room, player, now) }))
   }, [now, playersState.data, roomState.data])
 
+  const magicState = useAllTeamMagic(roomCode)
+  const magicEventsState = useMagicEvents(roomCode)
+
+  // teamStats stays raw (memberCount/submittedCount/correctCount/full-game completion) — the
+  // magic-item system must never touch it. competitionStats is the magic-adjusted score shown
+  // as the primary teacher leaderboard ranking, per the core rule that items affect only the
+  // competition score. Both are fed the same reveal-hiding visiblePlayers so a team's live
+  // score (raw or competition) can't be gamed by watching the current question's reveal.
   const teamStats = useMemo(
     () => computeTeamStats(visiblePlayers, roomState.data?.teams ?? []),
     [visiblePlayers, roomState.data?.teams],
   )
+  const competitionStats = useMemo(
+    () => computeTeamCompetitionStats(visiblePlayers, roomState.data?.teams ?? [], roomState.data?.questionIds ?? [], magicEventsState.data),
+    [visiblePlayers, roomState.data?.teams, roomState.data?.questionIds, magicEventsState.data],
+  )
+  const teamStatsById = useMemo(() => new Map(teamStats.map((team) => [team.id, team])), [teamStats])
   const currentQuestionStats = useMemo(
     () => computeCurrentQuestionStats(playersState.data, currentQuestionId),
     [playersState.data, currentQuestionId],
   )
+  const currentQuestionCounts = useMemo(
+    () => computeTeamCurrentQuestionCounts(playersState.data, roomState.data?.teams ?? [], currentQuestionId),
+    [playersState.data, roomState.data?.teams, currentQuestionId],
+  )
   const teamNameById = useMemo(() => new Map((roomState.data?.teams ?? []).map((team) => [team.id, team.name])), [roomState.data?.teams])
+  const magicByTeamId = useMemo(() => new Map(magicState.data.map((magic) => [magic.teamId, magic])), [magicState.data])
+  const playerNameById = useMemo(() => new Map(playersState.data.map((player) => [player.id, player.displayName])), [playersState.data])
 
-  const highestAverage = teamStats[0]?.averageScore ?? 0
-  const overallAverage = teamStats.length > 0 ? teamStats.reduce((total, team) => total + team.averageScore, 0) / teamStats.length : 0
-  const leadingTeams = teamStats.filter((team) => team.memberCount > 0 && team.averageScore === highestAverage)
+  const highestAverage = competitionStats[0]?.competitionAverage ?? 0
+  const overallAverage = competitionStats.length > 0 ? competitionStats.reduce((total, team) => total + team.competitionAverage, 0) / competitionStats.length : 0
+  const leadingTeams = competitionStats.filter((team) => team.memberCount > 0 && team.competitionAverage === highestAverage)
   const leadingTeamLabel = leadingTeams.length > 1 ? `${leadingTeams.length} ทีมคะแนนเท่ากัน` : leadingTeams[0]?.name ?? '-'
-  const podiumFollowers = teamStats.filter((team) => team.averageScore < highestAverage).slice(0, 2)
+  const podiumFollowers = competitionStats.filter((team) => team.competitionAverage < highestAverage).slice(0, 2)
   const unassignedCount = sortedPlayers.filter((player) => player.teamId == null).length
 
   useEffect(() => {
@@ -376,12 +396,12 @@ export const TeacherPage = () => {
                   {podiumFollowers.length > 0 ? (
                     <div className={`podium-followers ${podiumFollowers.length === 1 ? 'podium-followers-single' : ''}`}>
                       {podiumFollowers.map((team) => {
-                        const rank = teamStats.findIndex((rankedTeam) => rankedTeam.id === team.id) + 1
+                        const rank = competitionStats.findIndex((rankedTeam) => rankedTeam.id === team.id) + 1
                         return (
                           <article className={`podium-place podium-place-${Math.min(rank, 3)}`} key={team.id}>
                             <RankEmblem rank={rank} leading={false} />
                             <div><small>อันดับที่ {rank}</small><strong>{team.name}</strong><span>{team.memberCount} คน</span></div>
-                            <b>{team.averageScore.toFixed(1)}<span>เฉลี่ย</span></b>
+                            <b>{team.competitionAverage.toFixed(1)}<span>เฉลี่ย</span></b>
                           </article>
                         )
                       })}
@@ -467,27 +487,34 @@ export const TeacherPage = () => {
                   )
                 ) : showIndividualResults ? (
                   <IndividualResultsTable players={sortedPlayers} questionIds={roomState.data.questionIds} teamNameById={teamNameById} />
-                ) : teamStats.length === 0 ? (
+                ) : competitionStats.length === 0 ? (
                   <div className="empty-state">
                     <div aria-hidden="true">✦</div>
                     <h3>ยังไม่มีทีม</h3>
                   </div>
                 ) : (
                   <ol className="scoreboard-list" aria-live="polite">
-                    {teamStats.map((team, index) => {
-                      const isLeader = highestAverage > 0 && team.averageScore === highestAverage && team.memberCount > 0
+                    {competitionStats.map((team, index) => {
+                      const isLeader = highestAverage > 0 && team.competitionAverage === highestAverage && team.memberCount > 0
+                      const fullGame = teamStatsById.get(team.id)
+                      const currentQuestionCount = currentQuestionCounts.get(team.id) ?? 0
                       return (
                         <li key={team.id} className={`scoreboard-row ${isLeader ? 'scoreboard-row-leading' : ''}`}>
                           <RankEmblem rank={index + 1} leading={isLeader} />
                           <div className="scoreboard-team">
                             <strong>{team.name}</strong>
-                            <small>{team.memberCount} คน · ส่งแล้ว {team.submittedCount}/{team.memberCount} · ถูก {team.correctCount} ข้อ</small>
-                            <div className="scoreboard-progress" aria-label={`ส่งคำตอบแล้ว ${team.submittedCount} จาก ${team.memberCount} คน`}><i style={{ width: `${team.memberCount > 0 ? (team.submittedCount / team.memberCount) * 100 : 0}%` }} /></div>
+                            <small>
+                              {team.memberCount} คน
+                              {roomState.data?.status === 'playing' ? ` · ตอบแล้ว ${currentQuestionCount}/${team.memberCount}` : ''}
+                              {' · เล่นจบ '}{fullGame?.submittedCount ?? 0}/{team.memberCount}
+                              {' · ถูก '}{fullGame?.correctCount ?? 0} ข้อ
+                            </small>
+                            <div className="scoreboard-progress" aria-label={`เล่นจบแล้ว ${fullGame?.submittedCount ?? 0} จาก ${team.memberCount} คน`}><i style={{ width: `${team.memberCount > 0 ? ((fullGame?.submittedCount ?? 0) / team.memberCount) * 100 : 0}%` }} /></div>
                           </div>
                           <span className={`team-status team-status-${finalMode ? (roomState.data?.status === 'closed' ? 'stopped' : 'submitted') : 'playing'}`}>
                             {finalMode ? (roomState.data?.status === 'closed' ? 'สรุปแล้ว' : 'จบรอบแล้ว') : 'กำลังเล่น'}
                           </span>
-                          <div className="scoreboard-score"><small>เฉลี่ย</small><strong>{team.averageScore.toFixed(1)}</strong></div>
+                          <div className="scoreboard-score"><small>เฉลี่ย</small><strong>{team.competitionAverage.toFixed(1)}</strong></div>
                         </li>
                       )
                     })}
@@ -573,6 +600,72 @@ export const TeacherPage = () => {
                 </section>
               </aside> : null}
             </div>
+
+            {roomState.data.teams.length > 0 ? (
+              <section className="glass-panel mt-6 p-5" aria-label="สถานะมนตรา">
+                <p className="eyebrow">สถานะมนตรา</p>
+                <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">ไอเทมประจำทีม</h2>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  {roomState.data.teams.map((team, index) => {
+                    const magic = magicByTeamId.get(team.id)
+                    const holderName = magic?.magicHolderPlayerId ? playerNameById.get(magic.magicHolderPlayerId) ?? '-' : '-'
+                    const hasShield = magic?.inventory.some((item) => item.itemType === 'rose_shield' && !item.consumed) ?? false
+                    const raw = teamStatsById.get(team.id)
+                    const competition = competitionStats.find((entry) => entry.id === team.id)
+                    return (
+                      <div key={team.id} className={`text-sm ${index > 0 ? 'border-t border-white/10 pt-4 sm:border-t-0 sm:pt-0' : ''}`}>
+                        <div className="flex items-center justify-between gap-3">
+                          <strong className="text-[#fff7df]">{team.name}</strong>
+                          <span className="text-xs text-[#c0b7ab]">ผู้ถือคทา: {holderName}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-[#c0b7ab]">
+                          คะแนนดิบเฉลี่ย {(raw?.averageScore ?? 0).toFixed(1)} · คะแนนแข่งขันเฉลี่ย {(competition?.competitionAverage ?? 0).toFixed(1)}
+                        </p>
+                        <ul className="mt-2 space-y-0.5">
+                          {!magic || magic.inventory.length === 0 ? (
+                            <li className="text-[#8b8377]">ยังไม่มีไอเทม</li>
+                          ) : magic.inventory.map((item, itemIndex) => (
+                            <li key={itemIndex} className={item.consumed ? 'text-[#8b8377] line-through' : 'text-[#fff7df]'}>
+                              {MAGIC_ITEM_INFO[item.itemType].label}{item.consumed ? ' (ใช้แล้ว)' : ''}
+                            </li>
+                          ))}
+                        </ul>
+                        {magic?.queuedEffect ? (
+                          <p className="mt-2 text-xs text-[#f2d58d]">
+                            กำลังใช้ {MAGIC_ITEM_INFO[magic.queuedEffect.itemType].label} เป้าหมาย {teamNameById.get(magic.queuedEffect.targetTeamId) ?? '-'} · มีผลข้อที่ {magic.queuedEffect.affectedQuestionIndex + 1}
+                          </p>
+                        ) : null}
+                        {hasShield ? <p className="mt-1 text-xs text-[#7fdc9d]">พร้อมป้องกันด้วยเกราะกุหลาบ</p> : null}
+                      </div>
+                    )
+                  })}
+                </div>
+                {magicEventsState.data.length > 0 ? (
+                  <div className="mt-5 border-t border-white/10 pt-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[#b6ab9e]">ประวัติล่าสุด</p>
+                    <ul className="mt-2 space-y-1 text-xs text-[#c0b7ab]">
+                      {magicEventsState.data.slice(0, 8).map((event) => {
+                        const statusLabel = {
+                          queued: 'รอผล',
+                          applied: 'สำเร็จ',
+                          blocked: 'ถูกบล็อก',
+                          expired: 'หมดอายุ',
+                          rejected: 'ถูกปฏิเสธ',
+                        }[event.status]
+                        return (
+                          <li key={event.id}>
+                            {teamNameById.get(event.sourceTeamId) ?? event.sourceTeamId} ใช้ {MAGIC_ITEM_INFO[event.itemType].label}
+                            {event.targetTeamId && event.targetTeamId !== event.sourceTeamId ? ` → ${teamNameById.get(event.targetTeamId) ?? event.targetTeamId}` : ''}
+                            {event.affectedQuestionIndex != null ? ` (ข้อ ${event.affectedQuestionIndex + 1})` : ''}
+                            {' — '}{statusLabel}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
           </>
         )}
       </div>

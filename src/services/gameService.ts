@@ -1,4 +1,4 @@
-import type { JoinInput, JoinResult, Player, Room, Unsubscribe, Winner } from '../types/game'
+import type { AnswerProgressEntry, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
 
 export interface AnswerInput {
   questionId: string
@@ -30,6 +30,13 @@ export interface GameService {
   randomizeTeams(roomCode: string, teacherSessionId: string, teamCount: number): Promise<void>
   lockTeams(roomCode: string, teacherSessionId: string): Promise<void>
   unlockTeams(roomCode: string, teacherSessionId: string): Promise<void>
+  subscribeTeamMagic(roomCode: string, teamId: string, listener: (magic: TeamMagicState | null) => void, onError: (message: string) => void): Unsubscribe
+  subscribeAllTeamMagic(roomCode: string, listener: (magic: TeamMagicState[]) => void, onError: (message: string) => void): Unsubscribe
+  subscribeMagicEvents(roomCode: string, listener: (events: MagicEvent[]) => void, onError: (message: string) => void): Unsubscribe
+  chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void>
+  activateItem(roomCode: string, teamId: string, playerId: string, itemType: 'power_surge' | 'score_seal', targetTeamId?: string): Promise<void>
+  subscribeTeamRoster(roomCode: string, teamId: string, listener: (roster: TeamRosterSummary | null) => void, onError: (message: string) => void): Unsubscribe
+  subscribeTeamAnswerProgress(roomCode: string, teamId: string, listener: (entries: AnswerProgressEntry[]) => void, onError: (message: string) => void): Unsubscribe
 }
 
 // Used by FirebaseGameService.joinRoom's catch block when the transaction's read of the

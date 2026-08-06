@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
+import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
-import { useRoom, usePlayer } from '../hooks/useGameData'
+import { useRoom, usePlayer, useTeamAnswerProgress, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
 import { areAnswersLocked, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { getMagicActivationWindow } from '../lib/magic'
 import { friendlyError } from '../services'
 import { getPlayerSession } from '../services/sessionStorage'
 
@@ -23,6 +25,10 @@ export const GamePage = () => {
   const session = getPlayerSession()
   const roomState = useRoom(normalizedCode)
   const playerState = usePlayer(normalizedCode, session?.roomCode === normalizedCode ? session.playerId : '')
+  const teamId = playerState.data?.teamId ?? ''
+  const rosterState = useTeamRoster(normalizedCode, teamId)
+  const progressState = useTeamAnswerProgress(normalizedCode, teamId)
+  const magicState = useTeamMagic(normalizedCode, teamId)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [pendingChoiceId, setPendingChoiceId] = useState('')
@@ -42,6 +48,16 @@ export const GamePage = () => {
   const hasAnswered = Boolean(savedAnswer || pendingChoiceId)
   const answerWasCorrect = Boolean(selectedChoiceId && selectedChoiceId === question?.correctChoiceId)
   const progress = Math.min(100, (questionIndex / 10) * 100)
+
+  // Y is the full locked roster (disconnected members included, since it's membership-based
+  // not connection-based); X counts progress entries for the room's *current* questionId only
+  // — a teammate's entry for a previous question simply doesn't match, so this reads 0 for a
+  // fresh question with no explicit reset, and holds steady through the reveal window since
+  // nothing touches these entries between question-end and the next question actually starting.
+  const teamRosterSize = rosterState.data?.members.length ?? 0
+  const teamAnsweredCount = questionId ? progressState.data.filter((entry) => entry.questionId === questionId).length : 0
+  const activationWindow = room ? getMagicActivationWindow(room, now) : { valid: false, affectedQuestionIndex: null }
+  const canActivateMagicNow = Boolean(room && room.status === 'playing' && timeExpired && revealRemainingMs > 0)
 
   useEffect(() => {
     if (room?.status !== 'playing') return
@@ -145,7 +161,29 @@ export const GamePage = () => {
                 ) : null}
               </div>
             </section>
+
+            {rosterState.data ? (
+              <section className="mt-4 text-center text-sm text-[#c9a55f]" aria-live="polite">
+                {teamRosterSize > 0 && teamAnsweredCount >= teamRosterSize
+                  ? 'ตอบครบทั้งทีมแล้ว'
+                  : `ทีมของคุณตอบแล้ว ${teamAnsweredCount}/${teamRosterSize} คน`}
+              </section>
+            ) : null}
+
             <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">เมื่อหมดเวลา ระบบจะแสดงว่าตอบถูกหรือผิดพร้อมคะแนนสะสมของคุณ แล้วทุกคนจึงเปลี่ยนข้อพร้อมกัน คำตอบของคุณเป็นความลับ เพื่อนร่วมทีมไม่เห็นคำตอบของคุณ</p>
+
+            {player.teamId ? (
+              <MagicPanel
+                magic={magicState.data}
+                magicLoading={magicState.loading}
+                teams={room.teams}
+                isHolder={magicState.data?.magicHolderPlayerId === player.id}
+                canActivateNow={canActivateMagicNow}
+                affectedQuestionIndex={activationWindow.valid ? activationWindow.affectedQuestionIndex : null}
+                onChoose={(itemType) => service.chooseStartingItem(normalizedCode, player.teamId as string, player.id, itemType)}
+                onActivate={(itemType, targetTeamId) => service.activateItem(normalizedCode, player.teamId as string, player.id, itemType, targetTeamId)}
+              />
+            ) : null}
           </>
         )}
       </div>

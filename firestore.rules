@@ -14,6 +14,55 @@ service cloud.firestore {
       return signedIn() && room(roomCode).teacherSessionId == request.auth.uid;
     }
 
+    // Milestone 2: shared by magic/{teamId}, magicEvents/{eventId}, and answerProgress —
+    // verifies the caller actually owns the named player doc (the same get()+ownerUid-compare
+    // shape used everywhere else in this file, just parameterized by which player id to check).
+    function isPlayerOwner(roomCode, playerId) {
+      return playerId != null
+        && get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.ownerUid == request.auth.uid;
+    }
+
+    // Security-hardening pass: mirrors lib/magic.ts's isEligibleQuestionIndex /
+    // getMagicActivationWindow so a holder's queuedEffect write can be validated
+    // server-side, not just trusted from the client. ANSWER_REVEAL_MILLISECONDS (4000) must
+    // stay in sync with src/lib/gameFlow.ts's constant of the same name.
+    function isEligibleQuestionIndex(roomCode, index) {
+      return index > 0 && index < room(roomCode).questionIds.size() - 1;
+    }
+
+    function questionDeadlineMillis(roomCode) {
+      return room(roomCode).questionStartedAt.toMillis() + room(roomCode).questionDurationSeconds * 1000;
+    }
+
+    function isLobbyActivationWindow(roomCode, index) {
+      return room(roomCode).status == 'waiting' && index == 1;
+    }
+
+    function isRevealActivationWindow(roomCode, index) {
+      return room(roomCode).status == 'playing'
+        && room(roomCode).questionStartedAt != null
+        && index == room(roomCode).currentQuestionIndex + 1
+        && request.time.toMillis() >= questionDeadlineMillis(roomCode)
+        && request.time.toMillis() < questionDeadlineMillis(roomCode) + 4000;
+    }
+
+    // Question 1 (index 0) and the final question are never eligible; the only two legal
+    // windows are the lobby (before question 2) and the current question's reveal/intermission
+    // (before the next question) — anything else (mid-question, completed/closed room) is
+    // rejected by the isLobby/isReveal disjunction below returning false.
+    function isValidActivationWindow(roomCode, index) {
+      return isEligibleQuestionIndex(roomCode, index)
+        && (isLobbyActivationWindow(roomCode, index) || isRevealActivationWindow(roomCode, index));
+    }
+
+    // Reads the sibling magic/{teamId} doc's state as it will exist *after* this same atomic
+    // write commits — used only to correlate a 'queued' magicEvents record against the
+    // queuedEffect transition happening in the same transaction, so a student can never create
+    // a magicEvents doc independently of a real, validated queuedEffect.
+    function magicAfter(roomCode, teamId) {
+      return getAfter(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(teamId)).data;
+    }
+
     match /rooms/{roomCode} {
       // MVP: ผู้ใช้ที่ยืนยันตัวตนแบบ anonymous อ่านข้อมูลห้องได้เพื่อเข้าร่วมด้วยรหัส
       allow read: if signedIn();
@@ -80,6 +129,143 @@ service cloud.firestore {
           && request.resource.data.score <= resource.data.score + 1
           && request.resource.data.score >= 0
           && request.resource.data.score <= 10
+        );
+        allow delete: if false;
+      }
+
+      // Milestone 2: team magic items. Score/scoring-affecting fields are computed client
+      // and server side purely from players + magicEvents (never stored) — these documents
+      // only ever hold item/queue/holder bookkeeping.
+      match /magic/{teamId} {
+        // Opponents can currently see every team's holder/inventory/queuedEffect/shield state
+        // via this broad signedIn() read — tracked as a known remaining gameplay-privacy gap,
+        // not addressed by this pass (see the hardening report). Everything below only tightens
+        // what a holder is allowed to *write*.
+        allow read: if signedIn();
+        allow create: if isTeacher(roomCode);
+        // The holder may only perform two narrow, self-contained transitions: choosing their
+        // one starting item (inventory empty -> exactly one entry) or activating it
+        // (queuedEffect null -> non-null). Anything else (resolution, expiry, holder
+        // reselection, inventory reset) is teacher-only, riding inside already-teacher-gated
+        // operations (lockTeams/advanceQuestion/prepareNextRound/stopRound/closeRoom).
+        allow update: if isTeacher(roomCode) || (
+          signedIn() && isPlayerOwner(roomCode, resource.data.magicHolderPlayerId) && (
+            (
+              // Starting-item choice: exactly one valid item, only while waiting+locked, only
+              // once (inventory empty -> one entry), holder/team identity untouched.
+              resource.data.inventory.size() == 0
+              && request.resource.data.inventory.size() == 1
+              && request.resource.data.inventory[0].keys().hasOnly(['itemType', 'acquiredAt', 'consumed', 'consumedAt'])
+              && request.resource.data.inventory[0].itemType in ['power_surge', 'score_seal', 'rose_shield']
+              && request.resource.data.inventory[0].consumed == false
+              && request.resource.data.inventory[0].consumedAt == null
+              && request.resource.data.magicHolderPlayerId == resource.data.magicHolderPlayerId
+              && request.resource.data.teamId == resource.data.teamId
+              && room(roomCode).status == 'waiting'
+              && room(roomCode).teamsLocked == true
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['inventory'])
+            )
+            ||
+            (
+              // Activation: the item must be the team's one real, unused inventory item; the
+              // target/self-target rule must match the item type; the affected question must be
+              // an eligible next question, requested only during a valid activation window
+              // (never question 1/10, never mid-question); no unknown fields; holder/team
+              // identity untouched (diff hasOnly(['queuedEffect']) below already guarantees
+              // this structurally, since nothing else is in the diff).
+              resource.data.queuedEffect == null
+              && request.resource.data.queuedEffect != null
+              && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt'])
+              && request.resource.data.queuedEffect.itemType in ['power_surge', 'score_seal']
+              && resource.data.inventory.size() == 1
+              && resource.data.inventory[0].itemType == request.resource.data.queuedEffect.itemType
+              && resource.data.inventory[0].consumed == false
+              && request.resource.data.queuedEffect.sourceTeamId == teamId
+              && (
+                (request.resource.data.queuedEffect.itemType == 'power_surge' && request.resource.data.queuedEffect.targetTeamId == teamId)
+                || (
+                  request.resource.data.queuedEffect.itemType == 'score_seal'
+                  && request.resource.data.queuedEffect.targetTeamId != teamId
+                  && exists(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.queuedEffect.targetTeamId))
+                )
+              )
+              && isValidActivationWindow(roomCode, request.resource.data.queuedEffect.affectedQuestionIndex)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['queuedEffect'])
+            )
+          )
+        );
+        allow delete: if false;
+      }
+
+      // Flat, teacher-listable activation-lifecycle log. A holder may only create their own
+      // team's 'queued'/'rejected' record naming themselves as actor — every later status
+      // transition (applied/blocked/expired) is teacher-only, via the same resolution/reset
+      // operations noted above.
+      match /magicEvents/{eventId} {
+        allow read: if isTeacher(roomCode);
+        // A holder may create their own team's audit record, but never independently of a real
+        // activation: 'queued' records must exactly match the queuedEffect transition landing in
+        // the *same atomic write* (checked via getAfter() — this is what makes forging a scoring
+        // event without a corresponding, rules-validated queuedEffect impossible). 'rejected'
+        // records carry no scoring weight and have no queuedEffect to correlate against, so only
+        // holder-identity + shape are checked. Every other status (applied/blocked/expired) can
+        // only ever be produced by the teacher-only update rule below, driven by
+        // resolveQuestionMagicEffects/expireQueuedMagicEffects — a holder can never directly
+        // mark their own or anyone else's event resolved.
+        allow create: if isTeacher(roomCode) || (
+          signedIn()
+          && request.resource.data.keys().hasOnly(['itemType', 'actorPlayerId', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'status', 'createdAt', 'resolvedAt'])
+          && request.resource.data.itemType in ['power_surge', 'score_seal', 'rose_shield']
+          && request.resource.data.createdAt == request.time
+          && isPlayerOwner(roomCode, get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.sourceTeamId)).data.magicHolderPlayerId)
+          && request.resource.data.actorPlayerId == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.sourceTeamId)).data.magicHolderPlayerId
+          && (
+            (
+              request.resource.data.status == 'queued'
+              && request.resource.data.resolvedAt == null
+              && magicAfter(roomCode, request.resource.data.sourceTeamId).queuedEffect.id == eventId
+              && magicAfter(roomCode, request.resource.data.sourceTeamId).queuedEffect.itemType == request.resource.data.itemType
+              && magicAfter(roomCode, request.resource.data.sourceTeamId).queuedEffect.sourceTeamId == request.resource.data.sourceTeamId
+              && magicAfter(roomCode, request.resource.data.sourceTeamId).queuedEffect.targetTeamId == request.resource.data.targetTeamId
+              && magicAfter(roomCode, request.resource.data.sourceTeamId).queuedEffect.affectedQuestionIndex == request.resource.data.affectedQuestionIndex
+            )
+            || (
+              request.resource.data.status == 'rejected'
+              && request.resource.data.resolvedAt == request.time
+            )
+          )
+        );
+        allow update: if isTeacher(roomCode);
+        allow delete: if false;
+      }
+
+      // Milestone 2: display-only team roster (teamId/teamName/playerId/displayName only —
+      // never ownerUid, answers, score, choices, or correctness). Always fully rebuilt by
+      // randomizeTeams, so it is teacher-write-only; students never touch it.
+      match /rosters/{teamId} {
+        allow read: if signedIn();
+        allow write: if isTeacher(roomCode);
+      }
+
+      // Milestone 2: one doc per player recording only which question they most recently
+      // answered (no choice, no correctness, no score) — the "teammates answered X/Y" signal.
+      // The doc id *is* the player id, so this is a direct get()+ownerUid check identical in
+      // shape to every other per-player authorization in this file; requiring the written
+      // teamId to match the player's own current teamId stops a student from ever writing
+      // progress under a team they don't belong to.
+      match /answerProgress/{playerId} {
+        allow read: if signedIn();
+        // Only the exact documented fields, only for the room's current question (never a past
+        // or future one — the write must name precisely room.questionIds[currentQuestionIndex],
+        // so nothing else validates), only while a round is actually playing, and only the
+        // player's own current team (blocking a stale/forged teamId).
+        allow write: if isTeacher(roomCode) || (
+          signedIn()
+          && isPlayerOwner(roomCode, playerId)
+          && request.resource.data.keys().hasOnly(['teamId', 'questionId', 'answeredAt'])
+          && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
+          && room(roomCode).status == 'playing'
+          && request.resource.data.questionId == room(roomCode).questionIds[room(roomCode).currentQuestionIndex]
         );
         allow delete: if false;
       }

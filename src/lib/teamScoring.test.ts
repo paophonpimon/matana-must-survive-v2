@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTeamMetas, computeCurrentQuestionStats, computeTeamStats, distributeTeamsEvenly } from './teamScoring'
+import { buildTeamMetas, computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, distributeTeamsEvenly } from './teamScoring'
 import type { Player } from '../types/game'
 
 const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
@@ -128,5 +128,32 @@ describe('computeCurrentQuestionStats', () => {
 
   it('returns zeroes when there is no active question', () => {
     expect(computeCurrentQuestionStats([], undefined)).toEqual({ answeredCount: 0, correctCount: 0 })
+  })
+})
+
+describe('computeTeamCurrentQuestionCounts', () => {
+  it('counts, per team, only members who answered the given question — distinct from full-game completion', () => {
+    const teams = buildTeamMetas(2)
+    const players = [
+      // has answered q3 but not finished the game (not submitted)
+      makePlayer({ id: 'a', teamId: 'team-1', submitted: false, answers: [answer('q3', true)] }),
+      makePlayer({ id: 'b', teamId: 'team-1', submitted: false, answers: [] }),
+      makePlayer({ id: 'c', teamId: 'team-2', submitted: true, answers: [answer('q3', false)] }),
+    ]
+    const counts = computeTeamCurrentQuestionCounts(players, teams, 'q3')
+    expect(counts.get('team-1')).toBe(1)
+    expect(counts.get('team-2')).toBe(1)
+
+    // Confirm this is genuinely a different number than computeTeamStats's full-game
+    // submittedCount for the same roster (team-1 has 0 finished, 1 answered-this-question).
+    const stats = computeTeamStats(players, teams)
+    expect(stats.find((team) => team.id === 'team-1')?.submittedCount).toBe(0)
+  })
+
+  it('returns zero for every team when there is no active question', () => {
+    const teams = buildTeamMetas(2)
+    const counts = computeTeamCurrentQuestionCounts([], teams, undefined)
+    expect(counts.get('team-1')).toBe(0)
+    expect(counts.get('team-2')).toBe(0)
   })
 })

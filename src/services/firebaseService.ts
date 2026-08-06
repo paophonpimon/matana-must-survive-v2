@@ -7,8 +7,10 @@ import {
   getDocs,
   getFirestore,
   onSnapshot,
+  query,
   runTransaction,
   serverTimestamp,
+  where,
   writeBatch,
   type DocumentData,
   type QueryDocumentSnapshot,
@@ -16,10 +18,28 @@ import {
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
+import { getMagicActivationWindow, pickHolders } from '../lib/magic'
 import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
 import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type GameService } from './gameService'
-import type { AnswerRecord, JoinInput, JoinResult, Player, Room, TeamMeta, Unsubscribe, Winner } from '../types/game'
+import type {
+  AnswerProgressEntry,
+  AnswerRecord,
+  JoinInput,
+  JoinResult,
+  MagicEvent,
+  MagicEventStatus,
+  MagicInventoryItem,
+  MagicItemType,
+  Player,
+  QueuedMagicEffect,
+  Room,
+  TeamMagicState,
+  TeamMeta,
+  TeamRosterSummary,
+  Unsubscribe,
+  Winner,
+} from '../types/game'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -113,6 +133,171 @@ const stablePlayerId = (studentNumber: string): string => {
     hash = Math.imul(hash, 16777619)
   }
   return `player-${(hash >>> 0).toString(36)}`
+}
+
+const createMagicId = (): string =>
+  typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+const mapMagicInventoryItem = (value: unknown): MagicInventoryItem => {
+  const item = (value ?? {}) as Record<string, unknown>
+  return {
+    itemType: item.itemType as MagicItemType,
+    acquiredAt: Number(item.acquiredAt ?? 0),
+    consumed: Boolean(item.consumed),
+    consumedAt: item.consumedAt == null ? null : Number(item.consumedAt),
+  }
+}
+
+const mapQueuedMagicEffect = (value: unknown): QueuedMagicEffect | null => {
+  if (!value || typeof value !== 'object') return null
+  const effect = value as Record<string, unknown>
+  return {
+    id: String(effect.id ?? ''),
+    itemType: effect.itemType as 'power_surge' | 'score_seal',
+    sourceTeamId: String(effect.sourceTeamId ?? ''),
+    targetTeamId: String(effect.targetTeamId ?? ''),
+    affectedQuestionIndex: Number(effect.affectedQuestionIndex ?? 0),
+    createdAt: Number(effect.createdAt ?? 0),
+  }
+}
+
+const mapTeamMagic = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): TeamMagicState => {
+  const data = snapshot.data()
+  return {
+    teamId: snapshot.id,
+    magicHolderPlayerId: data.magicHolderPlayerId == null ? null : String(data.magicHolderPlayerId),
+    inventory: Array.isArray(data.inventory) ? data.inventory.map(mapMagicInventoryItem) : [],
+    queuedEffect: mapQueuedMagicEffect(data.queuedEffect),
+  }
+}
+
+const mapMagicEvent = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): MagicEvent => {
+  const data = snapshot.data()
+  return {
+    id: snapshot.id,
+    itemType: data.itemType as MagicItemType,
+    actorPlayerId: String(data.actorPlayerId ?? ''),
+    sourceTeamId: String(data.sourceTeamId ?? ''),
+    targetTeamId: data.targetTeamId == null ? null : String(data.targetTeamId),
+    affectedQuestionIndex: data.affectedQuestionIndex == null ? null : Number(data.affectedQuestionIndex),
+    status: data.status as MagicEventStatus,
+    createdAt: toMillis(data.createdAt) ?? Date.now(),
+    resolvedAt: toMillis(data.resolvedAt),
+  }
+}
+
+const mapTeamRoster = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): TeamRosterSummary => {
+  const data = snapshot.data()
+  return {
+    teamId: snapshot.id,
+    teamName: String(data.teamName ?? ''),
+    members: Array.isArray(data.members)
+      ? data.members.map((member: Record<string, unknown>) => ({
+          playerId: String(member.playerId ?? ''),
+          displayName: String(member.displayName ?? ''),
+        }))
+      : [],
+  }
+}
+
+const mapAnswerProgressEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): AnswerProgressEntry => {
+  const data = snapshot.data()
+  return {
+    playerId: snapshot.id,
+    teamId: String(data.teamId ?? ''),
+    questionId: String(data.questionId ?? ''),
+    answeredAt: toMillis(data.answeredAt) ?? Date.now(),
+  }
+}
+
+// Runs when leaving `resolvedQuestionIndex` (advancing to the next question, or completing the
+// round). Consolidates every mutation to a given team's magic doc into a single batch.update()
+// — a team can be touched both as an effect's source (consuming its own item) and as another
+// team's hostile target (its shield consumed) in the same pass, and issuing two separate
+// batch.update() calls for the same doc would have the second silently clobber the first.
+const resolveQuestionMagicEffects = async (roomCode: string, resolvedQuestionIndex: number): Promise<void> => {
+  const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+  const magicByTeamId = new Map<string, TeamMagicState>(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
+  const touchedTeamIds = new Set<string>()
+  const eventOutcomes = new Map<string, 'applied' | 'blocked'>()
+  const now = Date.now()
+
+  const consumeOne = (teamId: string, itemType: MagicItemType): void => {
+    const item = magicByTeamId.get(teamId)?.inventory.find((entry) => entry.itemType === itemType && !entry.consumed)
+    if (item) {
+      item.consumed = true
+      item.consumedAt = now
+      touchedTeamIds.add(teamId)
+    }
+  }
+
+  for (const magic of magicByTeamId.values()) {
+    const effect = magic.queuedEffect
+    if (!effect || effect.affectedQuestionIndex !== resolvedQuestionIndex) continue
+    touchedTeamIds.add(magic.teamId)
+    magic.queuedEffect = null
+    if (effect.itemType === 'power_surge') {
+      consumeOne(magic.teamId, 'power_surge')
+      eventOutcomes.set(effect.id, 'applied')
+    } else {
+      consumeOne(magic.teamId, 'score_seal')
+      const shieldItem = magicByTeamId.get(effect.targetTeamId)?.inventory.find((entry) => entry.itemType === 'rose_shield' && !entry.consumed)
+      if (shieldItem) {
+        shieldItem.consumed = true
+        shieldItem.consumedAt = now
+        touchedTeamIds.add(effect.targetTeamId)
+        eventOutcomes.set(effect.id, 'blocked')
+      } else {
+        eventOutcomes.set(effect.id, 'applied')
+      }
+    }
+  }
+
+  if (touchedTeamIds.size === 0 && eventOutcomes.size === 0) return
+  const batch = writeBatch(db)
+  touchedTeamIds.forEach((teamId) => {
+    const magic = magicByTeamId.get(teamId)
+    if (!magic) return
+    batch.update(doc(db, 'rooms', roomCode, 'magic', teamId), { inventory: magic.inventory, queuedEffect: magic.queuedEffect })
+  })
+  eventOutcomes.forEach((status, eventId) => {
+    batch.update(doc(db, 'rooms', roomCode, 'magicEvents', eventId), { status, resolvedAt: serverTimestamp() })
+  })
+  await batch.commit()
+}
+
+// closeRoom: the game is over, so only expire whatever was still queued (audit correctness) —
+// no next round to reset inventory for.
+const expireQueuedMagicEffects = async (roomCode: string): Promise<void> => {
+  const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+  const batch = writeBatch(db)
+  let hasWrites = false
+  magicSnapshots.docs.forEach((document) => {
+    const magic = mapTeamMagic(document)
+    if (!magic.queuedEffect) return
+    hasWrites = true
+    batch.update(document.ref, { queuedEffect: null })
+    batch.update(doc(db, 'rooms', roomCode, 'magicEvents', magic.queuedEffect.id), { status: 'expired', resolvedAt: serverTimestamp() })
+  })
+  if (hasWrites) await batch.commit()
+}
+
+// prepareNextRound/stopRound: a new round means Q1-Q10 indices reset, so any still-queued
+// effect from the old round is meaningless (expired) and every team's inventory resets —
+// requirement 2 frames starting-item choice as happening fresh "before the teacher starts the
+// game" each time. The holder itself is untouched — only a fresh lockTeams re-picks holders.
+const resetMagicForNewRound = async (roomCode: string): Promise<void> => {
+  const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+  if (magicSnapshots.empty) return
+  const batch = writeBatch(db)
+  magicSnapshots.docs.forEach((document) => {
+    const magic = mapTeamMagic(document)
+    batch.update(document.ref, { inventory: [], queuedEffect: null })
+    if (magic.queuedEffect) {
+      batch.update(doc(db, 'rooms', roomCode, 'magicEvents', magic.queuedEffect.id), { status: 'expired', resolvedAt: serverTimestamp() })
+    }
+  })
+  await batch.commit()
 }
 
 // Dev-only diagnostic for the exact bug class this module guards against: a uid captured
@@ -285,9 +470,62 @@ export class FirebaseGameService implements GameService {
     )
   }
 
+  subscribeTeamMagic(roomCode: string, teamId: string, listener: (magic: TeamMagicState | null) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      doc(db, 'rooms', roomCode.toUpperCase(), 'magic', teamId),
+      (snapshot) => listener(snapshot.exists() ? mapTeamMagic(snapshot) : null),
+      () => onError('ไม่สามารถโหลดข้อมูลไอเทมของทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeAllTeamMagic(roomCode: string, listener: (magic: TeamMagicState[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      collection(db, 'rooms', roomCode.toUpperCase(), 'magic'),
+      (snapshot) => listener(snapshot.docs.map(mapTeamMagic)),
+      () => onError('ไม่สามารถโหลดข้อมูลมนตราของทุกทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeMagicEvents(roomCode: string, listener: (events: MagicEvent[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      collection(db, 'rooms', roomCode.toUpperCase(), 'magicEvents'),
+      (snapshot) => listener(snapshot.docs.map(mapMagicEvent).sort((a, b) => b.createdAt - a.createdAt)),
+      () => onError('ไม่สามารถโหลดประวัติมนตราได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeTeamRoster(roomCode: string, teamId: string, listener: (roster: TeamRosterSummary | null) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      doc(db, 'rooms', roomCode.toUpperCase(), 'rosters', teamId),
+      (snapshot) => listener(snapshot.exists() ? mapTeamRoster(snapshot) : null),
+      () => onError('ไม่สามารถโหลดรายชื่อทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeTeamAnswerProgress(roomCode: string, teamId: string, listener: (entries: AnswerProgressEntry[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      query(collection(db, 'rooms', roomCode.toUpperCase(), 'answerProgress'), where('teamId', '==', teamId)),
+      (snapshot) => listener(snapshot.docs.map(mapAnswerProgressEntry)),
+      () => onError('ไม่สามารถโหลดความคืบหน้าของทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
   async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void> {
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
+    // Each holder must choose a starting item before the game can start. Checked outside the
+    // transaction (best-effort, matching the existing players.empty check above), since
+    // reading a whole collection isn't possible from inside a Firestore transaction.
+    const roomSnapshotForMagicCheck = await getDoc(doc(db, 'rooms', roomCode))
+    if (roomSnapshotForMagicCheck.exists()) {
+      const roomForMagicCheck = mapRoom(roomSnapshotForMagicCheck.data())
+      if (roomForMagicCheck.teams.length > 0) {
+        const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+        const magicByTeamId = new Map(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
+        const teamsWithoutStartingItem = roomForMagicCheck.teams.filter((team) => (magicByTeamId.get(team.id)?.inventory.length ?? 0) === 0)
+        if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
+      }
+    }
     await runTransaction(db, async (transaction) => {
       const roomRef = doc(db, 'rooms', roomCode)
       const snapshot = await transaction.get(roomRef)
@@ -333,6 +571,9 @@ export class FirebaseGameService implements GameService {
       transaction.update(roomRef, { currentQuestionIndex: nextQuestionIndex, questionStartedAt: serverTimestamp() })
       return false
     })
+    // Resolve any magic effects queued for the question just left, regardless of whether the
+    // round just completed.
+    await resolveQuestionMagicEffects(roomCode, expectedQuestionIndex)
     if (!finished) return
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
@@ -381,6 +622,7 @@ export class FirebaseGameService implements GameService {
       })
     })
     await batch.commit()
+    await resetMagicForNewRound(roomCode)
   }
 
   async stopRound(roomCode: string, teacherSessionId: string): Promise<void> {
@@ -418,6 +660,7 @@ export class FirebaseGameService implements GameService {
       })
     })
     await batch.commit()
+    await resetMagicForNewRound(roomCode)
   }
 
   async closeRoom(roomCode: string, teacherSessionId: string): Promise<void> {
@@ -429,6 +672,7 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       transaction.update(roomRef, { status: 'closed' })
     })
+    await expireQueuedMagicEffects(roomCode)
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
     playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, { status: 'stopped' }))
@@ -450,14 +694,31 @@ export class FirebaseGameService implements GameService {
     if (playerIds.length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังจัดทีมไม่ได้')
     if (teamCount > playerIds.length) throw new Error('ผู้ใช้:จำนวนทีมต้องไม่เกินจำนวนผู้เล่น')
     const assignment = distributeTeamsEvenly(playerIds, teamCount)
+    const teams = buildTeamMetas(teamCount)
 
-    // One atomic batch for the room's team labels AND every player's teamId — Firestore
-    // commits a batch all-or-nothing, so the room can never say teams are assigned while
-    // some players are still unassigned (well under the 500-op batch limit at ~50 students).
+    // Build the display-only roster summary from this exact assignment + player snapshot —
+    // it can never observably lag or diverge from what it was built from, since it's part of
+    // the same atomic batch as the assignment itself.
+    const rosters = new Map<string, TeamRosterSummary>(
+      teams.map((team) => [team.id, { teamId: team.id, teamName: team.name, members: [] }]),
+    )
+    playerSnapshots.docs.forEach((playerDocument) => {
+      const player = mapPlayer(playerDocument)
+      const teamId = assignment[playerDocument.id]
+      rosters.get(teamId)?.members.push({ playerId: playerDocument.id, displayName: player.displayName })
+    })
+
+    // One atomic batch for the room's team labels, every player's teamId, AND the roster
+    // summaries — Firestore commits a batch all-or-nothing, so the room can never say teams
+    // are assigned while some players (or the roster built from them) aren't (well under the
+    // 500-op batch limit at ~50 students).
     const batch = writeBatch(db)
-    batch.update(roomRef, { teamCount, teams: buildTeamMetas(teamCount) })
+    batch.update(roomRef, { teamCount, teams })
     playerSnapshots.docs.forEach((playerDocument) => {
       batch.update(playerDocument.ref, { teamId: assignment[playerDocument.id] })
+    })
+    rosters.forEach((roster, teamId) => {
+      batch.set(doc(db, 'rooms', roomCode, 'rosters', teamId), { teamName: roster.teamName, members: roster.members })
     })
     await batch.commit()
   }
@@ -490,6 +751,29 @@ export class FirebaseGameService implements GameService {
       })
       throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
     }
+
+    // Success: (re)select exactly one holder per team and give every team a fresh, empty
+    // magic state — "re-locking after unlock may select holders again."
+    const roomSnapshot = await getDoc(roomRef)
+    if (!roomSnapshot.exists()) return
+    const room = mapRoom(roomSnapshot.data())
+    const memberIdsByTeam: Record<string, string[]> = {}
+    room.teams.forEach((team) => { memberIdsByTeam[team.id] = [] })
+    playerSnapshots.docs.forEach((playerDocument) => {
+      const player = mapPlayer(playerDocument)
+      if (player.teamId && memberIdsByTeam[player.teamId]) memberIdsByTeam[player.teamId].push(player.id)
+    })
+    const holders = pickHolders(memberIdsByTeam)
+    const magicBatch = writeBatch(db)
+    room.teams.forEach((team) => {
+      magicBatch.set(doc(db, 'rooms', roomCode, 'magic', team.id), {
+        teamId: team.id,
+        magicHolderPlayerId: holders[team.id] ?? null,
+        inventory: [],
+        queuedEffect: null,
+      })
+    })
+    await magicBatch.commit()
   }
 
   async unlockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
@@ -540,6 +824,18 @@ export class FirebaseGameService implements GameService {
       else answers.push(answerRecord)
       const score = player.score + (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
       transaction.update(playerRef, { answers, score })
+      // Overwrite (never append) this player's own progress entry — first answer or changing
+      // the choice for the same question both land here, so the team's "X answered" count can
+      // never double-count a teammate. Once the room moves to the next question, this entry's
+      // questionId no longer matches the new current question, so it stops counting with no
+      // explicit reset needed.
+      if (player.teamId) {
+        transaction.set(doc(db, 'rooms', roomCode, 'answerProgress', playerId), {
+          teamId: player.teamId,
+          questionId: answer.questionId,
+          answeredAt: serverTimestamp(),
+        })
+      }
       return {
         player: {
           ...player,
@@ -548,6 +844,137 @@ export class FirebaseGameService implements GameService {
         },
         winner: null,
       }
+    })
+  }
+
+  async chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, magicSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(magicRef)])
+      if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+      const room = mapRoom(roomSnapshot.data())
+      const magic = mapTeamMagic(magicSnapshot)
+      if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+      if (room.status !== 'waiting' || !room.teamsLocked) {
+        throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      }
+      if (magic.inventory.length > 0) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
+      transaction.update(magicRef, {
+        inventory: [{ itemType, acquiredAt: Date.now(), consumed: false, consumedAt: null }],
+      })
+    })
+  }
+
+  async activateItem(
+    roomCode: string,
+    teamId: string,
+    playerId: string,
+    itemType: 'power_surge' | 'score_seal',
+    targetTeamId?: string,
+  ): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
+
+    await runTransaction(db, async (transaction) => {
+      const roomSnapshot = await transaction.get(roomRef)
+      if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(roomSnapshot.data())
+
+      const magicSnapshot = await transaction.get(magicRef)
+      if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+      const magic = mapTeamMagic(magicSnapshot)
+      if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+
+      const window = getMagicActivationWindow(room)
+      if (!window.valid || window.affectedQuestionIndex == null) {
+        throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
+      }
+      const affectedQuestionIndex = window.affectedQuestionIndex
+
+      const inventoryItem = magic.inventory.find((item) => item.itemType === itemType && !item.consumed)
+      if (!inventoryItem) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
+
+      const eventId = `magic-${createMagicId()}`
+      const eventRef = doc(db, 'rooms', roomCode, 'magicEvents', eventId)
+
+      // A legitimate holder attempt that fails validation still gets an audit record — this is
+      // what makes "duplicate activation rejected" / "wrong target rejected" visible in the
+      // teacher's event history, not just a toast the student saw.
+      const logRejectedEvent = (rejectedTargetTeamId: string | null): void => {
+        transaction.set(eventRef, {
+          itemType,
+          actorPlayerId: playerId,
+          sourceTeamId: teamId,
+          targetTeamId: rejectedTargetTeamId,
+          affectedQuestionIndex,
+          status: 'rejected',
+          createdAt: serverTimestamp(),
+          resolvedAt: serverTimestamp(),
+        })
+      }
+
+      if (magic.queuedEffect) {
+        logRejectedEvent(itemType === 'power_surge' ? teamId : (targetTeamId ?? null))
+        throw new Error('ผู้ใช้:ทีมนี้มีไอเทมที่กำลังรอผลอยู่แล้ว')
+      }
+
+      if (itemType === 'score_seal') {
+        if (!targetTeamId) {
+          logRejectedEvent(null)
+          throw new Error('ผู้ใช้:กรุณาเลือกทีมเป้าหมาย')
+        }
+        if (targetTeamId === teamId) {
+          logRejectedEvent(targetTeamId)
+          throw new Error('ผู้ใช้:เลือกทีมตัวเองเป็นเป้าหมายไม่ได้')
+        }
+        if (!room.teams.some((team) => team.id === targetTeamId)) {
+          logRejectedEvent(targetTeamId)
+          throw new Error('ผู้ใช้:ไม่พบทีมเป้าหมาย')
+        }
+        const otherTeams = room.teams.filter((team) => team.id !== teamId)
+        const otherMagicSnapshots = await Promise.all(
+          otherTeams.map((team) => transaction.get(doc(db, 'rooms', roomCode, 'magic', team.id))),
+        )
+        const alreadyTargeted = otherMagicSnapshots.some((snapshot) => {
+          if (!snapshot.exists()) return false
+          const otherMagic = mapTeamMagic(snapshot)
+          return otherMagic.queuedEffect?.itemType === 'score_seal'
+            && otherMagic.queuedEffect.targetTeamId === targetTeamId
+            && otherMagic.queuedEffect.affectedQuestionIndex === affectedQuestionIndex
+        })
+        if (alreadyTargeted) {
+          logRejectedEvent(targetTeamId)
+          throw new Error('ผู้ใช้:ทีมเป้าหมายถูกใช้ไอเทมฝ่ายตรงข้ามในข้อนี้ไปแล้ว')
+        }
+      }
+
+      // itemType === 'power_surge' targets the source team itself; score_seal's targetTeamId
+      // is validated non-empty above, so this cast is safe at this point.
+      const finalTargetTeamId = itemType === 'power_surge' ? teamId : (targetTeamId as string)
+      const now = Date.now()
+
+      transaction.update(magicRef, {
+        queuedEffect: {
+          id: eventId,
+          itemType,
+          sourceTeamId: teamId,
+          targetTeamId: finalTargetTeamId,
+          affectedQuestionIndex,
+          createdAt: now,
+        },
+      })
+      transaction.set(eventRef, {
+        itemType,
+        actorPlayerId: playerId,
+        sourceTeamId: teamId,
+        targetTeamId: finalTargetTeamId,
+        affectedQuestionIndex,
+        status: 'queued',
+        createdAt: serverTimestamp(),
+        resolvedAt: null,
+      })
     })
   }
 }
