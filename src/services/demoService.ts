@@ -1,18 +1,19 @@
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
+import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, GameService } from './gameService'
-import type { JoinInput, JoinResult, Room, Team, Unsubscribe } from '../types/game'
+import type { JoinInput, JoinResult, Player, Room, Unsubscribe } from '../types/game'
 
 interface DemoRoomState {
   room: Room
-  teams: Record<string, Team>
+  players: Record<string, Player>
 }
 
 interface DemoState {
   rooms: Record<string, DemoRoomState>
 }
 
-const STORAGE_KEY = 'matana_demo_state_v2'
+const STORAGE_KEY = 'matana_demo_state_v3'
 const UPDATE_EVENT = 'matana-demo-update'
 const DEMO_ROOM_CODE = 'MATANA'
 const SHARED_STATE_PATH = '/__matana_demo_state'
@@ -21,10 +22,26 @@ let sharedStateAvailable = false
 const createId = (): string =>
   typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 
-const createTeam = (id: string, teamName: string, guardianName: string, ownerUid: string, round = 1): Team => ({
+const stablePlayerId = (studentNumber: string): string => {
+  let hash = 2166136261
+  for (const character of studentNumber.trim().toLocaleLowerCase('th')) {
+    hash ^= character.codePointAt(0) ?? 0
+    hash = Math.imul(hash, 16777619)
+  }
+  return `player-${(hash >>> 0).toString(36)}`
+}
+
+const createPlayer = (
+  id: string,
+  displayName: string,
+  studentNumber: string,
+  ownerUid: string,
+  round = 1,
+): Player => ({
   id,
-  teamName,
-  guardianName,
+  displayName,
+  studentNumber,
+  teamId: null,
   joinedAt: Date.now(),
   currentRound: round,
   currentQuestionIndex: 0,
@@ -52,19 +69,24 @@ const createSeedState = (): DemoState => {
     previousQuestionIds: [],
     winner: null,
     teacherSessionId: 'demo-teacher',
+    teamCount: 0,
+    teamsLocked: false,
+    teams: [],
   }
-  return {
-    rooms: {
-      [DEMO_ROOM_CODE]: {
-        room,
-        teams: {
-          'demo-team-1': createTeam('demo-team-1', 'กลุ่มกุหลาบรัตติกาล', 'พิมพ์ชนก', 'demo-student-1'),
-          'demo-team-2': createTeam('demo-team-2', 'กลุ่มจันทร์กระจ่าง', 'ณัฐวุฒิ', 'demo-student-2'),
-          'demo-team-3': createTeam('demo-team-3', 'กลุ่มวรรณศิลป์', 'ศิรินภา', 'demo-student-3'),
-        },
-      },
-    },
-  }
+  const players: Record<string, Player> = {}
+  const demoStudents: Array<[string, string]> = [
+    ['พิมพ์ชนก', '01'],
+    ['ณัฐวุฒิ', '02'],
+    ['ศิรินภา', '03'],
+  ]
+  demoStudents.forEach(([displayName, studentNumber], index) => {
+    // Use the same deterministic id scheme as a real join (stablePlayerId), not a literal
+    // seed id — otherwise joinRoom's studentNumber lookup can never find these seed players,
+    // breaking reconnect for the built-in demo dataset specifically.
+    const id = stablePlayerId(studentNumber)
+    players[id] = createPlayer(id, displayName, studentNumber, `demo-student-${index + 1}`)
+  })
+  return { rooms: { [DEMO_ROOM_CODE]: { room, players } } }
 }
 
 const normalizeState = (state: DemoState): DemoState => {
@@ -72,6 +94,9 @@ const normalizeState = (state: DemoState): DemoState => {
     room.currentQuestionIndex ??= 0
     room.questionDurationSeconds ??= 30
     room.questionStartedAt ??= room.status === 'playing' ? room.startedAt : null
+    room.teamCount ??= 0
+    room.teamsLocked ??= false
+    room.teams ??= []
   })
   return state
 }
@@ -204,8 +229,11 @@ export class DemoGameService implements GameService {
       previousQuestionIds: [],
       winner: null,
       teacherSessionId,
+      teamCount: 0,
+      teamsLocked: false,
+      teams: [],
     }
-    state.rooms[roomCode] = { room, teams: {} }
+    state.rooms[roomCode] = { room, players: {} }
     await writeState(state)
     return room
   }
@@ -216,17 +244,26 @@ export class DemoGameService implements GameService {
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     if (roomState.room.status === 'closed') throw new Error('ผู้ใช้:ห้องกิจกรรมสิ้นสุดแล้ว')
+
+    const playerId = stablePlayerId(input.studentNumber)
+    const existing = roomState.players[playerId]
+    if (existing) {
+      // Reconnect/refresh: same student on the same device returns their own record
+      // untouched, regardless of whether teams are locked — a returning student must never
+      // be blocked by a lock that happened after they joined.
+      if (existing.ownerUid === ownerUid) return { room: roomState.room, player: existing }
+      // A different owner tried to use the same student number — reject explicitly rather
+      // than ever returning someone else's record.
+      throw new Error('ผู้ใช้:เลขที่นักเรียนนี้ถูกใช้แล้ว')
+    }
+
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:เกมกำลังดำเนินอยู่ ไม่สามารถเข้าร่วมรอบนี้ได้')
-    const teamName = input.teamName.trim()
-    const duplicate = Object.values(roomState.teams).some(
-      (team) => team.teamName.toLocaleLowerCase('th') === teamName.toLocaleLowerCase('th'),
-    )
-    if (duplicate) throw new Error('ผู้ใช้:ชื่อกลุ่มนี้ถูกใช้แล้ว')
-    const teamId = `team-${createId()}`
-    const team = createTeam(teamId, teamName, input.guardianName.trim(), ownerUid, roomState.room.currentRound)
-    roomState.teams[teamId] = team
+    if (roomState.room.teamsLocked) throw new Error('ผู้ใช้:ทีมถูกล็อกแล้ว กรุณาติดต่อครู')
+
+    const player = createPlayer(playerId, input.displayName.trim(), input.studentNumber.trim(), ownerUid, roomState.room.currentRound)
+    roomState.players[playerId] = player
     await writeState(state)
-    return { room: roomState.room, team }
+    return { room: roomState.room, player }
   }
 
   subscribeRoom(roomCode: string, listener: (room: Room | null) => void): Unsubscribe {
@@ -235,17 +272,17 @@ export class DemoGameService implements GameService {
     return listen(() => { void emit() })
   }
 
-  subscribeTeams(roomCode: string, listener: (teams: Team[]) => void): Unsubscribe {
+  subscribePlayers(roomCode: string, listener: (players: Player[]) => void): Unsubscribe {
     const emit = async (): Promise<void> => {
-      const teams = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.teams ?? {}).sort((a, b) => a.joinedAt - b.joinedAt)
-      listener(teams)
+      const players = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.players ?? {}).sort((a, b) => a.joinedAt - b.joinedAt)
+      listener(players)
     }
     void emit()
     return listen(() => { void emit() })
   }
 
-  subscribeTeam(roomCode: string, teamId: string, listener: (team: Team | null) => void): Unsubscribe {
-    const emit = async (): Promise<void> => listener((await readState()).rooms[roomCode.toUpperCase()]?.teams[teamId] ?? null)
+  subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void): Unsubscribe {
+    const emit = async (): Promise<void> => listener((await readState()).rooms[roomCode.toUpperCase()]?.players[playerId] ?? null)
     void emit()
     return listen(() => { void emit() })
   }
@@ -257,14 +294,15 @@ export class DemoGameService implements GameService {
     verifyTeacher(roomState.room, teacherSessionId)
     if (roomState.room.status === 'playing') throw new Error('ผู้ใช้:ภารกิจกำลังดำเนินอยู่แล้ว')
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
-    if (Object.keys(roomState.teams).length === 0) throw new Error('ผู้ใช้:ยังไม่มีกลุ่มเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
+    if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
+    if (!roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
     roomState.room.status = 'playing'
     roomState.room.startedAt = Date.now()
     roomState.room.currentQuestionIndex = 0
     roomState.room.questionDurationSeconds = Math.max(5, Math.min(600, Math.round(questionDurationSeconds)))
     roomState.room.questionStartedAt = roomState.room.startedAt
-    Object.values(roomState.teams).forEach((team) => {
-      team.status = 'playing'
+    Object.values(roomState.players).forEach((player) => {
+      player.status = 'playing'
     })
     await writeState(state)
   }
@@ -282,12 +320,12 @@ export class DemoGameService implements GameService {
       roomState.room.completedAt = now
       roomState.room.currentQuestionIndex = roomState.room.questionIds.length
       roomState.room.questionStartedAt = null
-      Object.values(roomState.teams).forEach((team) => {
-        team.currentQuestionIndex = roomState.room.questionIds.length
-        team.submitted = true
-        team.status = 'submitted'
-        team.finishedAt = now
-        team.elapsedMs = Math.max(0, now - (roomState.room.startedAt ?? now))
+      Object.values(roomState.players).forEach((player) => {
+        player.currentQuestionIndex = roomState.room.questionIds.length
+        player.submitted = true
+        player.status = 'submitted'
+        player.finishedAt = now
+        player.elapsedMs = Math.max(0, now - (roomState.room.startedAt ?? now))
       })
     } else {
       roomState.room.currentQuestionIndex = nextQuestionIndex
@@ -316,8 +354,8 @@ export class DemoGameService implements GameService {
       questionIds: selectRoundQuestions(questions, previousQuestionIds),
       winner: null,
     }
-    Object.values(roomState.teams).forEach((team) => {
-      Object.assign(team, {
+    Object.values(roomState.players).forEach((player) => {
+      Object.assign(player, {
         currentRound,
         currentQuestionIndex: 0,
         score: 0,
@@ -351,8 +389,8 @@ export class DemoGameService implements GameService {
       questionIds: selectRoundQuestions(questions, previousQuestionIds),
       winner: null,
     }
-    Object.values(roomState.teams).forEach((team) => {
-      Object.assign(team, {
+    Object.values(roomState.players).forEach((player) => {
+      Object.assign(player, {
         currentRound,
         currentQuestionIndex: 0,
         score: 0,
@@ -372,20 +410,80 @@ export class DemoGameService implements GameService {
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
     roomState.room.status = 'closed'
-    Object.values(roomState.teams).forEach((team) => {
-      team.status = 'stopped'
+    Object.values(roomState.players).forEach((player) => {
+      player.status = 'stopped'
     })
     await writeState(state)
   }
 
-  async saveAnswer(roomCode: string, teamId: string, answer: AnswerInput): Promise<AnswerResult> {
+  async randomizeTeams(roomCode: string, teacherSessionId: string, teamCount: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
-    const team = roomState?.teams[teamId]
-    if (!roomState || !team) throw new Error('ผู้ใช้:ไม่พบข้อมูลกลุ่มของคุณ')
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
+    if (roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาปลดล็อกทีมก่อนสุ่มใหม่')
+    if (!Number.isFinite(teamCount) || teamCount < 1) throw new Error('ผู้ใช้:จำนวนทีมต้องมีอย่างน้อย 1 ทีม')
+
+    const playerIds = Object.keys(roomState.players)
+    if (playerIds.length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังจัดทีมไม่ได้')
+    if (teamCount > playerIds.length) throw new Error('ผู้ใช้:จำนวนทีมต้องไม่เกินจำนวนผู้เล่น')
+    const assignment = distributeTeamsEvenly(playerIds, teamCount)
+    // Apply the room's team labels and every player's teamId together before the single
+    // writeState call below, so no observer ever sees teams assigned while players aren't
+    // (or vice versa) — this is the in-memory equivalent of one atomic Firestore batch.
+    roomState.room.teamCount = teamCount
+    roomState.room.teams = buildTeamMetas(teamCount)
+    playerIds.forEach((playerId) => {
+      roomState.players[playerId].teamId = assignment[playerId]
+    })
+    await writeState(state)
+  }
+
+  async lockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.teams.length === 0) throw new Error('ผู้ใช้:กรุณาสุ่มทีมก่อนล็อกทีม')
+    // Lock FIRST, before re-checking the roster. A join that reads the room after this write
+    // sees teamsLocked=true and is rejected as a new join (reconnects are unaffected — they
+    // never check teamsLocked). Only after the lock is committed do we re-read every player;
+    // this closes the race where a student finishes joining in the brief window between the
+    // "any unassigned?" check and the lock write actually landing.
+    roomState.room.teamsLocked = true
+    await writeState(state)
+
+    const latestState = await readState()
+    const latestRoomState = latestState.rooms[roomCode]
+    const hasUnassigned = latestRoomState
+      ? Object.values(latestRoomState.players).some((player) => player.teamId == null)
+      : false
+    if (hasUnassigned && latestRoomState) {
+      latestRoomState.room.teamsLocked = false
+      await writeState(latestState)
+      throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
+    }
+  }
+
+  async unlockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:ปลดล็อกทีมได้เฉพาะช่วงห้องรอ')
+    roomState.room.teamsLocked = false
+    await writeState(state)
+  }
+
+  async saveAnswer(roomCode: string, playerId: string, answer: AnswerInput): Promise<AnswerResult> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
     if (roomState.room.status === 'completed') throw new Error('ผู้ใช้:ภารกิจรอบนี้สิ้นสุดแล้ว')
     if (roomState.room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจยังไม่เริ่มหรือสิ้นสุดแล้ว')
-    if (team.submitted || roomState.room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
+    if (player.submitted || roomState.room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
     const deadline = (roomState.room.questionStartedAt ?? 0) + roomState.room.questionDurationSeconds * 1_000
     if (!roomState.room.questionStartedAt || Date.now() >= deadline) throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
     if (roomState.room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
@@ -398,19 +496,20 @@ export class DemoGameService implements GameService {
       throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
     }
     const isCorrect = evaluated.isCorrect
-    const existingAnswerIndex = team.answers.findIndex((item) => item.questionId === answer.questionId)
-    const existingAnswer = existingAnswerIndex >= 0 ? team.answers[existingAnswerIndex] : undefined
+    const existingAnswerIndex = player.answers.findIndex((item) => item.questionId === answer.questionId)
+    const existingAnswer = existingAnswerIndex >= 0 ? player.answers[existingAnswerIndex] : undefined
 
     const record = {
       questionId: answer.questionId,
       selectedChoiceId: answer.selectedChoiceId,
       isCorrect,
       answeredAt: Date.now(),
+      responseTimeMs: Date.now() - (roomState.room.questionStartedAt ?? Date.now()),
     }
-    if (existingAnswerIndex >= 0) team.answers[existingAnswerIndex] = record
-    else team.answers.push(record)
-    team.score += (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
+    if (existingAnswerIndex >= 0) player.answers[existingAnswerIndex] = record
+    else player.answers.push(record)
+    player.score += (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
     await writeState(state)
-    return { team, winner: null }
+    return { player, winner: null }
   }
 }

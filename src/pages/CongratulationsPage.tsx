@@ -1,16 +1,19 @@
 import { useEffect } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
-import { useRoom } from '../hooks/useGameData'
+import { useRoom, usePlayer } from '../hooks/useGameData'
 import { formatElapsedTime } from '../lib/game'
-import { getTeamSession } from '../services/sessionStorage'
+import { getPlayerSession } from '../services/sessionStorage'
 
 export const CongratulationsPage = () => {
   const { roomCode = '' } = useParams()
   const normalizedCode = roomCode.toUpperCase()
   const navigate = useNavigate()
-  const session = getTeamSession()
+  const session = getPlayerSession()
   const roomState = useRoom(normalizedCode)
+  // teamId must be read from the live player doc, never cached in session storage — a
+  // teacher can re-randomize/unlock teams before lock, which would make a stored teamId stale.
+  const playerState = usePlayer(normalizedCode, session?.roomCode === normalizedCode ? session.playerId : '')
 
   useEffect(() => {
     const room = roomState.data
@@ -20,7 +23,7 @@ export const CongratulationsPage = () => {
   }, [navigate, normalizedCode, roomState.data, session?.roomCode])
 
   const winner = roomState.data?.winner
-  const isWinningTeam = Boolean(winner && session?.roomCode === normalizedCode && session.teamId === winner.teamId)
+  const isWinningTeam = Boolean(winner && session?.roomCode === normalizedCode && playerState.data?.teamId === winner.teamId)
 
   return (
     <ScenePage image="/images/ending-win.png" imageAlt="มัทนาคืนร่างมนุษย์ท่ามกลางแสงทองและกลีบกุหลาบ" imagePosition="50% 48%">

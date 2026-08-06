@@ -1,4 +1,4 @@
-import type { Room, Team } from '../types/game'
+import type { Player, Room } from '../types/game'
 
 interface TimedQuestionState {
   questionStartedAt: number | null
@@ -26,11 +26,11 @@ export const areAnswersLocked = (saving: boolean, timeExpired: boolean): boolean
 
 export const getTeacherVisibleScore = (
   room: Pick<Room, 'status' | 'questionIds' | 'currentQuestionIndex' | 'questionStartedAt' | 'questionDurationSeconds'>,
-  team: Pick<Team, 'score' | 'answers'>,
+  player: Pick<Player, 'score' | 'answers'>,
   now = Date.now(),
 ): number => {
-  if (room.status !== 'playing' || getRemainingMilliseconds(room, now) === 0) return team.score
+  if (room.status !== 'playing' || getRemainingMilliseconds(room, now) === 0) return player.score
   const currentQuestionId = room.questionIds[room.currentQuestionIndex]
-  const hiddenAnswer = team.answers.find((answer) => answer.questionId === currentQuestionId)
-  return Math.max(0, team.score - (hiddenAnswer?.isCorrect ? 1 : 0))
+  const hiddenAnswer = player.answers.find((answer) => answer.questionId === currentQuestionId)
+  return Math.max(0, player.score - (hiddenAnswer?.isCorrect ? 1 : 0))
 }

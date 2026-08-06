@@ -1,4 +1,4 @@
-import type { JoinInput, JoinResult, Room, Team, Unsubscribe, Winner } from '../types/game'
+import type { JoinInput, JoinResult, Player, Room, Unsubscribe, Winner } from '../types/game'
 
 export interface AnswerInput {
   questionId: string
@@ -7,7 +7,7 @@ export interface AnswerInput {
 }
 
 export interface AnswerResult {
-  team: Team
+  player: Player
   winner: Winner | null
 }
 
@@ -19,14 +19,17 @@ export interface GameService {
   createRoom(teacherSessionId: string): Promise<Room>
   joinRoom(input: JoinInput, ownerUid: string): Promise<JoinResult>
   subscribeRoom(roomCode: string, listener: (room: Room | null) => void, onError: (message: string) => void): Unsubscribe
-  subscribeTeams(roomCode: string, listener: (teams: Team[]) => void, onError: (message: string) => void): Unsubscribe
-  subscribeTeam(roomCode: string, teamId: string, listener: (team: Team | null) => void, onError: (message: string) => void): Unsubscribe
+  subscribePlayers(roomCode: string, listener: (players: Player[]) => void, onError: (message: string) => void): Unsubscribe
+  subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void, onError: (message: string) => void): Unsubscribe
   startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   stopRound(roomCode: string, teacherSessionId: string): Promise<void>
   prepareNextRound(roomCode: string, teacherSessionId: string): Promise<void>
   closeRoom(roomCode: string, teacherSessionId: string): Promise<void>
-  saveAnswer(roomCode: string, teamId: string, answer: AnswerInput): Promise<AnswerResult>
+  saveAnswer(roomCode: string, playerId: string, answer: AnswerInput): Promise<AnswerResult>
+  randomizeTeams(roomCode: string, teacherSessionId: string, teamCount: number): Promise<void>
+  lockTeams(roomCode: string, teacherSessionId: string): Promise<void>
+  unlockTeams(roomCode: string, teacherSessionId: string): Promise<void>
 }
 
 export const friendlyError = (error: unknown): string => {

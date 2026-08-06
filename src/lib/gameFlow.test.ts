@@ -34,8 +34,8 @@ describe('timed game question flow', () => {
       currentQuestionIndex: 0,
       questionIds: ['q1'],
     }
-    const correctTeam = { score: 4, answers: [{ questionId: 'q1', selectedChoiceId: 'a', isCorrect: true, answeredAt: 20_000 }] }
-    const wrongTeam = { score: 3, answers: [{ questionId: 'q1', selectedChoiceId: 'b', isCorrect: false, answeredAt: 20_000 }] }
+    const correctTeam = { score: 4, answers: [{ questionId: 'q1', selectedChoiceId: 'a', isCorrect: true, answeredAt: 20_000, responseTimeMs: 10_000 }] }
+    const wrongTeam = { score: 3, answers: [{ questionId: 'q1', selectedChoiceId: 'b', isCorrect: false, answeredAt: 20_000, responseTimeMs: 10_000 }] }
 
     expect(getTeacherVisibleScore(room, correctTeam, 30_000)).toBe(3)
     expect(getTeacherVisibleScore(room, wrongTeam, 30_000)).toBe(3)

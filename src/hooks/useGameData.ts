@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGame } from '../context/GameContext'
-import type { Room, Team } from '../types/game'
+import type { Player, Room } from '../types/game'
 
 interface Loadable<T> {
   data: T
@@ -28,9 +28,9 @@ export const useRoom = (roomCode: string): Loadable<Room | null> => {
   return state
 }
 
-export const useTeams = (roomCode: string): Loadable<Team[]> => {
+export const usePlayers = (roomCode: string): Loadable<Player[]> => {
   const { service } = useGame()
-  const [state, setState] = useState<Loadable<Team[]>>({ data: [], loading: true, error: '' })
+  const [state, setState] = useState<Loadable<Player[]>>({ data: [], loading: true, error: '' })
 
   useEffect(() => {
     if (!roomCode) {
@@ -38,9 +38,9 @@ export const useTeams = (roomCode: string): Loadable<Team[]> => {
       return
     }
     setState({ data: [], loading: true, error: '' })
-    return service.subscribeTeams(
+    return service.subscribePlayers(
       roomCode,
-      (teams) => setState({ data: teams, loading: false, error: '' }),
+      (players) => setState({ data: players, loading: false, error: '' }),
       (error) => setState((current) => ({ ...current, loading: false, error })),
     )
   }, [roomCode, service])
@@ -48,23 +48,23 @@ export const useTeams = (roomCode: string): Loadable<Team[]> => {
   return state
 }
 
-export const useTeam = (roomCode: string, teamId: string): Loadable<Team | null> => {
+export const usePlayer = (roomCode: string, playerId: string): Loadable<Player | null> => {
   const { service } = useGame()
-  const [state, setState] = useState<Loadable<Team | null>>({ data: null, loading: true, error: '' })
+  const [state, setState] = useState<Loadable<Player | null>>({ data: null, loading: true, error: '' })
 
   useEffect(() => {
-    if (!roomCode || !teamId) {
+    if (!roomCode || !playerId) {
       setState({ data: null, loading: false, error: '' })
       return
     }
     setState({ data: null, loading: true, error: '' })
-    return service.subscribeTeam(
+    return service.subscribePlayer(
       roomCode,
-      teamId,
-      (team) => setState({ data: team, loading: false, error: '' }),
+      playerId,
+      (player) => setState({ data: player, loading: false, error: '' }),
       (error) => setState((current) => ({ ...current, loading: false, error })),
     )
-  }, [roomCode, service, teamId])
+  }, [roomCode, service, playerId])
 
   return state
 }

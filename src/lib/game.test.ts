@@ -9,7 +9,7 @@ import {
   selectRoundQuestions,
   validateJoinInput,
 } from './game'
-import type { Room, Team } from '../types/game'
+import type { Player, Room } from '../types/game'
 
 describe('การสุ่มคำถาม', () => {
   it('ได้ 10 ข้อ ไม่มีรหัสซ้ำ และได้สัดส่วนหมวดถูกต้อง', () => {
@@ -59,32 +59,38 @@ describe('รหัสห้องและ validation', () => {
   })
 
   it('ตรวจช่องว่าง รูปแบบรหัส และความยาวชื่อ', () => {
-    expect(validateJoinInput({ roomCode: '', teamName: ' ', guardianName: 'ก'.repeat(41) })).toEqual({
+    expect(validateJoinInput({ roomCode: '', displayName: ' ', studentNumber: 'ก'.repeat(21) })).toEqual({
       roomCode: 'กรุณากรอกรหัสห้อง',
-      teamName: 'กรุณากรอกชื่อกลุ่ม',
-      guardianName: 'ชื่อผู้พิทักษ์ต้องไม่เกิน 40 ตัวอักษร',
+      displayName: 'กรุณากรอกชื่อผู้เล่น',
+      studentNumber: 'เลขที่นักเรียนต้องไม่เกิน 20 ตัวอักษร',
     })
   })
 
-  it('ยอมรับชื่อ 40 ตัวอักษรและปฏิเสธชื่อ 41 ตัวอักษร', () => {
-    expect(validateJoinInput({ roomCode: 'ABC234', teamName: 'ก'.repeat(40), guardianName: 'ข'.repeat(40) })).toEqual({})
-    expect(validateJoinInput({ roomCode: 'ABC234', teamName: 'ก'.repeat(41), guardianName: 'ข'.repeat(41) })).toEqual({
-      teamName: 'ชื่อกลุ่มต้องไม่เกิน 40 ตัวอักษร',
-      guardianName: 'ชื่อผู้พิทักษ์ต้องไม่เกิน 40 ตัวอักษร',
+  it('ยอมรับชื่อ 40 ตัวอักษรและเลขที่ 20 ตัวอักษร ปฏิเสธความยาวเกิน', () => {
+    expect(validateJoinInput({ roomCode: 'ABC234', displayName: 'ก'.repeat(40), studentNumber: '1'.repeat(20) })).toEqual({})
+    expect(validateJoinInput({ roomCode: 'ABC234', displayName: 'ก'.repeat(41), studentNumber: '1'.repeat(21) })).toEqual({
+      displayName: 'ชื่อผู้เล่นต้องไม่เกิน 40 ตัวอักษร',
+      studentNumber: 'เลขที่นักเรียนต้องไม่เกิน 20 ตัวอักษร',
+    })
+  })
+
+  it('ปฏิเสธเลขที่นักเรียนว่างเปล่า', () => {
+    expect(validateJoinInput({ roomCode: 'ABC234', displayName: 'ชื่อ', studentNumber: '' })).toEqual({
+      studentNumber: 'กรุณากรอกเลขที่นักเรียน',
     })
   })
 })
 
 describe('route resolver', () => {
   const room = { roomCode: 'ABC234', status: 'playing', winner: null } as Room
-  const team = { submitted: false } as Team
+  const player = { submitted: false } as Player
 
   it('พาไปเกม ผลลัพธ์ และหน้าชนะตามสถานะหลัก', () => {
-    expect(resolveStudentRoute(room, team)).toBe('/game/ABC234')
-    expect(resolveStudentRoute(room, { ...team, submitted: true } as Team)).toBe('/result/ABC234')
-    expect(resolveStudentRoute({ ...room, status: 'completed' }, team)).toBe('/result/ABC234')
-    expect(resolveStudentRoute({ ...room, winner: { teamId: 'winner' } as Room['winner'] }, team)).toBe('/congratulations/ABC234')
-    expect(resolveStudentRoute({ ...room, status: 'waiting' }, team)).toBe('/lobby/ABC234')
-    expect(resolveStudentRoute({ ...room, status: 'closed' }, team)).toBe('/closed/ABC234')
+    expect(resolveStudentRoute(room, player)).toBe('/game/ABC234')
+    expect(resolveStudentRoute(room, { ...player, submitted: true } as Player)).toBe('/result/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'completed' }, player)).toBe('/result/ABC234')
+    expect(resolveStudentRoute({ ...room, winner: { teamId: 'winner' } as Room['winner'] }, player)).toBe('/congratulations/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'waiting' }, player)).toBe('/lobby/ABC234')
+    expect(resolveStudentRoute({ ...room, status: 'closed' }, player)).toBe('/closed/ABC234')
   })
 })

@@ -24,15 +24,32 @@ service cloud.firestore {
       allow update: if isTeacher(roomCode);
       allow delete: if false;
 
-      match /teams/{teamId} {
+      // One persistent player record per student (Milestone 1: individual join, team
+      // assignment is teacher-controlled). doc id is a deterministic hash of studentNumber,
+      // so uniqueness-within-room and refresh/reconnect are enforced by create-vs-update
+      // semantics at the application layer (see joinRoom in firebaseService.ts) plus the
+      // create/update rules below as a defense-in-depth backstop.
+      match /players/{playerId} {
         allow read: if isTeacher(roomCode) || (signedIn() && resource.data.ownerUid == request.auth.uid);
+        // teamsLocked == false blocks direct Firestore creation of a genuinely new player
+        // once the teacher has locked teams — this backstops the app-level late-join guard
+        // in joinRoom, so it holds even against a client bypassing the app code. Reconnect
+        // is unaffected: an existing doc id makes the operation an update, not a create.
         allow create: if signedIn()
           && room(roomCode).status == 'waiting'
+          && room(roomCode).teamsLocked == false
           && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.teamId == null
           && request.resource.data.currentRound == room(roomCode).currentRound
           && request.resource.data.score == 0
           && request.resource.data.currentQuestionIndex == 0
           && request.resource.data.submitted == false;
+        // Student self-update: hasOnly(['answers', 'score']) means every other field —
+        // ownerUid, studentNumber, displayName, teamId, status, currentQuestionIndex,
+        // submitted, joinedAt — must stay bit-identical to the existing doc, or the write is
+        // rejected outright. A student can never reassign their own team, impersonate
+        // another ownerUid, or alter identity fields after creation. The isTeacher branch
+        // below remains the only path that can ever change teamId (team randomize/lock).
         allow update: if isTeacher(roomCode) || (
           signedIn()
           && resource.data.ownerUid == request.auth.uid

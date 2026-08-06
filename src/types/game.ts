@@ -17,13 +17,16 @@ export interface Question {
 }
 
 export type RoomStatus = 'waiting' | 'playing' | 'completed' | 'closed'
-export type TeamStatus = 'waiting' | 'playing' | 'submitted' | 'stopped'
+export type PlayerStatus = 'waiting' | 'playing' | 'submitted' | 'stopped'
 
 export interface AnswerRecord {
   questionId: string
   selectedChoiceId: string
   isCorrect: boolean
   answeredAt: number
+  // Derived from the client clock at answer time. Informational only in Milestone 1 —
+  // never read by scoring/ranking. A future fastest-answer round needs server-side timing.
+  responseTimeMs: number
 }
 
 export interface Winner {
@@ -34,6 +37,11 @@ export interface Winner {
   finishedAt: number
   elapsedMs: number
   round: number
+}
+
+export interface TeamMeta {
+  id: string
+  name: string
 }
 
 export interface Room {
@@ -50,12 +58,16 @@ export interface Room {
   previousQuestionIds: string[]
   winner: Winner | null
   teacherSessionId: string
+  teamCount: number
+  teamsLocked: boolean
+  teams: TeamMeta[]
 }
 
-export interface Team {
+export interface Player {
   id: string
-  teamName: string
-  guardianName: string
+  displayName: string
+  studentNumber: string
+  teamId: string | null
   joinedAt: number
   currentRound: number
   currentQuestionIndex: number
@@ -64,15 +76,15 @@ export interface Team {
   submitted: boolean
   finishedAt: number | null
   elapsedMs: number | null
-  status: TeamStatus
+  status: PlayerStatus
   ownerUid: string
 }
 
-export interface TeamSession {
+export interface PlayerSession {
   roomCode: string
-  teamId: string
-  teamName: string
-  guardianName: string
+  playerId: string
+  displayName: string
+  studentNumber: string
   role: 'student'
 }
 
@@ -84,13 +96,13 @@ export interface TeacherSession {
 
 export interface JoinInput {
   roomCode: string
-  teamName: string
-  guardianName: string
+  displayName: string
+  studentNumber: string
 }
 
 export interface JoinResult {
   room: Room
-  team: Team
+  player: Player
 }
 
 export type Unsubscribe = () => void

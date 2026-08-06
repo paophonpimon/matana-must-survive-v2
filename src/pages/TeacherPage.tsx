@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { useGame } from '../context/GameContext'
-import { useRoom, useTeams } from '../hooks/useGameData'
+import { useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
+import { computeCurrentQuestionStats, computeTeamStats } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, saveTeacherSession } from '../services/sessionStorage'
+import type { Player } from '../types/game'
 
 type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | null
 
@@ -12,6 +14,8 @@ const formatCountdown = (milliseconds: number): string => {
   const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000))
   return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`
 }
+
+const formatResponseTime = (responseTimeMs: number): string => `${Math.max(0, responseTimeMs / 1_000).toFixed(1)} วิ`
 
 const RankEmblem = ({ rank, leading }: { rank: number; leading: boolean }) => (
   <span className={`team-rank-emblem team-rank-${Math.min(rank, 4)} ${leading ? 'team-rank-leading' : ''}`} aria-label={`อันดับ ${rank}`}>
@@ -23,52 +27,108 @@ const RankEmblem = ({ rank, leading }: { rank: number; leading: boolean }) => (
   </span>
 )
 
+const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
+  players: Player[]
+  questionIds: string[]
+  teamNameById: Map<string, string>
+}) => (
+  <div className="overflow-x-auto p-5">
+    <table className="w-full min-w-[720px] text-left text-sm">
+      <thead>
+        <tr className="text-xs uppercase tracking-wide text-[#b6ab9e]">
+          <th className="pb-3 pr-3">ชื่อผู้เล่น</th>
+          <th className="pb-3 pr-3">เลขที่</th>
+          <th className="pb-3 pr-3">ทีม</th>
+          {questionIds.map((_, index) => (
+            <th key={index} className="pb-3 pr-2 text-center">ข้อ {index + 1}</th>
+          ))}
+          <th className="pb-3 pr-3 text-center">คะแนนดิบ</th>
+          <th className="pb-3 text-center">ไม่ได้ตอบ</th>
+        </tr>
+      </thead>
+      <tbody>
+        {players.map((player) => {
+          const unansweredCount = questionIds.filter((questionId) => !player.answers.some((answer) => answer.questionId === questionId)).length
+          return (
+            <tr key={player.id} className="border-t border-white/10">
+              <td className="py-2 pr-3 text-[#fff7df]">{player.displayName}</td>
+              <td className="py-2 pr-3 text-[#c0b7ab]">{player.studentNumber}</td>
+              <td className="py-2 pr-3 text-[#c0b7ab]">{teamNameById.get(player.teamId ?? '') ?? 'ยังไม่ได้จัดทีม'}</td>
+              {questionIds.map((questionId) => {
+                const answer = player.answers.find((item) => item.questionId === questionId)
+                const symbol = !answer ? '–' : answer.isCorrect ? '✓' : '✕'
+                const title = !answer
+                  ? 'ไม่ได้ตอบ'
+                  : `เลือก ${answer.selectedChoiceId} · ${answer.isCorrect ? 'ถูก' : 'ผิด'} · ใช้เวลา ${formatResponseTime(answer.responseTimeMs)}`
+                return (
+                  <td key={questionId} className="py-2 pr-2 text-center" title={title}>
+                    <span className={!answer ? 'text-[#8b8377]' : answer.isCorrect ? 'text-[#7fdc9d]' : 'text-[#e08a8a]'}>{symbol}</span>
+                  </td>
+                )
+              })}
+              <td className="py-2 pr-3 text-center font-semibold text-[#f2d58d]">{player.score}</td>
+              <td className="py-2 text-center text-[#c0b7ab]">{unansweredCount}</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  </div>
+)
+
 export const TeacherPage = () => {
   const { service, uid } = useGame()
   const storedSession = getTeacherSession()
   const [teacherSessionId, setTeacherSessionId] = useState(storedSession?.teacherSessionId ?? uid)
   const [roomCode, setRoomCode] = useState(storedSession?.roomCode ?? '')
   const roomState = useRoom(roomCode)
-  const teamsState = useTeams(roomCode)
+  const playersState = usePlayers(roomCode)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null)
   const [durationValue, setDurationValue] = useState('30')
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes'>('seconds')
+  const [teamCountValue, setTeamCountValue] = useState('2')
+  const [resultsTab, setResultsTab] = useState<'team' | 'individual'>('team')
   const [now, setNow] = useState(Date.now())
   const advancingQuestion = useRef({ key: '', attemptedAt: 0 })
 
-  const sortedTeams = useMemo(() => [...teamsState.data].sort((a, b) => a.joinedAt - b.joinedAt), [teamsState.data])
+  const sortedPlayers = useMemo(() => [...playersState.data].sort((a, b) => a.joinedAt - b.joinedAt), [playersState.data])
   const parsedDuration = Number(durationValue)
   const questionDurationSeconds = Math.round(parsedDuration * (durationUnit === 'minutes' ? 60 : 1))
   const durationValid = Number.isFinite(questionDurationSeconds) && questionDurationSeconds >= 5 && questionDurationSeconds <= 600
+  const parsedTeamCount = Math.round(Number(teamCountValue))
+  const teamCountValid = Number.isFinite(parsedTeamCount) && parsedTeamCount >= 1 && parsedTeamCount <= 20
   const remainingMs = roomState.data ? getRemainingMilliseconds(roomState.data, now) : 0
   const revealRemainingMs = roomState.data ? getRevealRemainingMilliseconds(roomState.data, now) : 0
   const currentQuestionId = roomState.data?.questionIds[roomState.data.currentQuestionIndex]
-  const displayedScores = useMemo(() => new Map(teamsState.data.map((team) => {
+
+  // While a question is live, hide each player's just-answered (unrevealed) score bump from
+  // the teacher view the same way the previous per-login-team scoreboard did — this now
+  // feeds team aggregation too, so a team's live average can't be gamed by watching reveals.
+  const visiblePlayers = useMemo(() => {
     const room = roomState.data
-    return [team.id, room ? getTeacherVisibleScore(room, team, now) : team.score]
-  })), [now, roomState.data, teamsState.data])
-  const rankedTeams = useMemo(
-    () => [...teamsState.data].sort((a, b) => (displayedScores.get(b.id) ?? 0) - (displayedScores.get(a.id) ?? 0) || a.teamName.localeCompare(b.teamName, 'th')),
-    [displayedScores, teamsState.data],
+    if (!room || room.status !== 'playing') return playersState.data
+    return playersState.data.map((player) => ({ ...player, score: getTeacherVisibleScore(room, player, now) }))
+  }, [now, playersState.data, roomState.data])
+
+  const teamStats = useMemo(
+    () => computeTeamStats(visiblePlayers, roomState.data?.teams ?? []),
+    [visiblePlayers, roomState.data?.teams],
   )
-  const displayedTeams = roomState.data?.status === 'waiting' ? sortedTeams : rankedTeams
-  const highestScore = rankedTeams[0] ? displayedScores.get(rankedTeams[0].id) ?? 0 : 0
-  const averageScore = teamsState.data.length > 0
-    ? teamsState.data.reduce((total, team) => total + (displayedScores.get(team.id) ?? 0), 0) / teamsState.data.length
-    : 0
-  const leadingTeams = rankedTeams.filter((team) => (displayedScores.get(team.id) ?? 0) === highestScore)
-  const leadingTeamLabel = leadingTeams.length > 1
-    ? `${leadingTeams.length} กลุ่มคะแนนเท่ากัน`
-    : leadingTeams[0]?.teamName ?? '-'
-  const podiumFollowers = rankedTeams
-    .filter((team) => (displayedScores.get(team.id) ?? 0) < highestScore)
-    .slice(0, 2)
-  const answeredCurrentQuestion = currentQuestionId
-    ? teamsState.data.filter((team) => team.answers.some((answer) => answer.questionId === currentQuestionId)).length
-    : 0
+  const currentQuestionStats = useMemo(
+    () => computeCurrentQuestionStats(playersState.data, currentQuestionId),
+    [playersState.data, currentQuestionId],
+  )
+  const teamNameById = useMemo(() => new Map((roomState.data?.teams ?? []).map((team) => [team.id, team.name])), [roomState.data?.teams])
+
+  const highestAverage = teamStats[0]?.averageScore ?? 0
+  const overallAverage = teamStats.length > 0 ? teamStats.reduce((total, team) => total + team.averageScore, 0) / teamStats.length : 0
+  const leadingTeams = teamStats.filter((team) => team.memberCount > 0 && team.averageScore === highestAverage)
+  const leadingTeamLabel = leadingTeams.length > 1 ? `${leadingTeams.length} ทีมคะแนนเท่ากัน` : leadingTeams[0]?.name ?? '-'
+  const podiumFollowers = teamStats.filter((team) => team.averageScore < highestAverage).slice(0, 2)
+  const unassignedCount = sortedPlayers.filter((player) => player.teamId == null).length
 
   useEffect(() => {
     const room = roomState.data
@@ -119,7 +179,7 @@ export const TeacherPage = () => {
       const room = await service.resetDemoRoom?.()
       const demoRoomCode = room?.roomCode ?? service.demoRoomCode ?? 'MATANA'
       rememberRoom('demo-teacher', demoRoomCode)
-      setNotice('รีเซ็ตห้องสาธิตพร้อม 3 กลุ่มตัวอย่างแล้ว สามารถเริ่มภารกิจได้ทันที')
+      setNotice('รีเซ็ตห้องสาธิตพร้อมผู้เล่นตัวอย่าง 3 คนแล้ว กรุณาสุ่มและล็อกทีมก่อนเริ่มภารกิจ')
     } catch (reason) {
       setError(friendlyError(reason))
     } finally {
@@ -136,6 +196,38 @@ export const TeacherPage = () => {
     }
   }
 
+  const randomizeTeams = async (): Promise<void> => {
+    if (!teamCountValid) return
+    setBusy(true)
+    setError('')
+    try {
+      await service.randomizeTeams(roomCode, teacherSessionId, parsedTeamCount)
+      setNotice(`สุ่มทีมแล้ว (${parsedTeamCount} ทีม) สุ่มใหม่ได้จนกว่าจะล็อกทีม`)
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleTeamLock = async (): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      if (roomState.data?.teamsLocked) {
+        await service.unlockTeams(roomCode, teacherSessionId)
+        setNotice('ปลดล็อกทีมแล้ว สามารถสุ่มทีมใหม่ได้')
+      } else {
+        await service.lockTeams(roomCode, teacherSessionId)
+        setNotice('ล็อกทีมแล้ว ผู้เล่นจะเห็นทีมของตนเองแล้ว')
+      }
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const runAction = async (action: Exclude<ConfirmAction, null>): Promise<void> => {
     setBusy(true)
     setError('')
@@ -149,11 +241,11 @@ export const TeacherPage = () => {
       if (action === 'close') await service.closeRoom(roomCode, teacherSessionId)
       setNotice(
         action === 'prepare'
-          ? 'เตรียมภารกิจรอบใหม่แล้ว รายชื่อกลุ่มเดิมยังอยู่ครบ'
+          ? 'เตรียมภารกิจรอบใหม่แล้ว รายชื่อและทีมเดิมยังอยู่ครบ'
           : action === 'stop'
-            ? 'หยุดเกมฉุกเฉินแล้ว ทุกกลุ่มกลับสู่ห้องรอและพร้อมเริ่มรอบใหม่'
+            ? 'หยุดเกมฉุกเฉินแล้ว ทุกคนกลับสู่ห้องรอและพร้อมเริ่มรอบใหม่'
             : action === 'start'
-              ? `เริ่มภารกิจแล้ว ทุกกลุ่มมีเวลา ${questionDurationSeconds} วินาทีต่อข้อ`
+              ? `เริ่มภารกิจแล้ว ทุกคนมีเวลา ${questionDurationSeconds} วินาทีต่อข้อ`
               : 'ยุติห้องกิจกรรมแล้ว',
       )
     } catch (reason) {
@@ -172,22 +264,22 @@ export const TeacherPage = () => {
   const dialogContent = {
     prepare: {
       title: 'เตรียมภารกิจรอบใหม่?',
-      description: 'ระบบจะสุ่มคำถามชุดใหม่ ล้างคะแนนและคำตอบ แต่เก็บรายชื่อกลุ่มเดิมไว้',
+      description: 'ระบบจะสุ่มคำถามชุดใหม่ ล้างคะแนนและคำตอบ แต่เก็บรายชื่อผู้เล่นและทีมเดิมไว้',
       confirmLabel: 'เตรียมรอบใหม่',
     },
     start: {
       title: 'เริ่มภารกิจรอบใหม่?',
-      description: `ทุกกลุ่มจะเข้าสู่คำถามพร้อมกันและมีเวลา ${questionDurationSeconds} วินาทีต่อข้อ คะแนนของแต่ละกลุ่มจะอัปเดตบนจอครูแบบเรียลไทม์`,
+      description: `ทุกคนจะเข้าสู่คำถามพร้อมกันและมีเวลา ${questionDurationSeconds} วินาทีต่อข้อ คะแนนของแต่ละทีมจะอัปเดตบนจอครูแบบเรียลไทม์`,
       confirmLabel: 'เริ่มรอบใหม่',
     },
     stop: {
       title: 'หยุดเกมฉุกเฉิน?',
-      description: 'ระบบจะหยุดรอบที่กำลังเล่น ล้างคะแนนและคำตอบของรอบนี้ แล้วพาทุกกลุ่มกลับห้องรอ รายชื่อกลุ่มจะไม่หาย',
+      description: 'ระบบจะหยุดรอบที่กำลังเล่น ล้างคะแนนและคำตอบของรอบนี้ แล้วพาทุกคนกลับห้องรอ รายชื่อและทีมจะไม่หาย',
       confirmLabel: 'หยุดเกมและกลับห้องรอ',
     },
     close: {
       title: 'ยุติห้องกิจกรรม?',
-      description: 'ผู้เรียนทุกกลุ่มจะออกจากภารกิจและไม่สามารถกลับเข้าห้องนี้ได้',
+      description: 'ผู้เรียนทุกคนจะออกจากภารกิจและไม่สามารถกลับเข้าห้องนี้ได้',
       confirmLabel: 'ยุติห้อง',
     },
   } as const
@@ -195,6 +287,7 @@ export const TeacherPage = () => {
   const currentDialog = confirmAction ? dialogContent[confirmAction] : null
   const broadcastMode = roomState.data?.status === 'playing'
   const finalMode = roomState.data?.status === 'completed' || roomState.data?.status === 'closed'
+  const showIndividualResults = finalMode && resultsTab === 'individual'
 
   return (
     <ScenePage compact className={broadcastMode ? 'teacher-broadcast-mode' : finalMode ? 'teacher-final-page' : ''}>
@@ -204,7 +297,7 @@ export const TeacherPage = () => {
           <div>
             <p className="eyebrow">ศูนย์บัญชาการครู</p>
             <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">ควบคุมภารกิจ</h1>
-            <p className="mt-2 text-[#cfc7bb]">สร้างห้อง ติดตามทุกกลุ่ม และเริ่มรอบพร้อมกันจากหน้าจอนี้</p>
+            <p className="mt-2 text-[#cfc7bb]">สร้างห้อง จัดทีม ติดตามทุกคน และเริ่มรอบพร้อมกันจากหน้าจอนี้</p>
           </div>
           {service.isDemo ? <span className="demo-mode-pill"><i />โหมดสาธิต</span> : <span className="live-mode-pill"><i />Firebase realtime</span>}
         </div>
@@ -213,7 +306,7 @@ export const TeacherPage = () => {
           <section className="glass-panel mx-auto mt-10 max-w-2xl p-7 text-center sm:p-10">
             <div className="teacher-seal mx-auto" aria-hidden="true">ครู</div>
             <h2 className="mt-5 text-2xl font-semibold">สร้างประตูสู่ภารกิจ</h2>
-            <p className="mx-auto mt-3 max-w-md text-[#d8d1c5]">ระบบจะสร้างรหัส 6 ตัวอักษรสำหรับทุกกลุ่มในห้องเรียน ใช้คำถามชุดและลำดับเดียวกัน</p>
+            <p className="mx-auto mt-3 max-w-md text-[#d8d1c5]">ระบบจะสร้างรหัส 6 ตัวอักษรสำหรับผู้เรียนทุกคนในห้องเรียน ใช้คำถามชุดและลำดับเดียวกัน</p>
             <button className="primary-button mx-auto mt-7 w-full max-w-sm" onClick={() => void createRoom()} disabled={busy}>
               <span>{busy ? 'กำลังสร้างห้อง...' : 'สร้างห้อง'}</span><span aria-hidden="true">✦</span>
             </button>
@@ -250,40 +343,40 @@ export const TeacherPage = () => {
                     <div><small>{revealRemainingMs > 0 ? 'กำลังแสดงผล' : 'เวลาคงเหลือ'}</small><strong className="block text-2xl text-[#f2d58d]">{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</strong></div>
                   </>
                 ) : null}
-                <div><small>กลุ่มทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{sortedTeams.length}</strong></div>
+                <div><small>ผู้เล่นทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{sortedPlayers.length}</strong></div>
+                <div><small>ทีมทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{roomState.data.teams.length}</strong></div>
               </div>
             </section>
 
             {(error || (notice && !broadcastMode && !finalMode)) ? <div className={error ? 'error-message mt-4' : 'success-message mt-4'} role="status">{error || notice}</div> : null}
 
-            {finalMode && rankedTeams.length > 0 ? (
+            {finalMode && teamStats.length > 0 ? (
               <section className="teacher-victory-stage" aria-labelledby="victory-stage-title">
                 <div className="victory-fireworks" aria-hidden="true"><i /><i /><i /><i /></div>
                 <div className="victory-rays" aria-hidden="true" />
                 <div className="victory-stage-content">
                   <p className="victory-kicker">✦ ประกาศผลภารกิจรอบที่ {roomState.data.currentRound} ✦</p>
-                  <h2 id="victory-stage-title">ผู้พิทักษ์อันดับหนึ่ง</h2>
+                  <h2 id="victory-stage-title">ทีมอันดับหนึ่ง</h2>
                   <div className="champion-medal" aria-hidden="true"><span>1</span></div>
                   {leadingTeams.length > 1 ? <p className="champion-tie-label">{leadingTeamLabel}</p> : null}
                   <div className={`champion-team-list ${leadingTeams.length > 1 ? 'champion-team-list-tied' : ''}`}>
                     {leadingTeams.map((team) => (
                       <div className="champion-team" key={team.id}>
-                        <strong>{team.teamName}</strong>
-                        <span>ผู้พิทักษ์ {team.guardianName}</span>
+                        <strong>{team.name}</strong>
+                        <span>{sortedPlayers.filter((player) => player.teamId === team.id).map((player) => player.displayName).join(', ')}</span>
                       </div>
                     ))}
                   </div>
-                  <div className="champion-score"><strong>{highestScore}</strong><span>/10 คะแนน</span></div>
+                  <div className="champion-score"><strong>{highestAverage.toFixed(1)}</strong><span>คะแนนเฉลี่ย</span></div>
                   {podiumFollowers.length > 0 ? (
                     <div className={`podium-followers ${podiumFollowers.length === 1 ? 'podium-followers-single' : ''}`}>
                       {podiumFollowers.map((team) => {
-                        const score = displayedScores.get(team.id) ?? 0
-                        const rank = rankedTeams.findIndex((rankedTeam) => (displayedScores.get(rankedTeam.id) ?? 0) === score) + 1
+                        const rank = teamStats.findIndex((rankedTeam) => rankedTeam.id === team.id) + 1
                         return (
                           <article className={`podium-place podium-place-${Math.min(rank, 3)}`} key={team.id}>
                             <RankEmblem rank={rank} leading={false} />
-                            <div><small>อันดับที่ {rank}</small><strong>{team.teamName}</strong><span>ผู้พิทักษ์ {team.guardianName}</span></div>
-                            <b>{score}<span>/10</span></b>
+                            <div><small>อันดับที่ {rank}</small><strong>{team.name}</strong><span>{team.memberCount} คน</span></div>
+                            <b>{team.averageScore.toFixed(1)}<span>เฉลี่ย</span></b>
                           </article>
                         )
                       })}
@@ -300,73 +393,96 @@ export const TeacherPage = () => {
                     <p className="eyebrow">
                       {roomState.data.status === 'playing' ? 'คะแนนสดแบบเรียลไทม์' : finalMode ? 'สรุปผลภารกิจ' : 'รายชื่อผู้เข้าร่วม'}
                     </p>
-                    <h2>{roomState.data.status === 'waiting' ? 'กลุ่มผู้พิทักษ์' : 'กระดานคะแนนทุกกลุ่ม'}</h2>
+                    <h2>{roomState.data.status === 'waiting' ? 'ผู้เล่นและทีม' : 'กระดานคะแนนทุกทีม'}</h2>
                   </div>
                   {roomState.data.status === 'playing' ? (
                     <div className="broadcast-header-actions">
                       <span className="live-score-pill"><i />LIVE</span>
                       <button className="emergency-stop-button" type="button" onClick={() => setConfirmAction('stop')} disabled={busy}>หยุดเกม</button>
                     </div>
-                  ) : <span className="count-badge">{sortedTeams.length} กลุ่ม</span>}
+                  ) : finalMode ? (
+                    <div className="broadcast-header-actions" role="tablist" aria-label="มุมมองผลคะแนน">
+                      <button type="button" className={resultsTab === 'team' ? 'live-score-pill' : 'copy-button'} onClick={() => setResultsTab('team')} aria-pressed={resultsTab === 'team'}>ทีม</button>
+                      <button type="button" className={resultsTab === 'individual' ? 'live-score-pill' : 'copy-button'} onClick={() => setResultsTab('individual')} aria-pressed={resultsTab === 'individual'}>รายบุคคล</button>
+                    </div>
+                  ) : <span className="count-badge">{sortedPlayers.length} คน</span>}
                 </div>
                 {roomState.data.status === 'playing' ? (
                   <dl className="broadcast-stats" aria-label="สถานการณ์ปัจจุบันของห้อง">
                     <div><dt>คำถามปัจจุบัน</dt><dd>{roomState.data.currentQuestionIndex + 1}<span>/10</span></dd></div>
                     <div><dt>{revealRemainingMs > 0 ? 'ดูเฉลยอีก' : 'เวลาคงเหลือ'}</dt><dd>{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</dd></div>
-                    <div><dt>ตอบแล้วข้อนี้</dt><dd>{answeredCurrentQuestion}<span>/{sortedTeams.length}</span></dd></div>
-                    <div><dt>คะแนนเฉลี่ย</dt><dd>{averageScore.toFixed(1)}</dd></div>
+                    <div><dt>ตอบแล้วข้อนี้</dt><dd>{currentQuestionStats.answeredCount}<span>/{sortedPlayers.length}</span></dd></div>
+                    <div><dt>ถูกข้อนี้</dt><dd>{currentQuestionStats.correctCount}<span>/{sortedPlayers.length}</span></dd></div>
+                    <div><dt>คะแนนเฉลี่ยทีม</dt><dd>{overallAverage.toFixed(1)}</dd></div>
                   </dl>
                 ) : null}
-                {roomState.data.status === 'playing' && rankedTeams.length > 0 ? (
-                  <section className="scoreboard-spotlight" aria-label="กลุ่มที่กำลังนำ">
+                {roomState.data.status === 'playing' && teamStats.length > 0 ? (
+                  <section className="scoreboard-spotlight" aria-label="ทีมที่กำลังนำ">
                     <span className="scoreboard-crown" aria-hidden="true">♛</span>
                     <div className="scoreboard-spotlight-copy">
-                      <small>{leadingTeams.length > 1 ? 'คะแนนนำร่วมขณะนี้' : 'ผู้นำขณะนี้'}</small>
+                      <small>{leadingTeams.length > 1 ? 'คะแนนนำร่วมขณะนี้' : 'ทีมนำขณะนี้'}</small>
                       <strong>{leadingTeamLabel}</strong>
-                      <span>{leadingTeams.length === 1 ? `ผู้พิทักษ์ ${leadingTeams[0].guardianName}` : 'ทุกคะแนนจะจัดอันดับใหม่หลังหมดเวลาของแต่ละข้อ'}</span>
+                      <span>{leadingTeams.length === 1 ? `สมาชิก ${leadingTeams[0].memberCount} คน` : 'ทุกคะแนนจะจัดอันดับใหม่หลังหมดเวลาของแต่ละข้อ'}</span>
                     </div>
                     <div className="scoreboard-spotlight-score">
-                      <small>คะแนนสด</small>
-                      <b>{highestScore}<span>/10</span></b>
+                      <small>คะแนนเฉลี่ย</small>
+                      <b>{highestAverage.toFixed(1)}</b>
                     </div>
                   </section>
                 ) : null}
-                {teamsState.loading ? (
-                  <div className="p-8 text-center text-[#cfc7bb]">กำลังโหลดรายชื่อกลุ่ม...</div>
-                ) : sortedTeams.length === 0 ? (
+
+                {roomState.data.status === 'waiting' ? (
+                  playersState.loading ? (
+                    <div className="p-8 text-center text-[#cfc7bb]">กำลังโหลดรายชื่อผู้เล่น...</div>
+                  ) : sortedPlayers.length === 0 ? (
+                    <div className="empty-state">
+                      <div aria-hidden="true">✦</div>
+                      <h3>ยังไม่มีผู้เล่นเข้าร่วม</h3>
+                      <p>ส่งรหัส <strong>{roomCode}</strong> ให้ผู้เรียน แล้วรายชื่อจะปรากฏที่นี่แบบ realtime</p>
+                    </div>
+                  ) : (
+                    <ol className="scoreboard-list" aria-live="polite">
+                      {sortedPlayers.map((player, index) => (
+                        <li key={player.id} className="scoreboard-row">
+                          <RankEmblem rank={index + 1} leading={false} />
+                          <div className="scoreboard-team">
+                            <strong>{player.displayName}</strong>
+                            <small>เลขที่ {player.studentNumber}</small>
+                          </div>
+                          <span className="team-status team-status-waiting">
+                            {roomState.data?.teamsLocked
+                              ? teamNameById.get(player.teamId ?? '') ?? 'ยังไม่ได้จัดทีม'
+                              : player.teamId
+                                ? `${teamNameById.get(player.teamId) ?? ''} (ยังไม่ล็อก)`
+                                : 'ยังไม่ได้จัดทีม'}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  )
+                ) : showIndividualResults ? (
+                  <IndividualResultsTable players={sortedPlayers} questionIds={roomState.data.questionIds} teamNameById={teamNameById} />
+                ) : teamStats.length === 0 ? (
                   <div className="empty-state">
                     <div aria-hidden="true">✦</div>
-                    <h3>ยังไม่มีกลุ่มเข้าร่วม</h3>
-                    <p>ส่งรหัส <strong>{roomCode}</strong> ให้ผู้เรียน แล้วรายชื่อจะปรากฏที่นี่แบบ realtime</p>
+                    <h3>ยังไม่มีทีม</h3>
                   </div>
                 ) : (
                   <ol className="scoreboard-list" aria-live="polite">
-                    {displayedTeams.map((team, index) => {
-                      const answeredCount = team.answers.length
-                      const answeredThisQuestion = team.answers.some((answer) => answer.questionId === currentQuestionId)
-                      const displayedScore = displayedScores.get(team.id) ?? 0
-                      const isLeader = roomState.data?.status !== 'waiting' && highestScore > 0 && displayedScore === highestScore
-                      const rankNumber = roomState.data?.status === 'waiting'
-                        ? index + 1
-                        : rankedTeams.findIndex((rankedTeam) => (displayedScores.get(rankedTeam.id) ?? 0) === displayedScore) + 1
-                      const teamStatus = finalMode
-                        ? roomState.data?.status === 'closed' ? 'สรุปแล้ว' : 'จบรอบแล้ว'
-                        : team.status === 'waiting'
-                          ? 'รอเริ่ม'
-                          : team.status === 'playing'
-                            ? revealRemainingMs > 0 ? 'กำลังดูเฉลย' : answeredThisQuestion ? 'ตอบแล้ว' : 'กำลังตอบ'
-                        : team.status === 'submitted' ? 'ส่งครบแล้ว' : 'หยุดแล้ว'
+                    {teamStats.map((team, index) => {
+                      const isLeader = highestAverage > 0 && team.averageScore === highestAverage && team.memberCount > 0
                       return (
                         <li key={team.id} className={`scoreboard-row ${isLeader ? 'scoreboard-row-leading' : ''}`}>
-                          <RankEmblem rank={rankNumber} leading={isLeader} />
+                          <RankEmblem rank={index + 1} leading={isLeader} />
                           <div className="scoreboard-team">
-                            <strong>{team.teamName}</strong>
-                            <small>ผู้พิทักษ์ {team.guardianName}</small>
-                            <div className="scoreboard-progress" aria-label={`ตอบแล้ว ${answeredCount} จาก 10 ข้อ`}><i style={{ width: `${Math.min(answeredCount, 10) * 10}%` }} /></div>
-                            <span>ตอบแล้ว {answeredCount}/10 ข้อ</span>
+                            <strong>{team.name}</strong>
+                            <small>{team.memberCount} คน · ส่งแล้ว {team.submittedCount}/{team.memberCount} · ถูก {team.correctCount} ข้อ</small>
+                            <div className="scoreboard-progress" aria-label={`ส่งคำตอบแล้ว ${team.submittedCount} จาก ${team.memberCount} คน`}><i style={{ width: `${team.memberCount > 0 ? (team.submittedCount / team.memberCount) * 100 : 0}%` }} /></div>
                           </div>
-                          <span className={`team-status team-status-${team.status}`}>{teamStatus}</span>
-                          <div className="scoreboard-score"><small>คะแนน</small><strong>{displayedScore}<span>/10</span></strong></div>
+                          <span className={`team-status team-status-${finalMode ? (roomState.data?.status === 'closed' ? 'stopped' : 'submitted') : 'playing'}`}>
+                            {finalMode ? (roomState.data?.status === 'closed' ? 'สรุปแล้ว' : 'จบรอบแล้ว') : 'กำลังเล่น'}
+                          </span>
+                          <div className="scoreboard-score"><small>เฉลี่ย</small><strong>{team.averageScore.toFixed(1)}</strong></div>
                         </li>
                       )
                     })}
@@ -383,14 +499,14 @@ export const TeacherPage = () => {
                     </div>
                     <dl className="teacher-summary-grid">
                       <div>
-                        <dt>{roomState.data.status === 'playing' ? 'ตอบข้อปัจจุบัน' : 'คะแนนสูงสุด'}</dt>
-                        <dd>{roomState.data.status === 'playing' ? `${answeredCurrentQuestion}/${sortedTeams.length}` : `${highestScore}/10`}</dd>
+                        <dt>{roomState.data.status === 'playing' ? 'ตอบข้อปัจจุบัน' : 'คะแนนเฉลี่ยสูงสุด'}</dt>
+                        <dd>{roomState.data.status === 'playing' ? `${currentQuestionStats.answeredCount}/${sortedPlayers.length}` : highestAverage.toFixed(1)}</dd>
                       </div>
-                      <div><dt>คะแนนเฉลี่ย</dt><dd>{averageScore.toFixed(1)}</dd></div>
-                      <div><dt>กลุ่มทั้งหมด</dt><dd>{sortedTeams.length}</dd></div>
+                      <div><dt>คะแนนเฉลี่ยรวม</dt><dd>{overallAverage.toFixed(1)}</dd></div>
+                      <div><dt>ทีมทั้งหมด</dt><dd>{roomState.data.teams.length}</dd></div>
                     </dl>
                     {roomState.data.status === 'playing' ? (
-                      <div className="teacher-answer-progress"><i style={{ width: `${sortedTeams.length > 0 ? (answeredCurrentQuestion / sortedTeams.length) * 100 : 0}%` }} /></div>
+                      <div className="teacher-answer-progress"><i style={{ width: `${sortedPlayers.length > 0 ? (currentQuestionStats.answeredCount / sortedPlayers.length) * 100 : 0}%` }} /></div>
                     ) : null}
                   </section>
                 ) : null}
@@ -400,6 +516,22 @@ export const TeacherPage = () => {
                     {roomState.data.status === 'waiting' ? (
                       <>
                         <div className="timer-setting">
+                          <label htmlFor="team-count">จำนวนทีม</label>
+                          <div>
+                            <input id="team-count" type="number" min={1} max={20} step="1" value={teamCountValue} onChange={(event) => setTeamCountValue(event.target.value)} disabled={roomState.data.teamsLocked} />
+                          </div>
+                          <small>สุ่มทีมได้ซ้ำหลายครั้งจนกว่าจะล็อกทีม</small>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button className="secondary-button" onClick={() => void randomizeTeams()} disabled={busy || sortedPlayers.length === 0 || !teamCountValid || roomState.data.teamsLocked}>สุ่มทีม</button>
+                          <button className={roomState.data.teamsLocked ? 'secondary-button' : 'primary-button'} onClick={() => void toggleTeamLock()} disabled={busy || (!roomState.data.teamsLocked && (roomState.data.teams.length === 0 || unassignedCount > 0))}>
+                            {roomState.data.teamsLocked ? 'ปลดล็อกทีม' : 'ล็อกทีม'}
+                          </button>
+                        </div>
+                        {!roomState.data.teamsLocked && roomState.data.teams.length > 0 && unassignedCount > 0 ? (
+                          <p className="text-sm text-[#bdb5ac]">มีผู้เล่น {unassignedCount} คนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้งก่อนล็อก</p>
+                        ) : null}
+                        <div className="timer-setting">
                           <label htmlFor="question-duration">เวลาต่อคำถาม</label>
                           <div>
                             <input id="question-duration" type="number" min={durationUnit === 'seconds' ? 5 : 1} max={durationUnit === 'seconds' ? 600 : 10} step="1" value={durationValue} onChange={(event) => setDurationValue(event.target.value)} />
@@ -408,11 +540,12 @@ export const TeacherPage = () => {
                               <option value="minutes">นาที</option>
                             </select>
                           </div>
-                          <small>กำหนดได้ตั้งแต่ 5 วินาทีถึง 10 นาที ทุกกลุ่มใช้เวลาเท่ากัน</small>
+                          <small>กำหนดได้ตั้งแต่ 5 วินาทีถึง 10 นาที ทุกคนใช้เวลาเท่ากัน</small>
                         </div>
-                        <button className="primary-button w-full" onClick={requestStart} disabled={busy || sortedTeams.length === 0 || !durationValid}>
+                        <button className="primary-button w-full" onClick={requestStart} disabled={busy || sortedPlayers.length === 0 || !durationValid || !roomState.data.teamsLocked}>
                           {roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
                         </button>
+                        {!roomState.data.teamsLocked ? <p className="text-sm text-[#bdb5ac]">ต้องล็อกทีมก่อนจึงจะเริ่มภารกิจได้</p> : null}
                       </>
                     ) : null}
                     {roomState.data.status === 'completed' ? (
@@ -431,7 +564,7 @@ export const TeacherPage = () => {
                       <button className="secondary-button w-full" onClick={() => void createRoom()} disabled={busy}>สร้างห้องทดสอบใหม่</button>
                     ) : null}
                   </div>
-                  {roomState.data.status === 'waiting' && sortedTeams.length === 0 ? <p className="mt-3 text-sm text-[#bdb5ac]">ปุ่มเริ่มจะใช้งานได้เมื่อมีอย่างน้อย 1 กลุ่ม</p> : null}
+                  {roomState.data.status === 'waiting' && sortedPlayers.length === 0 ? <p className="mt-3 text-sm text-[#bdb5ac]">ปุ่มเริ่มจะใช้งานได้เมื่อมีอย่างน้อย 1 คนเข้าร่วมและล็อกทีมแล้ว</p> : null}
                 </section>
               </aside> : null}
             </div>

@@ -16,8 +16,9 @@ import {
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
+import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, GameService } from './gameService'
-import type { AnswerRecord, JoinInput, JoinResult, Room, Team, Unsubscribe, Winner } from '../types/game'
+import type { AnswerRecord, JoinInput, JoinResult, Player, Room, TeamMeta, Unsubscribe, Winner } from '../types/game'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -52,6 +53,11 @@ const mapWinner = (value: unknown): Winner | null => {
   }
 }
 
+const mapTeamMeta = (value: unknown): TeamMeta => {
+  const meta = (value ?? {}) as Record<string, unknown>
+  return { id: String(meta.id ?? ''), name: String(meta.name ?? '') }
+}
+
 const mapRoom = (data: DocumentData): Room => ({
   roomCode: String(data.roomCode),
   status: data.status as Room['status'],
@@ -66,14 +72,18 @@ const mapRoom = (data: DocumentData): Room => ({
   previousQuestionIds: Array.isArray(data.previousQuestionIds) ? data.previousQuestionIds.map(String) : [],
   winner: mapWinner(data.winner),
   teacherSessionId: String(data.teacherSessionId ?? ''),
+  teamCount: Number(data.teamCount ?? 0),
+  teamsLocked: Boolean(data.teamsLocked),
+  teams: Array.isArray(data.teams) ? data.teams.map(mapTeamMeta) : [],
 })
 
-const mapTeam = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): Team => {
+const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): Player => {
   const data = snapshot.data()
   return {
     id: snapshot.id,
-    teamName: String(data.teamName ?? ''),
-    guardianName: String(data.guardianName ?? ''),
+    displayName: String(data.displayName ?? ''),
+    studentNumber: String(data.studentNumber ?? ''),
+    teamId: data.teamId == null ? null : String(data.teamId),
     joinedAt: toMillis(data.joinedAt) ?? Date.now(),
     currentRound: Number(data.currentRound ?? 1),
     currentQuestionIndex: Number(data.currentQuestionIndex ?? 0),
@@ -84,23 +94,24 @@ const mapTeam = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; d
           selectedChoiceId: String(answer.selectedChoiceId),
           isCorrect: Boolean(answer.isCorrect),
           answeredAt: toMillis(answer.answeredAt) ?? Number(answer.answeredAt ?? Date.now()),
+          responseTimeMs: Number(answer.responseTimeMs ?? 0),
         }))
       : [],
     submitted: Boolean(data.submitted),
     finishedAt: toMillis(data.finishedAt),
     elapsedMs: data.elapsedMs == null ? null : Number(data.elapsedMs),
-    status: data.status as Team['status'],
+    status: data.status as Player['status'],
     ownerUid: String(data.ownerUid ?? ''),
   }
 }
 
-const stableTeamId = (teamName: string): string => {
+const stablePlayerId = (studentNumber: string): string => {
   let hash = 2166136261
-  for (const character of teamName.trim().toLocaleLowerCase('th')) {
+  for (const character of studentNumber.trim().toLocaleLowerCase('th')) {
     hash ^= character.codePointAt(0) ?? 0
     hash = Math.imul(hash, 16777619)
   }
-  return `team-${(hash >>> 0).toString(36)}`
+  return `player-${(hash >>> 0).toString(36)}`
 }
 
 export class FirebaseGameService implements GameService {
@@ -154,6 +165,9 @@ export class FirebaseGameService implements GameService {
       previousQuestionIds: [],
       winner: null,
       teacherSessionId,
+      teamCount: 0,
+      teamsLocked: false,
+      teams: [],
     }
     await runTransaction(db, async (transaction) => {
       const roomRef = doc(db, 'rooms', roomCode)
@@ -165,21 +179,36 @@ export class FirebaseGameService implements GameService {
 
   async joinRoom(input: JoinInput, ownerUid: string): Promise<JoinResult> {
     const roomCode = input.roomCode.trim().toUpperCase()
-    const teamName = input.teamName.trim()
-    const teamId = stableTeamId(teamName)
+    const studentNumber = input.studentNumber.trim()
+    const playerId = stablePlayerId(studentNumber)
     const roomRef = doc(db, 'rooms', roomCode)
-    const teamRef = doc(db, 'rooms', roomCode, 'teams', teamId)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
     try {
       return await runTransaction(db, async (transaction) => {
         const roomSnapshot = await transaction.get(roomRef)
         if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
         const room = mapRoom(roomSnapshot.data())
         if (room.status === 'closed') throw new Error('ผู้ใช้:ห้องกิจกรรมสิ้นสุดแล้ว')
+
+        // Read the deterministic player doc BEFORE checking teamsLocked, so a returning
+        // student is never blocked by a lock that happened after they originally joined.
+        const playerSnapshot = await transaction.get(playerRef)
+        if (playerSnapshot.exists()) {
+          const existing = mapPlayer(playerSnapshot)
+          if (existing.ownerUid === ownerUid) return { room, player: existing }
+          // A different owner already used this student number — reject explicitly instead
+          // of ever returning (or attempting to overwrite) another student's record.
+          throw new Error('ผู้ใช้:เลขที่นักเรียนนี้ถูกใช้แล้ว')
+        }
+
         if (room.status !== 'waiting') throw new Error('ผู้ใช้:เกมกำลังดำเนินอยู่ ไม่สามารถเข้าร่วมรอบนี้ได้')
-        const team: Team = {
-          id: teamId,
-          teamName,
-          guardianName: input.guardianName.trim(),
+        if (room.teamsLocked) throw new Error('ผู้ใช้:ทีมถูกล็อกแล้ว กรุณาติดต่อครู')
+
+        const player: Player = {
+          id: playerId,
+          displayName: input.displayName.trim(),
+          studentNumber,
+          teamId: null,
           joinedAt: Date.now(),
           currentRound: room.currentRound,
           currentQuestionIndex: 0,
@@ -191,14 +220,12 @@ export class FirebaseGameService implements GameService {
           status: 'waiting',
           ownerUid,
         }
-        // Rules อนุญาต create แต่ปฏิเสธ update ระหว่างรอเริ่มเกม จึงกันชื่อซ้ำได้แบบ atomic
-        // โดยไม่ต้องอ่านเอกสารทีมที่นักเรียนคนอื่นไม่มีสิทธิ์เปิดดู
-        transaction.set(teamRef, { ...team, joinedAt: serverTimestamp() })
-        return { room, team }
+        transaction.set(playerRef, { ...player, joinedAt: serverTimestamp() })
+        return { room, player }
       })
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-      if (code === 'permission-denied') throw new Error('ผู้ใช้:ชื่อกลุ่มนี้ถูกใช้แล้ว กรุณาใช้ชื่ออื่น')
+      if (code === 'permission-denied') throw new Error('ผู้ใช้:เลขที่นักเรียนนี้ถูกใช้แล้ว')
       throw error
     }
   }
@@ -211,25 +238,25 @@ export class FirebaseGameService implements GameService {
     )
   }
 
-  subscribeTeams(roomCode: string, listener: (teams: Team[]) => void, onError: (message: string) => void): Unsubscribe {
+  subscribePlayers(roomCode: string, listener: (players: Player[]) => void, onError: (message: string) => void): Unsubscribe {
     return onSnapshot(
-      collection(db, 'rooms', roomCode.toUpperCase(), 'teams'),
-      (snapshot) => listener(snapshot.docs.map(mapTeam).sort((a, b) => a.joinedAt - b.joinedAt)),
-      () => onError('ไม่สามารถโหลดรายชื่อกลุ่มได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+      collection(db, 'rooms', roomCode.toUpperCase(), 'players'),
+      (snapshot) => listener(snapshot.docs.map(mapPlayer).sort((a, b) => a.joinedAt - b.joinedAt)),
+      () => onError('ไม่สามารถโหลดรายชื่อผู้เล่นได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
     )
   }
 
-  subscribeTeam(roomCode: string, teamId: string, listener: (team: Team | null) => void, onError: (message: string) => void): Unsubscribe {
+  subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void, onError: (message: string) => void): Unsubscribe {
     return onSnapshot(
-      doc(db, 'rooms', roomCode.toUpperCase(), 'teams', teamId),
-      (snapshot) => listener(snapshot.exists() ? mapTeam(snapshot) : null),
-      () => onError('ไม่สามารถโหลดข้อมูลกลุ่มได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+      doc(db, 'rooms', roomCode.toUpperCase(), 'players', playerId),
+      (snapshot) => listener(snapshot.exists() ? mapPlayer(snapshot) : null),
+      () => onError('ไม่สามารถโหลดข้อมูลผู้เล่นได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
     )
   }
 
   async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void> {
-    const teamSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teams'))
-    if (teamSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีกลุ่มเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     await runTransaction(db, async (transaction) => {
       const roomRef = doc(db, 'rooms', roomCode)
       const snapshot = await transaction.get(roomRef)
@@ -238,6 +265,7 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status === 'playing') throw new Error('ผู้ใช้:ภารกิจกำลังดำเนินอยู่แล้ว')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
+      if (!room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
       transaction.update(roomRef, {
         status: 'playing',
         startedAt: serverTimestamp(),
@@ -249,7 +277,7 @@ export class FirebaseGameService implements GameService {
       })
     })
     const batch = writeBatch(db)
-    teamSnapshots.docs.forEach((teamDocument) => batch.update(teamDocument.ref, { status: 'playing' }))
+    playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, { status: 'playing' }))
     await batch.commit()
   }
 
@@ -275,9 +303,9 @@ export class FirebaseGameService implements GameService {
       return false
     })
     if (!finished) return
-    const teamSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teams'))
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
-    teamSnapshots.docs.forEach((teamDocument) => batch.update(teamDocument.ref, {
+    playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, {
       currentQuestionIndex: 10,
       submitted: true,
       status: 'submitted',
@@ -296,7 +324,7 @@ export class FirebaseGameService implements GameService {
     if (room.status === 'playing') throw new Error('ผู้ใช้:ยุติรอบปัจจุบันให้เรียบร้อยก่อนเตรียมรอบใหม่')
     const currentRound = room.currentRound + 1
     const questionIds = selectRoundQuestions(questions, room.questionIds)
-    const teamSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teams'))
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
     batch.update(roomRef, {
       status: 'waiting',
@@ -309,8 +337,8 @@ export class FirebaseGameService implements GameService {
       questionIds,
       winner: null,
     })
-    teamSnapshots.docs.forEach((teamDocument) => {
-      batch.update(teamDocument.ref, {
+    playerSnapshots.docs.forEach((playerDocument) => {
+      batch.update(playerDocument.ref, {
         currentRound,
         currentQuestionIndex: 0,
         score: 0,
@@ -333,7 +361,7 @@ export class FirebaseGameService implements GameService {
     if (room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจไม่ได้กำลังดำเนินอยู่')
     const currentRound = room.currentRound + 1
     const questionIds = selectRoundQuestions(questions, room.questionIds)
-    const teamSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teams'))
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
     batch.update(roomRef, {
       status: 'waiting',
@@ -346,8 +374,8 @@ export class FirebaseGameService implements GameService {
       questionIds,
       winner: null,
     })
-    teamSnapshots.docs.forEach((teamDocument) => {
-      batch.update(teamDocument.ref, {
+    playerSnapshots.docs.forEach((playerDocument) => {
+      batch.update(playerDocument.ref, {
         currentRound,
         currentQuestionIndex: 0,
         score: 0,
@@ -370,23 +398,92 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       transaction.update(roomRef, { status: 'closed' })
     })
-    const teamSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teams'))
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
-    teamSnapshots.docs.forEach((teamDocument) => batch.update(teamDocument.ref, { status: 'stopped' }))
+    playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, { status: 'stopped' }))
     await batch.commit()
   }
 
-  async saveAnswer(roomCode: string, teamId: string, answer: AnswerInput): Promise<AnswerResult> {
+  async randomizeTeams(roomCode: string, teacherSessionId: string, teamCount: number): Promise<void> {
+    if (!Number.isFinite(teamCount) || teamCount < 1) throw new Error('ผู้ใช้:จำนวนทีมต้องมีอย่างน้อย 1 ทีม')
     const roomRef = doc(db, 'rooms', roomCode)
-    const teamRef = doc(db, 'rooms', roomCode, 'teams', teamId)
+    const roomSnapshot = await getDoc(roomRef)
+    if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    const room = mapRoom(roomSnapshot.data())
+    if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+    if (room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
+    if (room.teamsLocked) throw new Error('ผู้ใช้:กรุณาปลดล็อกทีมก่อนสุ่มใหม่')
+
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    const playerIds = playerSnapshots.docs.map((playerDocument) => playerDocument.id)
+    if (playerIds.length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังจัดทีมไม่ได้')
+    if (teamCount > playerIds.length) throw new Error('ผู้ใช้:จำนวนทีมต้องไม่เกินจำนวนผู้เล่น')
+    const assignment = distributeTeamsEvenly(playerIds, teamCount)
+
+    // One atomic batch for the room's team labels AND every player's teamId — Firestore
+    // commits a batch all-or-nothing, so the room can never say teams are assigned while
+    // some players are still unassigned (well under the 500-op batch limit at ~50 students).
+    const batch = writeBatch(db)
+    batch.update(roomRef, { teamCount, teams: buildTeamMetas(teamCount) })
+    playerSnapshots.docs.forEach((playerDocument) => {
+      batch.update(playerDocument.ref, { teamId: assignment[playerDocument.id] })
+    })
+    await batch.commit()
+  }
+
+  async lockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    // Lock FIRST (transactionally verifying teacher/teams), before re-checking the roster.
+    // A join transaction that reads the room after this commits sees teamsLocked=true and
+    // is rejected as a new join (reconnects are unaffected — they never check teamsLocked).
+    // A join transaction already in flight when this commits will conflict on the room doc
+    // and Firestore retries it, so it re-reads the now-locked room and is blocked too. Only
+    // after the lock is committed do we re-read every player — this closes the race where a
+    // student finishes joining in the window right before the lock actually lands.
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.teams.length === 0) throw new Error('ผู้ใช้:กรุณาสุ่มทีมก่อนล็อกทีม')
+      transaction.update(roomRef, { teamsLocked: true })
+    })
+
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    const hasUnassigned = playerSnapshots.docs.some((playerDocument) => mapPlayer(playerDocument).teamId == null)
+    if (hasUnassigned) {
+      await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(roomRef)
+        if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+        transaction.update(roomRef, { teamsLocked: false })
+      })
+      throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
+    }
+  }
+
+  async unlockTeams(roomCode: string, teacherSessionId: string): Promise<void> {
+    await runTransaction(db, async (transaction) => {
+      const roomRef = doc(db, 'rooms', roomCode)
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'waiting') throw new Error('ผู้ใช้:ปลดล็อกทีมได้เฉพาะช่วงห้องรอ')
+      transaction.update(roomRef, { teamsLocked: false })
+    })
+  }
+
+  async saveAnswer(roomCode: string, playerId: string, answer: AnswerInput): Promise<AnswerResult> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
     return runTransaction(db, async (transaction) => {
-      const [roomSnapshot, teamSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(teamRef)])
-      if (!roomSnapshot.exists() || !teamSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือกลุ่มของคุณ')
+      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
       const room = mapRoom(roomSnapshot.data())
-      const team = mapTeam(teamSnapshot)
+      const player = mapPlayer(playerSnapshot)
       if (room.status === 'completed') throw new Error('ผู้ใช้:ภารกิจรอบนี้สิ้นสุดแล้ว')
       if (room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจยังไม่เริ่มหรือสิ้นสุดแล้ว')
-      if (team.submitted || room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
+      if (player.submitted || room.currentQuestionIndex !== answer.expectedQuestionIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
       const deadline = (room.questionStartedAt ?? 0) + room.questionDurationSeconds * 1_000
       if (!room.questionStartedAt || Date.now() >= deadline) throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
       if (room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
@@ -398,22 +495,23 @@ export class FirebaseGameService implements GameService {
         throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
       }
       const isCorrect = evaluated.isCorrect
-      const existingAnswerIndex = team.answers.findIndex((item) => item.questionId === answer.questionId)
-      const existingAnswer = existingAnswerIndex >= 0 ? team.answers[existingAnswerIndex] : undefined
+      const existingAnswerIndex = player.answers.findIndex((item) => item.questionId === answer.questionId)
+      const existingAnswer = existingAnswerIndex >= 0 ? player.answers[existingAnswerIndex] : undefined
       const answerRecord: AnswerRecord = {
         questionId: answer.questionId,
         selectedChoiceId: answer.selectedChoiceId,
         isCorrect,
         answeredAt: Date.now(),
+        responseTimeMs: Date.now() - (room.questionStartedAt ?? Date.now()),
       }
-      const answers = [...team.answers]
+      const answers = [...player.answers]
       if (existingAnswerIndex >= 0) answers[existingAnswerIndex] = answerRecord
       else answers.push(answerRecord)
-      const score = team.score + (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
-      transaction.update(teamRef, { answers, score })
+      const score = player.score + (isCorrect ? 1 : 0) - (existingAnswer?.isCorrect ? 1 : 0)
+      transaction.update(playerRef, { answers, score })
       return {
-        team: {
-          ...team,
+        player: {
+          ...player,
           answers,
           score,
         },

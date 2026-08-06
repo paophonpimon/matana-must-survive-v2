@@ -1,4 +1,4 @@
-import type { JoinInput, Question, QuestionCategory, Room, Team } from '../types/game'
+import type { JoinInput, Player, Question, QuestionCategory, Room } from '../types/game'
 
 export const ROUND_CATEGORY_COUNTS: Record<QuestionCategory, number> = {
   basic: 2,
@@ -10,7 +10,7 @@ export const ROUND_CATEGORY_COUNTS: Record<QuestionCategory, number> = {
 
 const ROOM_CHARACTERS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 
-const shuffle = <T>(items: T[], random: () => number): T[] => {
+export const shuffle = <T>(items: T[], random: () => number): T[] => {
   const result = [...items]
   for (let index = result.length - 1; index > 0; index -= 1) {
     const target = Math.floor(random() * (index + 1))
@@ -73,25 +73,25 @@ export const evaluateChoice = (
 export const validateJoinInput = (input: JoinInput): Partial<Record<keyof JoinInput, string>> => {
   const errors: Partial<Record<keyof JoinInput, string>> = {}
   const roomCode = input.roomCode.trim().toUpperCase()
-  const teamName = input.teamName.trim()
-  const guardianName = input.guardianName.trim()
+  const displayName = input.displayName.trim()
+  const studentNumber = input.studentNumber.trim()
 
   if (!roomCode) errors.roomCode = 'กรุณากรอกรหัสห้อง'
   else if (!/^[A-HJ-KM-NP-Z2-9]{6}$/.test(roomCode)) errors.roomCode = 'รหัสห้องต้องมี 6 ตัวอักษรและไม่มี O, I, L, 0, 1'
-  if (!teamName) errors.teamName = 'กรุณากรอกชื่อกลุ่ม'
-  else if (teamName.length > 40) errors.teamName = 'ชื่อกลุ่มต้องไม่เกิน 40 ตัวอักษร'
-  if (!guardianName) errors.guardianName = 'กรุณากรอกชื่อผู้พิทักษ์'
-  else if (guardianName.length > 40) errors.guardianName = 'ชื่อผู้พิทักษ์ต้องไม่เกิน 40 ตัวอักษร'
+  if (!displayName) errors.displayName = 'กรุณากรอกชื่อผู้เล่น'
+  else if (displayName.length > 40) errors.displayName = 'ชื่อผู้เล่นต้องไม่เกิน 40 ตัวอักษร'
+  if (!studentNumber) errors.studentNumber = 'กรุณากรอกเลขที่นักเรียน'
+  else if (studentNumber.length > 20) errors.studentNumber = 'เลขที่นักเรียนต้องไม่เกิน 20 ตัวอักษร'
   return errors
 }
 
-export const resolveStudentRoute = (room: Room, team: Team): string => {
+export const resolveStudentRoute = (room: Room, player: Player): string => {
   const base = room.roomCode
   if (room.status === 'closed') return `/closed/${base}`
   if (room.winner) return `/congratulations/${base}`
   if (room.status === 'completed') return `/result/${base}`
   if (room.status === 'waiting') return `/lobby/${base}`
-  if (team.submitted) return `/result/${base}`
+  if (player.submitted) return `/result/${base}`
   return `/game/${base}`
 }
 
