@@ -566,7 +566,7 @@ describe('Demo timed classroom flow', () => {
 
       const teams = liveRoom.value?.teams ?? []
       const questionIds = liveRoom.value?.questionIds ?? []
-      const computeOnce = (): unknown => computeTeamCompetitionStats(players.value, teams, questionIds, events.value)
+      const computeOnce = (): unknown => computeTeamCompetitionStats(players.value, teams, questionIds, events.value, liveRoom.value?.currentRound ?? 1)
       const first = computeOnce()
       const second = computeOnce()
       expect(first).toEqual(second) // reproducible from the event log alone
@@ -616,7 +616,7 @@ describe('Demo timed classroom flow', () => {
       })
       expect(magic.value?.inventory.find((item) => item.itemType === 'rose_shield')?.consumed).toBe(true)
 
-      const stats = computeTeamCompetitionStats(players.value, liveRoom.value?.teams ?? [], liveRoom.value?.questionIds ?? [], events.value)
+      const stats = computeTeamCompetitionStats(players.value, liveRoom.value?.teams ?? [], liveRoom.value?.questionIds ?? [], events.value, liveRoom.value?.currentRound ?? 1)
       // team-2's q1 raw point is untouched by the blocked hostile effect (multiplier stays 1).
       expect(stats.find((team) => team.id === 'team-2')?.competitionTotal).toBe(2)
 
@@ -673,6 +673,191 @@ describe('Demo timed classroom flow', () => {
       expect(magic.value?.inventory[0]).toMatchObject({ itemType: 'score_seal', consumed: false })
       expect(magic.value?.queuedEffect).toMatchObject({ itemType: 'score_seal', targetTeamId: 'team-2', affectedQuestionIndex: 1 })
       stop()
+    })
+  })
+
+  describe('Milestone 2.1 stability fixes', () => {
+    it('an applied magic event from round 1 does not affect round 2\'s competition score, even though the event log is never cleared', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holder1 = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // lobby window -> targets index 1
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await answerAt(service, room, p1, 0, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await answerAt(service, room, p1, 1, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1) // resolves: item consumed, event applied, round 1
+
+      const events: { value: MagicEvent[] } = { value: [] }
+      const players: { value: Player[] } = { value: [] }
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopEvents = service.subscribeMagicEvents(room.roomCode, (value) => { events.value = value })
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(events.value.find((event) => event.status === 'applied')?.round).toBe(1))
+
+      const round1Teams = liveRoom.value?.teams ?? []
+      const round1Questions = liveRoom.value?.questionIds ?? []
+      const round1Stats = computeTeamCompetitionStats(players.value, round1Teams, round1Questions, events.value, 1)
+      // q0 raw 1 (no multiplier) + q1 raw 1 * 1.5 = 2.5 — the multiplier applies within round 1.
+      expect(round1Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBeCloseTo(2.5)
+
+      // Move to round 2: player.score/answers reset, magic inventory resets, but the round-1
+      // 'applied' event is NOT deleted from the log — it stays for history.
+      await service.stopRound(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode) // no item gets activated this round
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
+      // Round 2 has a freshly-selected questionIds array — answerAt must use the LIVE room,
+      // not the stale `room` captured at createRoom time (round 1's questionIds).
+      const round2Room = liveRoom.value as Room
+      await answerAt(service, round2Room, p1, 0, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await answerAt(service, round2Room, p1, 1, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1) // no queued effect this round -> no-op resolution
+
+      await vi.waitFor(() => expect(players.value.find((player) => player.id === p1.id)?.score).toBe(2))
+      // Raw score is exactly plain correct-answer counting for round 2 — untouched by magic.
+      expect(players.value.find((player) => player.id === p1.id)?.score).toBe(2)
+
+      const round2Teams = liveRoom.value?.teams ?? []
+      const round2Questions = liveRoom.value?.questionIds ?? []
+      const round2Stats = computeTeamCompetitionStats(players.value, round2Teams, round2Questions, events.value, 2)
+      // Same event log (round-1's applied event still present), but scoped to round 2: no
+      // multiplier leaks in, so competitionTotal must equal the plain raw total (2), not 2.5.
+      expect(round2Stats.find((team) => team.id === 'team-1')?.competitionTotal).toBe(2)
+      expect(round2Stats.find((team) => team.id === 'team-1')?.rawTotal).toBe(2)
+
+      stopEvents()
+      stopPlayers()
+      stopRoom()
+    })
+
+    it('answer progress from an earlier round does not count toward a later round, even when the same question recurs', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.questionIds).toHaveLength(10))
+      const round1QuestionId = liveRoom.value?.questionIds[0] as string
+      await answerAt(service, room, p1, 0, true) // writes a round-1 progress entry for round1QuestionId
+
+      const progress: { value: AnswerProgressEntry[] } = { value: [] }
+      const stopProgress = service.subscribeTeamAnswerProgress(room.roomCode, 'team-1', (value) => { progress.value = value })
+      await vi.waitFor(() => expect(progress.value.some((entry) => entry.questionId === round1QuestionId)).toBe(true))
+      expect(progress.value.find((entry) => entry.questionId === round1QuestionId)?.currentRound).toBe(1)
+
+      await service.stopRound(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
+
+      // Force round 2's first question to be the SAME question round 1 already answered —
+      // selectRoundQuestions's own anti-repeat guard only blocks reproducing the *entire*
+      // previous 10-question set, not a single overlapping question, so this can happen
+      // naturally; forcing it here makes the regression deterministic instead of flaky.
+      const rawState = JSON.parse(localStorage.getItem('matana_demo_state_v5') as string)
+      rawState.rooms[room.roomCode].room.questionIds[0] = round1QuestionId
+      localStorage.setItem('matana_demo_state_v5', JSON.stringify(rawState))
+      window.dispatchEvent(new Event('matana-demo-update'))
+      await vi.waitFor(() => expect(liveRoom.value?.questionIds[0]).toBe(round1QuestionId))
+
+      // The round-1 entry for this exact questionId is still in the collection (progress is
+      // never wiped on a round transition) — but a round-2-scoped read (exactly what GamePage
+      // computes) must show 0/Y, not 1/Y, for the recurring question.
+      await vi.waitFor(() => expect(progress.value.some((entry) => entry.questionId === round1QuestionId)).toBe(true))
+      const round2FilteredCount = progress.value.filter(
+        (entry) => entry.questionId === round1QuestionId && entry.currentRound === liveRoom.value?.currentRound,
+      ).length
+      expect(round2FilteredCount).toBe(0)
+
+      // Once p1 actually answers it again in round 2, the round-2-scoped count becomes 1 (not
+      // 2 — the stale round-1 entry is never conflated with the new one).
+      await answerAt(service, room, p1, 0, true)
+      await vi.waitFor(() => {
+        const count = progress.value.filter(
+          (entry) => entry.questionId === round1QuestionId && entry.currentRound === liveRoom.value?.currentRound,
+        ).length
+        expect(count).toBe(1)
+      })
+      expect(progress.value.find((entry) => entry.questionId === round1QuestionId && entry.currentRound === 2)?.currentRound).toBe(2)
+
+      stopProgress()
+      stopRoom()
+    })
+
+    it('a new saveAnswer\'s progress entry carries the room\'s current round', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      const progress: { value: AnswerProgressEntry[] } = { value: [] }
+      const stop = service.subscribeTeamAnswerProgress(room.roomCode, 'team-1', (value) => { progress.value = value })
+      await answerAt(service, room, p1, 0, true)
+      await vi.waitFor(() => expect(progress.value).toHaveLength(1))
+      expect(progress.value[0].currentRound).toBe(1)
+      stop()
+    })
+
+    it('a failed advance leaves the room and magic state untouched, and a retry does not double-consume the queued item', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holder1 = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await answerAt(service, room, p1, 0, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await answerAt(service, room, p1, 1, true)
+
+      // Simulate the underlying write failing partway through the advance that would resolve
+      // the queued power_surge and move the room to question index 2.
+      vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('simulated storage failure') })
+      await expect(service.advanceQuestion(room.roomCode, 'teacher-1', 1)).rejects.toThrow('simulated storage failure')
+
+      const roomAfterFailure: { value: Room | null } = { value: null }
+      const magicAfterFailure: { value: TeamMagicState | null } = { value: null }
+      const eventsAfterFailure: { value: MagicEvent[] } = { value: [] }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { roomAfterFailure.value = value })
+      const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magicAfterFailure.value = value })
+      const stopEvents = service.subscribeMagicEvents(room.roomCode, (value) => { eventsAfterFailure.value = value })
+      await vi.waitFor(() => expect(roomAfterFailure.value).not.toBeNull())
+      // The room must remain exactly where it was — not advanced, not partially advanced.
+      expect(roomAfterFailure.value?.currentQuestionIndex).toBe(1)
+      // The item must still be queued and unconsumed — resolution never partially landed.
+      expect(magicAfterFailure.value?.queuedEffect).not.toBeNull()
+      expect(magicAfterFailure.value?.inventory[0].consumed).toBe(false)
+      expect(eventsAfterFailure.value.find((event) => event.itemType === 'power_surge')?.status).toBe('queued')
+
+      // Retry (no failure injected this time): must succeed exactly once, consuming the item
+      // exactly once and advancing the room exactly once — not twice.
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
+      await vi.waitFor(() => expect(roomAfterFailure.value?.currentQuestionIndex).toBe(2))
+      expect(magicAfterFailure.value?.queuedEffect).toBeNull()
+      expect(magicAfterFailure.value?.inventory[0].consumed).toBe(true)
+      const appliedEvents = eventsAfterFailure.value.filter((event) => event.itemType === 'power_surge' && event.status === 'applied')
+      expect(appliedEvents).toHaveLength(1) // exactly one applied event — no duplicate from the retry
+
+      stopRoom()
+      stopMagic()
+      stopEvents()
     })
   })
 
@@ -877,7 +1062,7 @@ describe('Demo timed classroom flow', () => {
       stop()
     })
 
-    it('answerProgress entries never carry the selected choice or correctness — only playerId/teamId/questionId/answeredAt', async () => {
+    it('answerProgress entries never carry the selected choice or correctness — only playerId/teamId/questionId/currentRound/answeredAt', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
@@ -890,7 +1075,7 @@ describe('Demo timed classroom flow', () => {
       const progress: { value: AnswerProgressEntry[] } = { value: [] }
       const stop = service.subscribeTeamAnswerProgress(room.roomCode, 'team-1', (value) => { progress.value = value })
       await vi.waitFor(() => expect(progress.value).toHaveLength(1))
-      expect(Object.keys(progress.value[0]).sort()).toEqual(['answeredAt', 'playerId', 'questionId', 'teamId'])
+      expect(Object.keys(progress.value[0]).sort()).toEqual(['answeredAt', 'currentRound', 'playerId', 'questionId', 'teamId'])
       stop()
     })
   })

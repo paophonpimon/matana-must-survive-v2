@@ -120,6 +120,12 @@ const normalizeState = (state: DemoState): DemoState => {
     // to empty rather than crashing.
     roomState.rosters ??= {}
     roomState.answerProgress ??= {}
+    // Milestone 2.1: events/progress saved before round-tracking existed won't have these
+    // fields — default them to round 1 (the only round that could have existed back then)
+    // rather than letting a later round's competition-score/progress filtering crash or
+    // silently treat them as `undefined`.
+    roomState.magicEvents.forEach((event) => { event.round ??= 1 })
+    Object.values(roomState.answerProgress).forEach((entry) => { entry.currentRound ??= 1 })
   })
   return state
 }
@@ -683,6 +689,7 @@ export class DemoGameService implements GameService {
         playerId,
         teamId: player.teamId,
         questionId: answer.questionId,
+        currentRound: roomState.room.currentRound,
         answeredAt: record.answeredAt,
       }
     }
@@ -743,6 +750,7 @@ export class DemoGameService implements GameService {
         targetTeamId: resolvedTargetTeamId ?? null,
         affectedQuestionIndex,
         status: 'rejected',
+        round: roomState.room.currentRound,
         createdAt: now,
         resolvedAt: now,
       })
@@ -799,6 +807,7 @@ export class DemoGameService implements GameService {
       targetTeamId: resolvedTargetTeamId ?? null,
       affectedQuestionIndex,
       status: 'queued',
+      round: roomState.room.currentRound,
       createdAt: now,
       resolvedAt: null,
     })

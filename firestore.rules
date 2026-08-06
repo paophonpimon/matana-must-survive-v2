@@ -214,8 +214,12 @@ service cloud.firestore {
         // mark their own or anyone else's event resolved.
         allow create: if isTeacher(roomCode) || (
           signedIn()
-          && request.resource.data.keys().hasOnly(['itemType', 'actorPlayerId', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'status', 'createdAt', 'resolvedAt'])
+          && request.resource.data.keys().hasOnly(['itemType', 'actorPlayerId', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'status', 'round', 'createdAt', 'resolvedAt'])
           && request.resource.data.itemType in ['power_surge', 'score_seal', 'rose_shield']
+          // Milestone 2.1: the event's round must be the room's CURRENT round — otherwise a
+          // stale/forged write could carry a multiplier into a round it wasn't created in.
+          // Competition scoring filters on this too (lib/magic.ts), so this is defense in depth.
+          && request.resource.data.round == room(roomCode).currentRound
           && request.resource.data.createdAt == request.time
           && isPlayerOwner(roomCode, get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.sourceTeamId)).data.magicHolderPlayerId)
           && request.resource.data.actorPlayerId == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.sourceTeamId)).data.magicHolderPlayerId
@@ -257,15 +261,19 @@ service cloud.firestore {
         allow read: if signedIn();
         // Only the exact documented fields, only for the room's current question (never a past
         // or future one — the write must name precisely room.questionIds[currentQuestionIndex],
-        // so nothing else validates), only while a round is actually playing, and only the
-        // player's own current team (blocking a stale/forged teamId).
+        // so nothing else validates), only for the room's current round (Milestone 2.1 — this
+        // collection is never wiped on a round transition, so without this a stale entry from
+        // an earlier round could misreport a teammate as "already answered" if a later round
+        // happens to reuse the same questionId), only while a round is actually playing, and
+        // only the player's own current team (blocking a stale/forged teamId).
         allow write: if isTeacher(roomCode) || (
           signedIn()
           && isPlayerOwner(roomCode, playerId)
-          && request.resource.data.keys().hasOnly(['teamId', 'questionId', 'answeredAt'])
+          && request.resource.data.keys().hasOnly(['teamId', 'questionId', 'currentRound', 'answeredAt'])
           && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
           && room(roomCode).status == 'playing'
           && request.resource.data.questionId == room(roomCode).questionIds[room(roomCode).currentQuestionIndex]
+          && request.resource.data.currentRound == room(roomCode).currentRound
         );
         allow delete: if false;
       }

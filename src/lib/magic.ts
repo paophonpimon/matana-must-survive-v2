@@ -76,16 +76,22 @@ export interface TeamCompetitionStat {
 // always recomputed from players (raw truth, untouched by magic) + the magic event log (the
 // only source of truth for multipliers). Calling this twice with the same inputs always
 // produces the same output.
+//
+// currentRound is required (not defaulted) so every caller consciously scopes to the live
+// round: magicEvents is never wiped on a round transition (kept for history/audit), so an
+// 'applied' event from a finished round must never contribute to a later round's competition
+// score just because it shares a target/question-index key.
 export const computeTeamCompetitionStats = (
   players: Player[],
   teams: TeamMeta[],
   questionIds: string[],
   events: MagicEvent[],
+  currentRound: number,
 ): TeamCompetitionStat[] => {
   const ownMultiplierByKey = new Map<string, number>()
   const hostileMultiplierByKey = new Map<string, number>()
   for (const event of events) {
-    if (event.status !== 'applied' || event.targetTeamId == null || event.affectedQuestionIndex == null) continue
+    if (event.status !== 'applied' || event.round !== currentRound || event.targetTeamId == null || event.affectedQuestionIndex == null) continue
     const key = `${event.targetTeamId}:${event.affectedQuestionIndex}`
     if (event.itemType === 'power_surge') ownMultiplierByKey.set(key, 1.5)
     else if (event.itemType === 'score_seal') hostileMultiplierByKey.set(key, 0.5)

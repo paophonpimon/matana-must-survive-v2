@@ -147,6 +147,10 @@ export interface MagicEvent {
   targetTeamId: string | null
   affectedQuestionIndex: number | null
   status: MagicEventStatus
+  // The room.currentRound at the moment this event was created. Competition scoring filters on
+  // this so an 'applied' event from a finished round (players.answers is wiped each round, but
+  // the magicEvents log is kept for history) can never leak a multiplier into a later round.
+  round: number
   createdAt: number
   resolvedAt: number | null
 }
@@ -171,5 +175,11 @@ export interface AnswerProgressEntry {
   playerId: string
   teamId: string
   questionId: string
+  // The room.currentRound this entry was written under. Consumers must filter on this in
+  // addition to questionId — a question can recur in a later round (selectRoundQuestions
+  // doesn't guarantee exclusion once the pool is exhausted), and this collection is not wiped
+  // on round transitions the way player.answers is, so a stale entry from an earlier round can
+  // otherwise be misread as "already answered" for the new round's identical questionId.
+  currentRound: number
   answeredAt: number
 }

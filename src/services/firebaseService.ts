@@ -181,6 +181,9 @@ const mapMagicEvent = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: str
     targetTeamId: data.targetTeamId == null ? null : String(data.targetTeamId),
     affectedQuestionIndex: data.affectedQuestionIndex == null ? null : Number(data.affectedQuestionIndex),
     status: data.status as MagicEventStatus,
+    // Events written before round-tracking existed have no `round` field — default to 1 (the
+    // only round that could have produced them), matching demoService's normalizeState.
+    round: data.round == null ? 1 : Number(data.round),
     createdAt: toMillis(data.createdAt) ?? Date.now(),
     resolvedAt: toMillis(data.resolvedAt),
   }
@@ -206,21 +209,30 @@ const mapAnswerProgressEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | 
     playerId: snapshot.id,
     teamId: String(data.teamId ?? ''),
     questionId: String(data.questionId ?? ''),
+    // Entries written before round-tracking existed have no `currentRound` field — default to
+    // 1, matching demoService's normalizeState.
+    currentRound: data.currentRound == null ? 1 : Number(data.currentRound),
     answeredAt: toMillis(data.answeredAt) ?? Date.now(),
   }
 }
 
-// Runs when leaving `resolvedQuestionIndex` (advancing to the next question, or completing the
-// round). Consolidates every mutation to a given team's magic doc into a single batch.update()
-// — a team can be touched both as an effect's source (consuming its own item) and as another
-// team's hostile target (its shield consumed) in the same pass, and issuing two separate
-// batch.update() calls for the same doc would have the second silently clobber the first.
-const resolveQuestionMagicEffects = async (roomCode: string, resolvedQuestionIndex: number): Promise<void> => {
-  const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
-  const magicByTeamId = new Map<string, TeamMagicState>(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
+// Pure computation for resolving whatever was queued against `resolvedQuestionIndex` (leaving
+// that question, either advancing or completing the round). Deliberately has no Firestore I/O
+// of its own — advanceQuestion runs it INSIDE the same transaction that advances the room (via
+// per-team transaction.get()/update() calls), so magic resolution and the room's advance either
+// both commit or neither does. That closes the previous failure window where the room could
+// move on while a queued effect for the question just left silently never got resolved (or the
+// reverse: resolution landing but the room failing to advance). A team can be touched both as an
+// effect's source (consuming its own item) and as another team's hostile target (its shield
+// consumed) in the same pass, so mutations are accumulated here first and the caller applies
+// exactly one update per touched doc — never two, which would let the second clobber the first.
+const computeMagicResolution = (
+  magicByTeamId: Map<string, TeamMagicState>,
+  resolvedQuestionIndex: number,
+  now: number,
+): { touchedTeamIds: Set<string>; eventOutcomes: Map<string, 'applied' | 'blocked'> } => {
   const touchedTeamIds = new Set<string>()
   const eventOutcomes = new Map<string, 'applied' | 'blocked'>()
-  const now = Date.now()
 
   const consumeOne = (teamId: string, itemType: MagicItemType): void => {
     const item = magicByTeamId.get(teamId)?.inventory.find((entry) => entry.itemType === itemType && !entry.consumed)
@@ -253,17 +265,7 @@ const resolveQuestionMagicEffects = async (roomCode: string, resolvedQuestionInd
     }
   }
 
-  if (touchedTeamIds.size === 0 && eventOutcomes.size === 0) return
-  const batch = writeBatch(db)
-  touchedTeamIds.forEach((teamId) => {
-    const magic = magicByTeamId.get(teamId)
-    if (!magic) return
-    batch.update(doc(db, 'rooms', roomCode, 'magic', teamId), { inventory: magic.inventory, queuedEffect: magic.queuedEffect })
-  })
-  eventOutcomes.forEach((status, eventId) => {
-    batch.update(doc(db, 'rooms', roomCode, 'magicEvents', eventId), { status, resolvedAt: serverTimestamp() })
-  })
-  await batch.commit()
+  return { touchedTeamIds, eventOutcomes }
 }
 
 // closeRoom: the game is over, so only expire whatever was still queued (audit correctness) —
@@ -558,6 +560,33 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'playing' || room.currentQuestionIndex !== expectedQuestionIndex) return false
+
+      // Resolve magic effects queued for the question being left IN THIS SAME TRANSACTION as
+      // the room's advance below — so the two either both commit or neither does. All reads
+      // (room + one get per team's magic doc, bounded by room.teams.length) happen before any
+      // writes, as Firestore transactions require. If this transaction fails or retries, it
+      // re-reads fresh state every time, so a retry can never re-consume an already-consumed
+      // item or re-apply an already-applied event: resolution only ever acts on a team whose
+      // *live* queuedEffect still targets this question, which becomes false the moment the
+      // first successful attempt clears it.
+      if (room.teams.length > 0) {
+        const magicSnapshots = await Promise.all(
+          room.teams.map((team) => transaction.get(doc(db, 'rooms', roomCode, 'magic', team.id))),
+        )
+        const magicByTeamId = new Map<string, TeamMagicState>(
+          magicSnapshots.filter((magicSnapshot) => magicSnapshot.exists()).map((magicSnapshot) => [magicSnapshot.id, mapTeamMagic(magicSnapshot)]),
+        )
+        const { touchedTeamIds, eventOutcomes } = computeMagicResolution(magicByTeamId, expectedQuestionIndex, Date.now())
+        touchedTeamIds.forEach((teamId) => {
+          const magic = magicByTeamId.get(teamId)
+          if (!magic) return
+          transaction.update(doc(db, 'rooms', roomCode, 'magic', teamId), { inventory: magic.inventory, queuedEffect: magic.queuedEffect })
+        })
+        eventOutcomes.forEach((status, eventId) => {
+          transaction.update(doc(db, 'rooms', roomCode, 'magicEvents', eventId), { status, resolvedAt: serverTimestamp() })
+        })
+      }
+
       const nextQuestionIndex = expectedQuestionIndex + 1
       if (nextQuestionIndex >= room.questionIds.length) {
         transaction.update(roomRef, {
@@ -571,9 +600,6 @@ export class FirebaseGameService implements GameService {
       transaction.update(roomRef, { currentQuestionIndex: nextQuestionIndex, questionStartedAt: serverTimestamp() })
       return false
     })
-    // Resolve any magic effects queued for the question just left, regardless of whether the
-    // round just completed.
-    await resolveQuestionMagicEffects(roomCode, expectedQuestionIndex)
     if (!finished) return
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
@@ -833,6 +859,7 @@ export class FirebaseGameService implements GameService {
         transaction.set(doc(db, 'rooms', roomCode, 'answerProgress', playerId), {
           teamId: player.teamId,
           questionId: answer.questionId,
+          currentRound: room.currentRound,
           answeredAt: serverTimestamp(),
         })
       }
@@ -910,6 +937,7 @@ export class FirebaseGameService implements GameService {
           targetTeamId: rejectedTargetTeamId,
           affectedQuestionIndex,
           status: 'rejected',
+          round: room.currentRound,
           createdAt: serverTimestamp(),
           resolvedAt: serverTimestamp(),
         })
@@ -972,6 +1000,7 @@ export class FirebaseGameService implements GameService {
         targetTeamId: finalTargetTeamId,
         affectedQuestionIndex,
         status: 'queued',
+        round: room.currentRound,
         createdAt: serverTimestamp(),
         resolvedAt: null,
       })

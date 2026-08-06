@@ -35,6 +35,7 @@ const makeEvent = (overrides: Partial<MagicEvent> & { id: string }): MagicEvent 
   targetTeamId: 'team-1',
   affectedQuestionIndex: 1,
   status: 'applied',
+  round: 1,
   createdAt: 0,
   resolvedAt: 0,
   ...overrides,
@@ -103,7 +104,7 @@ describe('computeTeamCompetitionStats', () => {
       makePlayer({ id: 'a', teamId: 'team-1', answers: [answer('q0', true), answer('q1', true)] }),
       makePlayer({ id: 'b', teamId: 'team-2', answers: [answer('q0', true), answer('q1', false)] }),
     ]
-    const stats = computeTeamCompetitionStats(players, teams, questionIds, [])
+    const stats = computeTeamCompetitionStats(players, teams, questionIds, [], 1)
     expect(stats.find((s) => s.id === 'team-1')).toMatchObject({ rawTotal: 2, competitionTotal: 2 })
     expect(stats.find((s) => s.id === 'team-2')).toMatchObject({ rawTotal: 1, competitionTotal: 1 })
   })
@@ -111,7 +112,7 @@ describe('computeTeamCompetitionStats', () => {
   it('applies a 150% own-team multiplier only to the applied question', () => {
     const players = [makePlayer({ id: 'a', teamId: 'team-1', answers: [answer('q1', true), answer('q2', true)] })]
     const events = [makeEvent({ id: 'e1', itemType: 'power_surge', sourceTeamId: 'team-1', targetTeamId: 'team-1', affectedQuestionIndex: 1, status: 'applied' })]
-    const stats = computeTeamCompetitionStats(players, teams, questionIds, events)
+    const stats = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     // q1 (index 1) correct -> 1 * 1.5 = 1.5; q2 (index 2) correct, no multiplier -> 1
     expect(stats.find((s) => s.id === 'team-1')?.competitionTotal).toBeCloseTo(2.5)
     expect(stats.find((s) => s.id === 'team-1')?.rawTotal).toBe(2)
@@ -123,7 +124,7 @@ describe('computeTeamCompetitionStats', () => {
       makePlayer({ id: 'b', teamId: 'team-2', answers: [answer('q1', true)] }),
     ]
     const events = [makeEvent({ id: 'e1', itemType: 'score_seal', sourceTeamId: 'team-1', targetTeamId: 'team-2', affectedQuestionIndex: 1, status: 'applied' })]
-    const stats = computeTeamCompetitionStats(players, teams, questionIds, events)
+    const stats = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     expect(stats.find((s) => s.id === 'team-1')?.competitionTotal).toBe(1)
     expect(stats.find((s) => s.id === 'team-2')?.competitionTotal).toBeCloseTo(0.5)
   })
@@ -131,7 +132,7 @@ describe('computeTeamCompetitionStats', () => {
   it('a blocked hostile effect contributes no reduction at all (full raw points kept)', () => {
     const players = [makePlayer({ id: 'a', teamId: 'team-2', answers: [answer('q1', true)] })]
     const events = [makeEvent({ id: 'e1', itemType: 'score_seal', sourceTeamId: 'team-1', targetTeamId: 'team-2', affectedQuestionIndex: 1, status: 'blocked' })]
-    const stats = computeTeamCompetitionStats(players, teams, questionIds, events)
+    const stats = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     expect(stats.find((s) => s.id === 'team-2')?.competitionTotal).toBe(1)
   })
 
@@ -141,7 +142,7 @@ describe('computeTeamCompetitionStats', () => {
       makeEvent({ id: 'e1', itemType: 'power_surge', sourceTeamId: 'team-1', targetTeamId: 'team-1', affectedQuestionIndex: 1, status: 'applied' }),
       makeEvent({ id: 'e2', itemType: 'score_seal', sourceTeamId: 'team-2', targetTeamId: 'team-1', affectedQuestionIndex: 1, status: 'applied' }),
     ]
-    const stats = computeTeamCompetitionStats(players, teams, questionIds, events)
+    const stats = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     // 1 * 1.5 * 0.5 = 0.75
     expect(stats.find((s) => s.id === 'team-1')?.competitionTotal).toBeCloseTo(0.75)
   })
@@ -152,8 +153,8 @@ describe('computeTeamCompetitionStats', () => {
       makePlayer({ id: 'b', teamId: 'team-2', answers: [answer('q1', false), answer('q2', true)] }),
     ]
     const events = [makeEvent({ id: 'e1', itemType: 'score_seal', sourceTeamId: 'team-1', targetTeamId: 'team-2', affectedQuestionIndex: 2, status: 'applied' })]
-    const first = computeTeamCompetitionStats(players, teams, questionIds, events)
-    const second = computeTeamCompetitionStats(players, teams, questionIds, events)
+    const first = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
+    const second = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     expect(first).toEqual(second)
   })
 
@@ -161,8 +162,18 @@ describe('computeTeamCompetitionStats', () => {
     const players = [makePlayer({ id: 'a', teamId: 'team-1', score: 999, answers: [answer('q1', true)] })]
     const events = [makeEvent({ id: 'e1', itemType: 'power_surge', sourceTeamId: 'team-1', targetTeamId: 'team-1', affectedQuestionIndex: 1, status: 'applied' })]
     const before = JSON.stringify(players)
-    computeTeamCompetitionStats(players, teams, questionIds, events)
+    computeTeamCompetitionStats(players, teams, questionIds, events, 1)
     expect(JSON.stringify(players)).toBe(before)
     expect(players[0].score).toBe(999)
+  })
+
+  it('an applied event from round 1 does not affect round 2\'s competition score, even with the same target/question-index key', () => {
+    const players = [makePlayer({ id: 'a', teamId: 'team-1', currentRound: 2, answers: [answer('q1', true)] })]
+    // Same targetTeamId:affectedQuestionIndex key as round 2 would use, but created in round 1.
+    const events = [makeEvent({ id: 'e1', itemType: 'power_surge', sourceTeamId: 'team-1', targetTeamId: 'team-1', affectedQuestionIndex: 1, status: 'applied', round: 1 })]
+    const round1Stats = computeTeamCompetitionStats(players, teams, questionIds, events, 1)
+    const round2Stats = computeTeamCompetitionStats(players, teams, questionIds, events, 2)
+    expect(round1Stats.find((s) => s.id === 'team-1')?.competitionTotal).toBeCloseTo(1.5) // round 1: multiplier applies
+    expect(round2Stats.find((s) => s.id === 'team-1')?.competitionTotal).toBe(1) // round 2: raw only, no leakage
   })
 })

@@ -50,12 +50,18 @@ export const GamePage = () => {
   const progress = Math.min(100, (questionIndex / 10) * 100)
 
   // Y is the full locked roster (disconnected members included, since it's membership-based
-  // not connection-based); X counts progress entries for the room's *current* questionId only
-  // — a teammate's entry for a previous question simply doesn't match, so this reads 0 for a
-  // fresh question with no explicit reset, and holds steady through the reveal window since
-  // nothing touches these entries between question-end and the next question actually starting.
+  // not connection-based); X counts progress entries for the room's *current* questionId AND
+  // currentRound only — a teammate's entry for a previous question simply doesn't match, so
+  // this reads 0 for a fresh question with no explicit reset, and holds steady through the
+  // reveal window since nothing touches these entries between question-end and the next
+  // question actually starting. The round check (Milestone 2.1) matters because this
+  // collection is never wiped on a round transition — without it, a stale entry from an
+  // earlier round would misreport as "already answered" if a later round's question happens
+  // to reuse the same questionId.
   const teamRosterSize = rosterState.data?.members.length ?? 0
-  const teamAnsweredCount = questionId ? progressState.data.filter((entry) => entry.questionId === questionId).length : 0
+  const teamAnsweredCount = room && questionId
+    ? progressState.data.filter((entry) => entry.questionId === questionId && entry.currentRound === room.currentRound).length
+    : 0
   const activationWindow = room ? getMagicActivationWindow(room, now) : { valid: false, affectedQuestionIndex: null }
   const canActivateMagicNow = Boolean(room && room.status === 'playing' && timeExpired && revealRemainingMs > 0)
 

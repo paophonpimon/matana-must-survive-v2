@@ -132,8 +132,14 @@ export const TeacherPage = () => {
     [visiblePlayers, roomState.data?.teams],
   )
   const competitionStats = useMemo(
-    () => computeTeamCompetitionStats(visiblePlayers, roomState.data?.teams ?? [], roomState.data?.questionIds ?? [], magicEventsState.data),
-    [visiblePlayers, roomState.data?.teams, roomState.data?.questionIds, magicEventsState.data],
+    () => computeTeamCompetitionStats(
+      visiblePlayers,
+      roomState.data?.teams ?? [],
+      roomState.data?.questionIds ?? [],
+      magicEventsState.data,
+      roomState.data?.currentRound ?? 1,
+    ),
+    [visiblePlayers, roomState.data?.teams, roomState.data?.questionIds, roomState.data?.currentRound, magicEventsState.data],
   )
   const teamStatsById = useMemo(() => new Map(teamStats.map((team) => [team.id, team])), [teamStats])
   const currentQuestionStats = useMemo(
