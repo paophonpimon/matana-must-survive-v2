@@ -1,8 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
-import { useRoom, usePlayer } from '../hooks/useGameData'
-import { MAGIC_ITEM_INFO } from '../lib/magic'
+import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamMagic } from '../hooks/useGameData'
 import { getPlayerSession } from '../services/sessionStorage'
 import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS } from '../types/game'
 import type { Player, Room } from '../types/game'
@@ -32,6 +31,7 @@ const previewRoom: Room = {
   bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
   bossCompleted: false,
   bossWinner: null,
+  bossAwaitingContinue: false,
 }
 
 const previewPlayer: Player = {
@@ -66,6 +66,11 @@ export const ResultPage = () => {
   const room = isPreview ? previewRoom : roomState.data
   const player = isPreview ? previewPlayer : playerState.data
   const assignedTeam = room?.teams.find((team) => team.id === player?.teamId)
+  const magicState = useTeamMagic(isPreview ? '' : normalizedCode, isPreview ? '' : (player?.teamId ?? ''))
+  const isCaptain = Boolean(player && magicState.data?.magicHolderPlayerId === player.id)
+  const guardianNamesState = useAllTeamGuardianNames(isPreview ? '' : normalizedCode)
+  const guardianNameById = useMemo(() => new Map(guardianNamesState.data.map((entry) => [entry.teamId, entry.name])), [guardianNamesState.data])
+  const assignedTeamDisplayName = assignedTeam ? guardianNameById.get(assignedTeam.id) ?? assignedTeam.name : ''
 
   useEffect(() => {
     if (!room || !player) return
@@ -94,7 +99,10 @@ export const ResultPage = () => {
           <section className={resultPanelClass}>
             <div className={successful ? 'result-hero result-hero-success' : 'result-hero'}>
               <div className="result-hero-copy">
-                <p className="eyebrow">คะแนนของคุณ · {assignedTeam?.name ?? ''} · รอบที่ {room.currentRound}</p>
+                <p className="eyebrow">
+                  คะแนนของคุณ · {assignedTeamDisplayName} · รอบที่ {room.currentRound}
+                  {isCaptain ? <span className="ml-2 text-[#f2d58d]" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
+                </p>
                 <h1 className="result-title mt-2">{title}</h1>
                 {failed ? (
                   <p className="result-description mt-4"><span>คุณตอบคำถามผิดมากเกินไป</span><span>การตัดสินใจของคุณทำให้มัทนาถูกสาป</span><span>เป็นดอกกุหลาบไปตลอดกาล</span><span>หนทางกลับคืนสู่ร่างมนุษย์ของนางได้ปิดลงแล้ว...</span></p>
@@ -117,17 +125,12 @@ export const ResultPage = () => {
                 </div>
               )}
             </div>
+            {/* Item 6 (follow-up): the boss/item-challenge winner announcement is an in-game
+                event, not part of the final-result presentation — removed from here. Boss data
+                (room.bossWinner/bossCompleted) stays persisted for logs/history; this screen
+                simply no longer renders it. Final result stays focused on the 10 main
+                questions' knowledge score only. */}
             <div className="score-reveal mt-6"><small>คะแนนความรู้</small><strong>{score * 10}<span>/100</span></strong><small>{score} จาก 10 ข้อ</small></div>
-            {room.bossCompleted && room.bossWinner ? (
-              <div className="winner-card mt-4">
-                <small>🏆 ผู้พิชิตด่านชิงมนตรา</small>
-                <strong>
-                  {room.bossWinner.displayName} จากทีม{room.bossWinner.teamName ?? '-'}
-                  {' — '}ตอบถูก {room.bossWinner.correctCount}/3 ใช้เวลา {(room.bossWinner.totalTimeMs / 1_000).toFixed(2)} วินาที
-                  {' — '}ทีมได้รับ {MAGIC_ITEM_INFO[room.bossWinner.rewardItemType].label}เพิ่ม 1 ครั้ง
-                </strong>
-              </div>
-            ) : null}
             <div className="waiting-banner mt-6"><span className="pulse-dot" aria-hidden="true" /><span><strong>โปรดรอครูเปิดภารกิจรอบใหม่</strong><small>หน้านี้จะแสดงเฉพาะคะแนนของคุณ และเปลี่ยนอัตโนมัติเมื่อครูเตรียมรอบใหม่</small></span></div>
             <button className="secondary-button mt-4 w-full" type="button" disabled>รอครูเปิดภารกิจรอบใหม่</button>
           </section>

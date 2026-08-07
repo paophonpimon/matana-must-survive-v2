@@ -8,7 +8,12 @@ export const ROUND_CATEGORY_COUNTS: Record<QuestionCategory, number> = {
   theme: 1,
 }
 
-const ROOM_CHARACTERS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+// Legacy 6-character room codes (letters/digits, excluding easily-confused O/I/L/0/1) — no
+// longer generated for new rooms (see generateRoomCode below), but existing rooms created under
+// the old format must remain joinable, so validateJoinInput still accepts this shape too.
+const LEGACY_ROOM_CODE_PATTERN = /^[A-HJ-KM-NP-Z2-9]{6}$/
+// New room codes: exactly 4 numeric digits, "0000"-"9999".
+const ROOM_CODE_PATTERN = /^\d{4}$/
 
 export const shuffle = <T>(items: T[], random: () => number): T[] => {
   const result = [...items]
@@ -56,8 +61,13 @@ export const selectRoundQuestions = (
   return shuffle(selected, random).map((question) => question.id)
 }
 
+// New rooms get a 4-digit numeric code, 0000-9999 — always zero-padded to exactly 4 digits (a
+// bare `String(n)` would produce "42" for the number 42, not "0042"). Uniqueness against
+// existing rooms is the caller's responsibility (see firebaseService.ts/demoService.ts's
+// createRoom, which check-then-retry on collision) — this function only ever returns a
+// uniformly random 4-digit string, never checks for a clash itself.
 export const generateRoomCode = (random: () => number = Math.random): string =>
-  Array.from({ length: 6 }, () => ROOM_CHARACTERS[Math.floor(random() * ROOM_CHARACTERS.length)]).join('')
+  String(Math.floor(random() * 10_000)).padStart(4, '0')
 
 export const calculateScore = (answers: Array<{ isCorrect: boolean }>): number =>
   answers.reduce((score, answer) => score + (answer.isCorrect ? 1 : 0), 0)
@@ -76,8 +86,13 @@ export const validateJoinInput = (input: JoinInput): Partial<Record<keyof JoinIn
   const displayName = input.displayName.trim()
   const studentNumber = input.studentNumber.trim()
 
+  // New rooms only ever get a 4-digit numeric code (see generateRoomCode above), but rooms
+  // created before this change used the legacy 6-character format and must remain joinable —
+  // so both shapes are accepted here.
   if (!roomCode) errors.roomCode = 'กรุณากรอกรหัสห้อง'
-  else if (!/^[A-HJ-KM-NP-Z2-9]{6}$/.test(roomCode)) errors.roomCode = 'รหัสห้องต้องมี 6 ตัวอักษรและไม่มี O, I, L, 0, 1'
+  else if (!ROOM_CODE_PATTERN.test(roomCode) && !LEGACY_ROOM_CODE_PATTERN.test(roomCode)) {
+    errors.roomCode = 'รหัสห้องต้องเป็นตัวเลข 4 หลัก (หรือรหัสรุ่นเก่า 6 ตัวอักษรแบบไม่มี O, I, L, 0, 1)'
+  }
   if (!displayName) errors.displayName = 'กรุณากรอกชื่อผู้เล่น'
   else if (displayName.length > 40) errors.displayName = 'ชื่อผู้เล่นต้องไม่เกิน 40 ตัวอักษร'
   if (!studentNumber) errors.studentNumber = 'กรุณากรอกเลขที่นักเรียน'

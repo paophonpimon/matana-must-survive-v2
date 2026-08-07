@@ -2,8 +2,8 @@ import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
-import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickHolders } from '../lib/magic'
-import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
+import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, BossAnswerInput, GameService } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
@@ -13,6 +13,8 @@ import {
 import type {
   AnswerProgressEntry,
   BossAnswerRecord,
+  CaptainVote,
+  CaptainVoteProgress,
   JoinInput,
   JoinResult,
   MagicEvent,
@@ -20,6 +22,7 @@ import type {
   Player,
   QueuedMagicEffect,
   Room,
+  TeamGuardianName,
   TeamMagicState,
   TeamRosterSummary,
   Unsubscribe,
@@ -32,6 +35,12 @@ interface DemoRoomState {
   magicEvents: MagicEvent[]
   rosters: Record<string, TeamRosterSummary>
   answerProgress: Record<string, AnswerProgressEntry>
+  // Milestone 4.1: one entry per VOTER (not per team) — see CaptainVote/CaptainVoteProgress's
+  // doc comments in types/game.ts for the private-vs-broad split rationale.
+  captainVotes: Record<string, CaptainVote>
+  captainVoteProgress: Record<string, CaptainVoteProgress>
+  // Team guardian names — keyed by teamId, mirroring magic/captainVotes' shape.
+  teamNames: Record<string, TeamGuardianName>
 }
 
 interface DemoState {
@@ -51,7 +60,6 @@ const STORAGE_KEY = DEMO_STORAGE_KEY
 const UPDATE_EVENT = 'matana-demo-update'
 const DEMO_ROOM_CODE = 'MATANA'
 const SHARED_STATE_PATH = '/__matana_demo_state'
-let sharedStateAvailable = false
 
 const createId = (): string =>
   typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -93,7 +101,7 @@ const createPlayer = (
 // starts with. Factored out so the two call sites can never drift on what "fresh" means.
 const createFreshBossFields = (): Pick<
   Room,
-  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner'
+  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner' | 'bossAwaitingContinue'
 > => ({
   phase: 'main',
   bossQuestionIds: [],
@@ -102,6 +110,7 @@ const createFreshBossFields = (): Pick<
   bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
   bossCompleted: false,
   bossWinner: null,
+  bossAwaitingContinue: false,
 })
 
 const createSeedState = (): DemoState => {
@@ -138,7 +147,7 @@ const createSeedState = (): DemoState => {
     const id = stablePlayerId(studentNumber)
     players[id] = createPlayer(id, displayName, studentNumber, `demo-student-${index + 1}`)
   })
-  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {} } } }
+  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {} } } }
 }
 
 const normalizeState = (state: DemoState): DemoState => {
@@ -162,12 +171,20 @@ const normalizeState = (state: DemoState): DemoState => {
     room.bossQuestionDurationSeconds ??= DEFAULT_BOSS_QUESTION_DURATION_SECONDS
     room.bossCompleted ??= false
     room.bossWinner ??= null
+    // Pause-and-continue gate: older saved demo state predates this entirely.
+    room.bossAwaitingContinue ??= false
     roomState.magic ??= {}
     roomState.magicEvents ??= []
     // Older saved demo state (before this migration) won't have these keys at all — default
     // to empty rather than crashing.
     roomState.rosters ??= {}
     roomState.answerProgress ??= {}
+    // Milestone 4.1: captain election state — older saved state predates this entirely.
+    roomState.captainVotes ??= {}
+    roomState.captainVoteProgress ??= {}
+    // Team guardian names — older saved demo state predates this entirely.
+    roomState.teamNames ??= {}
+    Object.values(roomState.magic).forEach((magic) => { magic.captainElectionAttempt ??= 1 })
     // Milestone 2.1: events/progress saved before round-tracking existed won't have these
     // fields — default them to round 1 (the only round that could have existed back then)
     // rather than letting a later round's competition-score/progress filtering crash or
@@ -199,14 +216,11 @@ const readSharedState = async (): Promise<{ available: boolean; state: DemoState
   try {
     const response = await fetch(SHARED_STATE_PATH, { cache: 'no-store' })
     if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
-      sharedStateAvailable = false
       return { available: false, state: null }
     }
     const payload = await response.json() as { state?: DemoState | null }
-    sharedStateAvailable = true
     return { available: true, state: payload.state ?? null }
   } catch {
-    sharedStateAvailable = false
     return { available: false, state: null }
   }
 }
@@ -218,10 +232,8 @@ const writeSharedState = async (state: DemoState): Promise<boolean> => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state),
     })
-    sharedStateAvailable = response.ok
     return response.ok
   } catch {
-    sharedStateAvailable = false
     return false
   }
 }
@@ -242,7 +254,19 @@ const readState = async (): Promise<DemoState> => {
 }
 
 const writeState = async (state: DemoState): Promise<void> => {
-  if (sharedStateAvailable) await writeSharedState(state)
+  // Write-path staleness fix (mirrors the `listen()` fix above): this must ALWAYS attempt the
+  // shared push, not only when a previous fetch happened to have succeeded. This used to be
+  // gated behind a module-level "is the shared endpoint available" flag that was only ever
+  // recomputed as a side effect of a previous read/write succeeding — so a write attempted while
+  // that flag was false (its pessimistic initial value, or latched false by any earlier
+  // transient failure) was silently applied to local storage only and never even attempted
+  // against the shared endpoint: invisible to the writer (their own tab looked correct) but
+  // permanently withheld from every remote device, and liable to be silently reverted on the
+  // writer's own device the moment some unrelated later read found the endpoint reachable again
+  // and pulled back the older state that had never been overwritten. `state` is always a full
+  // snapshot (never a delta), so attempting this on every write is naturally idempotent — no
+  // duplicate mutations, just last-write-wins.
+  await writeSharedState(state)
   writeLocalState(state)
   window.dispatchEvent(new Event(UPDATE_EVENT))
 }
@@ -257,10 +281,22 @@ const listen = (callback: () => void): Unsubscribe => {
   }
   window.addEventListener('storage', storageListener)
   window.addEventListener(UPDATE_EVENT, callback)
+  // Realtime staleness fix: this poll must ALWAYS fire, not just while a previous fetch happened
+  // to have succeeded. This used to be gated behind a module-level "is the shared endpoint
+  // available" flag that was only ever recomputed as a SIDE EFFECT of actually calling
+  // readSharedState()/writeSharedState() (via callback -> emit -> readState) — so gating the
+  // poll on that same flag made it a stuck circuit breaker: if the very first fetch (the initial
+  // `void emit()` a subscription does on subscribe) failed for any transient reason — slower/
+  // less reliable than localhost, e.g. a real device joining over classroom WiFi while the dev
+  // server's `--host` network path was still settling — the flag latched false and nothing ever
+  // polled again to notice it had recovered, since the poll itself was the only thing that could
+  // flip it back. That is exactly "same-device testing (near-zero chance the first same-origin
+  // fetch fails) never reproduces it, a genuinely remote device sometimes does, and only a full
+  // reload — a fresh bootstrap attempt — recovers." Always calling callback() here restores
+  // retry-until-it-works, matching how the read path is supposed to behave without needing a
+  // manual refresh.
   const intervalId = typeof window.setInterval === 'function'
-    ? window.setInterval(() => {
-        if (sharedStateAvailable) callback()
-      }, 300)
+    ? window.setInterval(() => { callback() }, 300)
     : null
   return () => {
     window.removeEventListener('storage', storageListener)
@@ -303,8 +339,13 @@ const resolveQuestionMagic = (roomState: DemoRoomState, resolvedQuestionIndex: n
     consumeInventoryItem(magic, effect.itemType)
   }
 
+  // power_surge and illusion are both self-only buffs — never blockable by a shield, always
+  // applied. Illusion contributes no score multiplier at all (see computeAppliedMagicMultipliers
+  // in lib/magic.ts, which only branches on power_surge/score_seal — illusion falls through and
+  // is correctly ignored there), so marking it 'applied' here only affects its visibility in the
+  // event history/UI, never scoring.
   for (const { effect } of effectsThisQuestion) {
-    if (effect.itemType !== 'power_surge') continue
+    if (effect.itemType !== 'power_surge' && effect.itemType !== 'illusion') continue
     const event = roomState.magicEvents.find((item) => item.id === effect.id)
     if (event) {
       event.status = 'applied'
@@ -398,7 +439,7 @@ export class DemoGameService implements GameService {
       teamsLocked: false,
       teams: [],
     }
-    state.rooms[roomCode] = { room, players: {}, magic: {}, magicEvents: [], rosters: {}, answerProgress: {} }
+    state.rooms[roomCode] = { room, players: {}, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {} }
     await writeState(state)
     return room
   }
@@ -500,8 +541,16 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     if (!roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
+    // Milestone 4.1: every team must have finished electing a captain before the game can
+    // start — chooseStartingItem/activateItem are already holder-gated, so without a captain
+    // elected first, a team could never have picked a starting item anyway; this check exists
+    // to surface a clear, specific error instead of relying on that indirect consequence.
+    const teamsWithoutCaptain = roomState.room.teams.filter((team) => roomState.magic[team.id]?.magicHolderPlayerId == null)
+    if (teamsWithoutCaptain.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
     const teamsWithoutStartingItem = roomState.room.teams.filter((team) => !hasAnyMagicItem(roomState.magic[team.id]?.inventory ?? createEmptyMagicInventory()))
     if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
+    const teamsWithoutName = roomState.room.teams.filter((team) => !(roomState.teamNames[team.id]?.name ?? '').trim())
+    if (teamsWithoutName.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
     roomState.room.status = 'playing'
     roomState.room.startedAt = Date.now()
     roomState.room.currentQuestionIndex = 0
@@ -636,7 +685,12 @@ export class DemoGameService implements GameService {
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
-    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'boss' || roomState.room.bossQuestionIndex !== expectedBossIndex) return
+    if (
+      roomState.room.status !== 'playing'
+      || roomState.room.phase !== 'boss'
+      || roomState.room.bossQuestionIndex !== expectedBossIndex
+      || roomState.room.bossAwaitingContinue === true
+    ) return
     const now = Date.now()
     const nextBossIndex = expectedBossIndex + 1
 
@@ -665,14 +719,39 @@ export class DemoGameService implements GameService {
         }
         roomState.room.bossCompleted = true
       }
-      roomState.room.phase = 'main'
-      roomState.room.currentQuestionIndex = BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1
-      roomState.room.questionStartedAt = now
-      roomState.room.questionClosedAt = null
+      // Pause-and-continue gate: phase stays 'boss' and currentQuestionIndex stays put here —
+      // continueAfterBoss (fired only by the teacher's explicit "เล่นต่อ" action) is now the
+      // sole place that advances phase/currentQuestionIndex past the boss round.
+      roomState.room.bossAwaitingContinue = true
     } else {
       roomState.room.bossQuestionIndex = nextBossIndex
       roomState.room.bossQuestionStartedAt = now
     }
+    await writeState(state)
+  }
+
+  // Pause-and-continue gate: the only method that ever clears bossAwaitingContinue. Fired
+  // solely by the teacher's explicit "เล่นต่อ" action (never a polling effect) — see
+  // bossAwaitingContinue's doc comment in types/game.ts. Guarded exactly like advanceQuestion/
+  // advanceBossQuestion (status + phase + an "expected token", here expectedRound) so a stale/
+  // duplicate call is a silent no-op. On success, writes exactly what advanceBossQuestion used
+  // to write unconditionally when resolving the last boss question.
+  async continueAfterBoss(roomCode: string, teacherSessionId: string, expectedRound: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (
+      roomState.room.status !== 'playing'
+      || roomState.room.phase !== 'boss'
+      || roomState.room.bossAwaitingContinue !== true
+      || roomState.room.currentRound !== expectedRound
+    ) return
+    roomState.room.phase = 'main'
+    roomState.room.currentQuestionIndex = BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1
+    roomState.room.questionStartedAt = Date.now()
+    roomState.room.questionClosedAt = null
+    roomState.room.bossAwaitingContinue = false
     await writeState(state)
   }
 
@@ -741,7 +820,14 @@ export class DemoGameService implements GameService {
     // starting-item choice as happening fresh each time "before the teacher starts the game".
     // The holder itself is untouched — only a fresh lockTeams re-picks holders.
     expireQueuedEffects(roomState, Date.now())
-    Object.values(roomState.magic).forEach((magic) => { magic.inventory = createEmptyMagicInventory(); magic.lastResolvedBreakdown = null })
+    Object.values(roomState.magic).forEach((magic) => {
+      magic.inventory = createEmptyMagicInventory()
+      magic.lastResolvedBreakdown = null
+      // Milestone 4.1: a new round needs a fresh captain election too — the old captain does
+      // not automatically carry over (matches "starting-item choice happens fresh each round").
+      magic.magicHolderPlayerId = null
+      magic.captainElectionAttempt += 1
+    })
     await writeState(state)
   }
 
@@ -783,7 +869,14 @@ export class DemoGameService implements GameService {
       })
     })
     expireQueuedEffects(roomState, Date.now())
-    Object.values(roomState.magic).forEach((magic) => { magic.inventory = createEmptyMagicInventory(); magic.lastResolvedBreakdown = null })
+    Object.values(roomState.magic).forEach((magic) => {
+      magic.inventory = createEmptyMagicInventory()
+      magic.lastResolvedBreakdown = null
+      // Milestone 4.1: a new round needs a fresh captain election too — the old captain does
+      // not automatically carry over (matches "starting-item choice happens fresh each round").
+      magic.magicHolderPlayerId = null
+      magic.captainElectionAttempt += 1
+    })
     await writeState(state)
   }
 
@@ -860,23 +953,26 @@ export class DemoGameService implements GameService {
       throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
     }
 
-    // Success: (re)select exactly one holder per team and give every team a fresh, empty
-    // magic state — "re-locking after unlock may select holders again."
-    const memberIdsByTeam: Record<string, string[]> = {}
-    latestRoomState.room.teams.forEach((team) => { memberIdsByTeam[team.id] = [] })
-    Object.values(latestRoomState.players).forEach((player) => {
-      if (player.teamId && memberIdsByTeam[player.teamId]) memberIdsByTeam[player.teamId].push(player.id)
-    })
-    const holders = pickHolders(memberIdsByTeam)
+    // Success: give every team a fresh magic doc with NO captain yet — Milestone 4.1 replaces
+    // the old random holder pick with a team vote (see castCaptainVote/finalizeCaptainElection
+    // below). captainElectionAttempt is bumped, never reused, so any vote docs cast under a
+    // PRIOR attempt for this team id — including ones from before an unlock+re-randomize — are
+    // simply never counted again without needing to delete them (see CaptainVote's doc comment
+    // in types/game.ts for why deletion isn't how this codebase scopes stale data).
+    const previousAttempts = new Map(Object.values(latestRoomState.magic).map((magic) => [magic.teamId, magic.captainElectionAttempt]))
     latestRoomState.magic = {}
     latestRoomState.room.teams.forEach((team) => {
       latestRoomState.magic[team.id] = {
         teamId: team.id,
-        magicHolderPlayerId: holders[team.id] ?? null,
+        magicHolderPlayerId: null,
+        captainElectionAttempt: (previousAttempts.get(team.id) ?? 0) + 1,
         inventory: createEmptyMagicInventory(),
         queuedEffect: null,
         lastResolvedBreakdown: null,
       }
+      // Team guardian names reset every time teams are (re-)locked — same cadence as captain
+      // election/inventory above.
+      delete latestRoomState.teamNames[team.id]
     })
     await writeState(latestState)
   }
@@ -946,6 +1042,14 @@ export class DemoGameService implements GameService {
     return { player, winner: null }
   }
 
+  // Milestone: the captain may change this pick any number of times while the room is still
+  // 'waiting' (a fresh pick or a change are the exact same operation — both just replace
+  // whatever the inventory currently holds). Once room.status leaves 'waiting' this method is
+  // unreachable (guarded below), which is what makes the choice permanent the moment the
+  // mission actually starts. Pre-start, inventory can only ever hold the single starting pick
+  // (boss rewards — the only other inventory mutation — are 'playing'-only), so replacing is
+  // always just "zero every other type, set the requested type to exactly 1" — it can never
+  // leave two types both holding an item.
   async chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
@@ -956,8 +1060,10 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting' || !roomState.room.teamsLocked) {
       throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
     }
-    if (hasAnyMagicItem(magic.inventory)) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
-    magic.inventory[itemType].available += 1
+    MAGIC_ITEM_TYPES.forEach((type) => {
+      if (type !== itemType) magic.inventory[type].available = 0
+    })
+    magic.inventory[itemType].available = 1
     await writeState(state)
   }
 
@@ -965,7 +1071,7 @@ export class DemoGameService implements GameService {
     roomCode: string,
     teamId: string,
     playerId: string,
-    itemType: 'power_surge' | 'score_seal',
+    itemType: 'power_surge' | 'score_seal' | 'illusion',
     targetTeamId?: string,
   ): Promise<void> {
     const state = await readState()
@@ -976,7 +1082,9 @@ export class DemoGameService implements GameService {
     if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
     // Milestone 4: magic is a main-phase-only concept — the boss mini-game has its own,
     // separate 3-question flow, and status stays 'playing' throughout both, so this check is
-    // what actually prevents activation from leaking into the boss phase.
+    // what actually prevents activation from leaking into the boss phase. This also covers
+    // Milestone 4.1's "illusion cannot affect boss questions" — activation is unavailable in
+    // the boss phase for every item, not just illusion.
     if (roomState.room.phase !== 'main') throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
 
     const window = getMagicActivationWindow(roomState.room)
@@ -987,7 +1095,9 @@ export class DemoGameService implements GameService {
 
     if (magic.inventory[itemType].available <= 0) throw new Error('ผู้ใช้:ไม่มีไอเทมนี้ในคลังของทีม')
 
-    const resolvedTargetTeamId = itemType === 'power_surge' ? teamId : targetTeamId
+    // Milestone 4.1: illusion is a self-only buff, exactly like power_surge — it never has an
+    // opposing-team target.
+    const resolvedTargetTeamId = itemType === 'score_seal' ? targetTeamId : teamId
     const now = Date.now()
 
     // A legitimate holder attempt that fails validation still gets an audit record — this is
@@ -1035,6 +1145,22 @@ export class DemoGameService implements GameService {
       // "already targeted" rejection here.
     }
 
+    // Milestone 4.1: the hidden choice is chosen exactly ONCE, right here, and stored on the
+    // queued effect — never recomputed later (resolution just marks the event 'applied' and
+    // consumes the item, it never touches hiddenChoiceId again). This is what makes every team
+    // member see the identical hidden choice and makes a refresh/retry unable to reroll it.
+    let hiddenChoiceId: string | undefined
+    if (itemType === 'illusion') {
+      const targetQuestionId = roomState.room.questionIds[affectedQuestionIndex]
+      const targetQuestion = targetQuestionId ? questionsById.get(targetQuestionId) : undefined
+      if (!targetQuestion) {
+        rejectEvent()
+        await writeState(state)
+        throw new Error('ผู้ใช้:ไม่พบคำถามข้อที่จะมีผล กรุณาลองใหม่')
+      }
+      hiddenChoiceId = pickIllusionHiddenChoice(targetQuestion)
+    }
+
     const effectId = `magic-${createId()}`
     magic.queuedEffect = {
       id: effectId,
@@ -1043,6 +1169,7 @@ export class DemoGameService implements GameService {
       targetTeamId: resolvedTargetTeamId as string,
       affectedQuestionIndex,
       createdAt: now,
+      ...(hiddenChoiceId ? { hiddenChoiceId } : {}),
     }
     roomState.magicEvents.push({
       id: effectId,
@@ -1056,6 +1183,177 @@ export class DemoGameService implements GameService {
       createdAt: now,
       resolvedAt: null,
     })
+    await writeState(state)
+  }
+
+  // Milestone 4.1: student-authored — writes ONLY the voter's own vote (+ its broadly-readable
+  // progress counterpart), never the finalization result. "Auto-finalize once everyone has
+  // voted" is deliberately driven by the TEACHER's client polling vote progress (see
+  // TeacherPage.tsx), mirroring how main-question/boss auto-advance are already
+  // teacher-client-driven rather than student-triggered — see gameService.ts's doc comment on
+  // why a student-triggered finalize could never be safely validated by security rules.
+  async castCaptainVote(roomCode: string, playerId: string, targetPlayerId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const voter = roomState?.players[playerId]
+    if (!roomState || !voter) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.status !== 'waiting' || !roomState.room.teamsLocked) {
+      throw new Error('ผู้ใช้:โหวตหัวหน้าทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+    }
+    if (!voter.teamId) throw new Error('ผู้ใช้:คุณยังไม่ได้อยู่ในทีมใด')
+    const target = roomState.players[targetPlayerId]
+    // Self-voting is allowed — targetPlayerId === playerId simply passes this same check.
+    if (!target || target.teamId !== voter.teamId) throw new Error('ผู้ใช้:โหวตได้เฉพาะสมาชิกในทีมของคุณเอง')
+    const magic = roomState.magic[voter.teamId]
+    if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+    if (magic.magicHolderPlayerId != null) throw new Error('ผู้ใช้:ทีมนี้เลือกหัวหน้าทีมเรียบร้อยแล้ว')
+    const votedAt = Date.now()
+    // Overwrite (never append) — this is what makes "students may change their vote until
+    // finalized" true: casting a second vote just replaces this same playerId-keyed doc.
+    roomState.captainVotes[playerId] = { playerId, teamId: voter.teamId, targetPlayerId, electionAttempt: magic.captainElectionAttempt, votedAt }
+    roomState.captainVoteProgress[playerId] = { playerId, teamId: voter.teamId, electionAttempt: magic.captainElectionAttempt, votedAt }
+    await writeState(state)
+  }
+
+  // Milestone 4.1: teacher-authored, idempotent (a stale/duplicate call after the captain is
+  // already set is a silent no-op — refresh/retry can never reroll the tie-break). Also the
+  // manual "finalize early" path for teams with missing voters, and the implicit target of the
+  // teacher's auto-finalize-on-all-voted effect (see TeacherPage.tsx).
+  async finalizeCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    const magic = roomState.magic[teamId]
+    if (!magic || magic.magicHolderPlayerId != null) return
+    const roster = roomState.rosters[teamId]
+    const memberIds = roster ? roster.members.map((member) => member.playerId) : []
+    const votesByVoter: Record<string, string> = {}
+    Object.values(roomState.captainVotes).forEach((vote) => {
+      if (vote.teamId !== teamId || vote.electionAttempt !== magic.captainElectionAttempt) return
+      votesByVoter[vote.playerId] = vote.targetPlayerId
+    })
+    // pickElectedCaptain falls back to a uniform random draw across the WHOLE roster when no
+    // votes were cast at all (every tally is 0, so everyone is "tied for highest") — a team can
+    // never get permanently stuck with no captain, even if the teacher force-finalizes before
+    // anyone voted.
+    const captainId = pickElectedCaptain(memberIds, votesByVoter)
+    if (!captainId) return
+    magic.magicHolderPlayerId = captainId
+    await writeState(state)
+  }
+
+  // Milestone 4.1: teacher-authored, only while the room hasn't started playing yet ("reopen the
+  // election before the game starts"). Bumps captainElectionAttempt rather than deleting vote
+  // docs — see CaptainVote's doc comment in types/game.ts.
+  async resetCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:รีเซ็ตการเลือกตั้งหัวหน้าทีมได้เฉพาะก่อนเริ่มภารกิจ')
+    const magic = roomState.magic[teamId]
+    if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+    magic.magicHolderPlayerId = null
+    magic.captainElectionAttempt += 1
+    await writeState(state)
+  }
+
+  subscribeCaptainVote(roomCode: string, playerId: string, listener: (vote: CaptainVote | null) => void): Unsubscribe {
+    const emit = async (): Promise<void> => listener((await readState()).rooms[roomCode.toUpperCase()]?.captainVotes[playerId] ?? null)
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeTeamCaptainVoteProgress(roomCode: string, teamId: string, listener: (entries: CaptainVoteProgress[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const entries = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.captainVoteProgress ?? {}).filter((entry) => entry.teamId === teamId)
+      listener(entries)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeAllCaptainVoteProgress(roomCode: string, listener: (entries: CaptainVoteProgress[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const entries = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.captainVoteProgress ?? {})
+      listener(entries)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  // Team guardian name: mirrors subscribeAllTeamMagic's "all X for a room" shape, pointed at
+  // the new teamNames record.
+  subscribeAllTeamGuardianNames(roomCode: string, listener: (names: TeamGuardianName[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const names = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.teamNames ?? {})
+      listener(names)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  // Captain-authored path. Only the team's finalized captain (magicHolderPlayerId) may set the
+  // name, and only in the waiting-room window after teams are locked — see lockTeams, which
+  // resets teamNames every time it (re-)runs.
+  async setTeamGuardianName(roomCode: string, teamId: string, playerId: string, name: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    if (roomState.room.status !== 'waiting' || !roomState.room.teamsLocked) {
+      throw new Error('ผู้ใช้:ตั้งชื่อทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+    }
+    const magic = roomState.magic[teamId]
+    if (!magic) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+    if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:เฉพาะหัวหน้าทีมที่ได้รับเลือกเท่านั้นที่ตั้งชื่อทีมได้')
+
+    const otherNames = Object.values(roomState.teamNames)
+      .filter((entry) => entry.teamId !== teamId)
+      .map((entry) => entry.name)
+    const validationError = validateTeamGuardianName(name, otherNames)
+    if (validationError) throw new Error(validationError)
+
+    roomState.teamNames[teamId] = {
+      teamId,
+      name: normalizeTeamGuardianName(name),
+      updatedAt: Date.now(),
+      updatedByPlayerId: playerId,
+    }
+    await writeState(state)
+  }
+
+  // Teacher-only. Deletes the entry entirely — absence means "unnamed", matching
+  // setTeamGuardianName never having been called yet.
+  async resetTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    delete roomState.teamNames[teamId]
+    await writeState(state)
+  }
+
+  // Teacher-only. Same validation/write shape as setTeamGuardianName, but skips the
+  // captain-ownership check entirely — the teacher is always authorized to set any team's name.
+  async overrideTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string, name: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+
+    const otherNames = Object.values(roomState.teamNames)
+      .filter((entry) => entry.teamId !== teamId)
+      .map((entry) => entry.name)
+    const validationError = validateTeamGuardianName(name, otherNames)
+    if (validationError) throw new Error(validationError)
+
+    roomState.teamNames[teamId] = {
+      teamId,
+      name: normalizeTeamGuardianName(name),
+      updatedAt: Date.now(),
+      updatedByPlayerId: teacherSessionId,
+    }
     await writeState(state)
   }
 }

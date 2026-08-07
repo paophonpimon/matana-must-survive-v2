@@ -60,9 +60,9 @@ describe('selectBossQuestions', () => {
 })
 
 describe('pickRandomMagicItem', () => {
-  it('always returns one of the three magic item types', () => {
+  it('always returns one of the four magic item types', () => {
     for (let i = 0; i < 20; i += 1) {
-      expect(['power_surge', 'score_seal', 'rose_shield']).toContain(pickRandomMagicItem(() => i / 20))
+      expect(['power_surge', 'score_seal', 'rose_shield', 'illusion']).toContain(pickRandomMagicItem(() => i / 20))
     }
   })
 })

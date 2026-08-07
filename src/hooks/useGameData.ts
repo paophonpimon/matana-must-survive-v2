@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGame } from '../context/GameContext'
-import type { AnswerProgressEntry, MagicEvent, Player, Room, TeamMagicState, TeamRosterSummary } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
 
 interface Loadable<T> {
   data: T
@@ -168,6 +168,96 @@ export const useTeamAnswerProgress = (roomCode: string, teamId: string): Loadabl
       (error) => setState((current) => ({ ...current, loading: false, error })),
     )
   }, [roomCode, service, teamId])
+
+  return state
+}
+
+// Milestone 4.1: the caller's OWN vote — private, self-readable only (see firestore.rules).
+// Used to render "clear selected-vote state" on the student's own vote button.
+export const useCaptainVote = (roomCode: string, playerId: string): Loadable<CaptainVote | null> => {
+  const { service } = useGame()
+  const [state, setState] = useState<Loadable<CaptainVote | null>>({ data: null, loading: true, error: '' })
+
+  useEffect(() => {
+    if (!roomCode || !playerId) {
+      setState({ data: null, loading: false, error: '' })
+      return
+    }
+    setState({ data: null, loading: true, error: '' })
+    return service.subscribeCaptainVote(
+      roomCode,
+      playerId,
+      (vote) => setState({ data: vote, loading: false, error: '' }),
+      (error) => setState((current) => ({ ...current, loading: false, error })),
+    )
+  }, [roomCode, service, playerId])
+
+  return state
+}
+
+// Milestone 4.1: broadly-readable "has voted" signal for one team — powers "โหวตแล้ว X/Y คน".
+export const useTeamCaptainVoteProgress = (roomCode: string, teamId: string): Loadable<CaptainVoteProgress[]> => {
+  const { service } = useGame()
+  const [state, setState] = useState<Loadable<CaptainVoteProgress[]>>({ data: [], loading: true, error: '' })
+
+  useEffect(() => {
+    if (!roomCode || !teamId) {
+      setState({ data: [], loading: false, error: '' })
+      return
+    }
+    setState({ data: [], loading: true, error: '' })
+    return service.subscribeTeamCaptainVoteProgress(
+      roomCode,
+      teamId,
+      (entries) => setState({ data: entries, loading: false, error: '' }),
+      (error) => setState((current) => ({ ...current, loading: false, error })),
+    )
+  }, [roomCode, service, teamId])
+
+  return state
+}
+
+// Milestone 4.1: every team's vote progress in one subscription — used by the teacher dashboard
+// (which shows progress for every team at once) and by the auto-finalize effect.
+export const useAllCaptainVoteProgress = (roomCode: string): Loadable<CaptainVoteProgress[]> => {
+  const { service } = useGame()
+  const [state, setState] = useState<Loadable<CaptainVoteProgress[]>>({ data: [], loading: true, error: '' })
+
+  useEffect(() => {
+    if (!roomCode) {
+      setState({ data: [], loading: false, error: '' })
+      return
+    }
+    setState({ data: [], loading: true, error: '' })
+    return service.subscribeAllCaptainVoteProgress(
+      roomCode,
+      (entries) => setState({ data: entries, loading: false, error: '' }),
+      (error) => setState((current) => ({ ...current, loading: false, error })),
+    )
+  }, [roomCode, service])
+
+  return state
+}
+
+// Team guardian names — every team's current name in one subscription, mirroring
+// useAllTeamMagic. Used by the teacher dashboard (every team at once) and by LobbyPage/GamePage
+// (to resolve "ทีม N" fallback vs a chosen guardian name for display).
+export const useAllTeamGuardianNames = (roomCode: string): Loadable<TeamGuardianName[]> => {
+  const { service } = useGame()
+  const [state, setState] = useState<Loadable<TeamGuardianName[]>>({ data: [], loading: true, error: '' })
+
+  useEffect(() => {
+    if (!roomCode) {
+      setState({ data: [], loading: false, error: '' })
+      return
+    }
+    setState({ data: [], loading: true, error: '' })
+    return service.subscribeAllTeamGuardianNames(
+      roomCode,
+      (names) => setState({ data: names, loading: false, error: '' }),
+      (error) => setState((current) => ({ ...current, loading: false, error })),
+    )
+  }, [roomCode, service])
 
   return state
 }

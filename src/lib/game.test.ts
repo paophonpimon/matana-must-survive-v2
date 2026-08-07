@@ -53,10 +53,17 @@ describe('คะแนนและเกณฑ์ผ่าน', () => {
 })
 
 describe('รหัสห้องและ validation', () => {
-  it('สร้างรหัสห้อง 6 ตัวโดยไม่มี O, 0, I, 1, L', () => {
+  it('สร้างรหัสห้องตัวเลข 4 หลักเสมอ (0000-9999, เติมศูนย์นำหน้า)', () => {
     for (let index = 0; index < 30; index += 1) {
-      expect(generateRoomCode(Math.random)).toMatch(/^[A-HJ-KM-NP-Z2-9]{6}$/)
+      expect(generateRoomCode(Math.random)).toMatch(/^\d{4}$/)
     }
+  })
+
+  it('เติมศูนย์นำหน้าให้ครบ 4 หลักที่ขอบเขตล่าง/บนของช่วงสุ่ม', () => {
+    expect(generateRoomCode(() => 0)).toBe('0000')
+    // random() ∈ [0, 1) so the closest-to-1 reachable value maps to 9999, never 10000.
+    expect(generateRoomCode(() => 0.99999)).toBe('9999')
+    expect(generateRoomCode(() => 0.00005)).toBe('0000')
   })
 
   it('ตรวจช่องว่าง รูปแบบรหัส และความยาวชื่อ', () => {
@@ -64,6 +71,24 @@ describe('รหัสห้องและ validation', () => {
       roomCode: 'กรุณากรอกรหัสห้อง',
       displayName: 'กรุณากรอกชื่อผู้เล่น',
       studentNumber: 'เลขที่นักเรียนต้องไม่เกิน 20 ตัวอักษร',
+    })
+  })
+
+  it('ยอมรับรหัสห้องตัวเลข 4 หลักแบบใหม่', () => {
+    expect(validateJoinInput({ roomCode: '0042', displayName: 'ชื่อ', studentNumber: '1' })).toEqual({})
+    expect(validateJoinInput({ roomCode: '9999', displayName: 'ชื่อ', studentNumber: '1' })).toEqual({})
+  })
+
+  it('ยอมรับรหัสห้องรุ่นเก่า 6 ตัวอักษรเพื่อความเข้ากันได้ย้อนหลัง', () => {
+    expect(validateJoinInput({ roomCode: 'ABC234', displayName: 'ชื่อ', studentNumber: '1' })).toEqual({})
+  })
+
+  it('ปฏิเสธรหัสห้องที่ไม่ใช่ 4 หลักตัวเลขหรือ 6 ตัวอักษรรุ่นเก่า', () => {
+    expect(validateJoinInput({ roomCode: '123', displayName: 'ชื่อ', studentNumber: '1' })).toEqual({
+      roomCode: 'รหัสห้องต้องเป็นตัวเลข 4 หลัก (หรือรหัสรุ่นเก่า 6 ตัวอักษรแบบไม่มี O, I, L, 0, 1)',
+    })
+    expect(validateJoinInput({ roomCode: '12345', displayName: 'ชื่อ', studentNumber: '1' })).toEqual({
+      roomCode: 'รหัสห้องต้องเป็นตัวเลข 4 หลัก (หรือรหัสรุ่นเก่า 6 ตัวอักษรแบบไม่มี O, I, L, 0, 1)',
     })
   })
 

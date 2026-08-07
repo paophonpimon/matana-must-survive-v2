@@ -80,11 +80,16 @@ export const JoinPage = () => {
                   className="text-center font-mono text-2xl uppercase tracking-[0.28em]"
                   value={values.roomCode}
                   onChange={(event) => update('roomCode', event.target.value.replace(/\s/g, ''))}
+                  // New rooms use a 4-digit code, but maxLength stays 6 — not a leftover, this
+                  // is what still lets a room created under the old 6-character format be typed
+                  // in full (see validateJoinInput's dual-pattern check in lib/game.ts).
+                  // inputMode stays "text" (not "numeric") for the same reason: a numeric virtual
+                  // keyboard would make legacy alphanumeric codes awkward to enter on mobile.
                   maxLength={6}
                   inputMode="text"
                   autoCapitalize="characters"
                   autoComplete="off"
-                  placeholder="ABC234"
+                  placeholder="0000"
                   aria-invalid={Boolean(errors.roomCode)}
                   aria-describedby={errors.roomCode ? 'room-code-error' : undefined}
                 />

@@ -6,9 +6,10 @@ import {
   computeTeamQuestionBreakdown,
   getMagicActivationWindow,
   isEligibleQuestionIndex,
-  pickHolders,
+  pickElectedCaptain,
+  pickIllusionHiddenChoice,
 } from './magic'
-import type { MagicEvent, Player } from '../types/game'
+import type { MagicEvent, Player, Question } from '../types/game'
 
 const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
   displayName: overrides.id,
@@ -51,17 +52,76 @@ const makeEvent = (overrides: Partial<MagicEvent> & { id: string }): MagicEvent 
 
 const questionIds = Array.from({ length: 10 }, (_, index) => `q${index}`)
 
-describe('pickHolders', () => {
-  it('selects exactly one holder per team, including uneven team sizes', () => {
-    const holders = pickHolders({ 'team-1': ['a', 'b', 'c'], 'team-2': ['d', 'e'] }, () => 0.42)
-    expect(Object.keys(holders)).toEqual(['team-1', 'team-2'])
-    expect(['a', 'b', 'c']).toContain(holders['team-1'])
-    expect(['d', 'e']).toContain(holders['team-2'])
+// Milestone 4.1: team captain election — replaces the old random pickHolders.
+describe('pickElectedCaptain', () => {
+  it('the highest vote count wins outright', () => {
+    const captainId = pickElectedCaptain(
+      ['a', 'b', 'c'],
+      { voter1: 'b', voter2: 'b', voter3: 'a' },
+    )
+    expect(captainId).toBe('b')
   })
 
-  it('skips a team with no members instead of throwing', () => {
-    const holders = pickHolders({ 'team-1': [], 'team-2': ['a'] })
-    expect(holders).toEqual({ 'team-2': 'a' })
+  it('self-voting is allowed and counts like any other vote', () => {
+    const captainId = pickElectedCaptain(['a', 'b'], { a: 'a', b: 'a' })
+    expect(captainId).toBe('a')
+  })
+
+  it('a tie among the top candidates is broken by a uniform random draw, not array order', () => {
+    // a and b are tied at 1 vote each, c has 0 — the draw must be confined to {a, b}.
+    const votes = { voter1: 'a', voter2: 'b' }
+    for (let i = 0; i < 10; i += 1) {
+      const captainId = pickElectedCaptain(['a', 'b', 'c'], votes, () => i / 10)
+      expect(['a', 'b']).toContain(captainId)
+    }
+  })
+
+  it('the tie-break draw is deterministic given the same random() sequence — reproducible, not rerollable', () => {
+    const votes = { voter1: 'a', voter2: 'b' }
+    const first = pickElectedCaptain(['a', 'b'], votes, () => 0.9)
+    const second = pickElectedCaptain(['a', 'b'], votes, () => 0.9)
+    expect(first).toBe(second)
+  })
+
+  it('falls back to a uniform random draw across the WHOLE roster when no votes were cast at all', () => {
+    // Every member tallies 0, so every member is "tied for highest" — the team can never get
+    // permanently stuck with no captain even if the teacher force-finalizes before any votes.
+    const captainId = pickElectedCaptain(['a', 'b', 'c'], {})
+    expect(['a', 'b', 'c']).toContain(captainId)
+  })
+
+  it('a vote for a target no longer on the roster is silently ignored rather than crashing', () => {
+    const captainId = pickElectedCaptain(['a', 'b'], { voter1: 'stale-id', voter2: 'a' })
+    expect(captainId).toBe('a')
+  })
+
+  it('returns null for an empty roster', () => {
+    expect(pickElectedCaptain([], {})).toBeNull()
+  })
+})
+
+// Milestone 4.1: illusion's hidden-choice selection — must never pick the correct choice.
+describe('pickIllusionHiddenChoice', () => {
+  const question: Pick<Question, 'choices' | 'correctChoiceId'> = {
+    choices: [
+      { id: 'a', text: 'a' },
+      { id: 'b', text: 'b' },
+      { id: 'c', text: 'c' },
+      { id: 'd', text: 'd' },
+    ],
+    correctChoiceId: 'b',
+  }
+
+  it('never returns the correct choice, across every possible draw', () => {
+    for (let i = 0; i < 10; i += 1) {
+      expect(pickIllusionHiddenChoice(question, () => i / 10)).not.toBe('b')
+    }
+  })
+
+  it('always returns one of the incorrect choices', () => {
+    for (let i = 0; i < 10; i += 1) {
+      expect(['a', 'c', 'd']).toContain(pickIllusionHiddenChoice(question, () => i / 10))
+    }
   })
 })
 

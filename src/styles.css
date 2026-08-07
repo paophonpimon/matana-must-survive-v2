@@ -74,7 +74,24 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   box-shadow: 0 0 1.25rem rgba(188, 73, 111, 0.25), inset 0 0 0 4px rgba(255,255,255,0.03);
 }
 .quiet-link { display: inline-flex; align-items: center; gap: 0.4rem; color: #d5ccc0; font-size: 0.9rem; text-decoration: none; transition: color 180ms ease; }
-.quiet-link:hover { color: #f3d481; }
+/* Bug fix: iOS/touch devices synthesize a hover after a tap, and — since the tapped element is
+   often removed/replaced by a re-render right after (a new question, a closed dialog, etc.) —
+   that phantom hover can visually "land" on whatever now occupies the same screen position,
+   making it look stuck/highlighted even though nothing is actually being pointed at. Every
+   `:hover` rule that represents a real interactive affordance is scoped to devices that have
+   genuine, hover-capable pointing (`hover: hover` — a mouse/trackpad) so it can never trigger
+   from a touch tap in the first place. This changes WHEN these rules apply, not what they do. */
+@media (hover: hover) and (pointer: fine) {
+  .quiet-link:hover { color: #f3d481; }
+  .primary-button:not(:disabled):hover, .secondary-button:not(:disabled):hover, .danger-button:not(:disabled):hover { transform: translateY(-2px); }
+  .secondary-button:not(:disabled):hover { border-color: #dfbd6a; background: rgba(46, 25, 75, 0.85); }
+  .danger-button:not(:disabled):hover { border-color: #d9787e; background: rgba(121, 35, 60, 0.65); }
+  .field-label input:hover { border-color: rgba(226,189,101,0.35); }
+  .emergency-stop-button:hover { border-color: #ffaaa4; background: linear-gradient(135deg, rgba(164,37,61,0.98), rgba(99,25,57,0.98)); }
+  .choice-button:not(:disabled):hover { transform: translateY(-1px); border-color: rgba(226,189,101,0.55); background: rgba(46,28,67,0.62); }
+  .grimoire-close-button:hover { color: #fff7df; border-color: rgba(255,255,255,0.3); }
+  .grimoire-trigger-button:hover { border-color: rgba(226,189,101,0.55); background: rgba(77,49,19,0.42); }
+}
 
 .eyebrow { color: #e5c16b; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; }
 .hero-title {
@@ -271,9 +288,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 .secondary-button { color: #fff7df; border-color: rgba(232, 201, 126, 0.38); background: rgba(29, 19, 55, 0.7); }
 .danger-button { color: #ffe8e0; border-color: rgba(205, 93, 101, 0.42); background: rgba(103, 30, 55, 0.48); }
-.primary-button:not(:disabled):hover, .secondary-button:not(:disabled):hover, .danger-button:not(:disabled):hover { transform: translateY(-2px); }
-.secondary-button:not(:disabled):hover { border-color: #dfbd6a; background: rgba(46, 25, 75, 0.85); }
-.danger-button:not(:disabled):hover { border-color: #d9787e; background: rgba(121, 35, 60, 0.65); }
 
 .mystic-loader { width: 3.4rem; height: 3.4rem; border: 1px solid rgba(229,193,107,0.25); border-top-color: #e5c16b; border-radius: 999px; animation: spin 1.1s linear infinite; box-shadow: 0 0 1.6rem rgba(213, 80, 123, 0.2); }
 .mystic-loader::after { content: "✦"; display: grid; place-items: center; width: 100%; height: 100%; color: #e5c16b; animation: counter-spin 1.1s linear infinite; }
@@ -285,7 +299,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   color: #fff7df; background: rgba(7, 8, 27, 0.62); transition: border-color 180ms ease, background 180ms ease;
 }
 .field-label input::placeholder { color: #77717c; }
-.field-label input:hover { border-color: rgba(226,189,101,0.35); }
 .field-label input:focus { border-color: #e2bd65; background: rgba(7, 8, 27, 0.84); outline: none; box-shadow: 0 0 0 3px rgba(226,189,101,0.13); }
 .field-label input[aria-invalid="true"] { border-color: #d87576; }
 .field-error { display: block; margin-top: 0.4rem; color: #ffb5aa; }
@@ -318,7 +331,11 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 .teacher-room-bar small { display: block; margin-bottom: 0.3rem; color: #9f978f; font-size: 0.72rem; }
 .room-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: clamp(1.7rem, 5vw, 2.5rem); letter-spacing: 0.2em; color: #f5d988; }
-.copy-button { min-height: 2.4rem; border: 1px solid rgba(226,189,101,0.28); border-radius: 0.6rem; padding: 0.4rem 0.7rem; color: #f2d58d; background: rgba(77,49,19,0.3); font-size: 0.78rem; }
+/* iPad UX fix: bumped from 2.4rem (38.4px) to meet Apple's 44pt touch-target minimum — this
+   button is reused for "คัดลอกรหัสห้อง", "โหวต" (captain vote), and "แก้ไข" (team name), all
+   tapped often on a touchscreen. display:inline-flex + align-items:center keeps the (unchanged)
+   text vertically centered now that the box is taller than its content. */
+.copy-button { display: inline-flex; align-items: center; min-height: 2.75rem; border: 1px solid rgba(226,189,101,0.28); border-radius: 0.6rem; padding: 0.4rem 0.7rem; color: #f2d58d; background: rgba(77,49,19,0.3); font-size: 0.78rem; }
 .count-badge { display: grid; place-items: center; min-width: 4rem; min-height: 2.1rem; border-radius: 999px; color: #e9cf90; background: rgba(226,189,101,0.1); font-size: 0.78rem; }
 .empty-state { padding: 3.2rem 1.5rem; text-align: center; }
 .empty-state > div { color: #dcbf71; font-size: 2rem; }
@@ -337,7 +354,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .broadcast-header-actions { display: flex; align-items: center; gap: 0.65rem; }
 .emergency-stop-button { position: fixed; right: max(1.25rem, env(safe-area-inset-right)); bottom: max(1.25rem, env(safe-area-inset-bottom)); z-index: 30; min-height: 3.25rem; border: 1px solid rgba(255,137,139,0.65); border-radius: 999px; padding: 0.7rem 1.2rem; color: #ffe5df; background: linear-gradient(135deg, rgba(137,30,55,0.96), rgba(82,22,50,0.96)); box-shadow: 0 0.8rem 2.5rem rgba(25,3,12,0.48), 0 0 1.4rem rgba(224,73,84,0.2); font-size: 0.88rem; font-weight: 800; backdrop-filter: blur(10px); }
 .emergency-stop-button::before { content: "■"; margin-right: 0.45rem; color: #ffc0b7; font-size: 0.72rem; }
-.emergency-stop-button:hover { border-color: #ffaaa4; background: linear-gradient(135deg, rgba(164,37,61,0.98), rgba(99,25,57,0.98)); }
 .broadcast-stats { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid rgba(255,255,255,0.1); background: linear-gradient(90deg, rgba(54,35,79,0.32), rgba(78,45,20,0.2)); }
 .broadcast-stats div { padding: 0.85rem 0.7rem; text-align: center; }
 .broadcast-stats div + div { border-left: 1px solid rgba(255,255,255,0.09); }
@@ -509,7 +525,10 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .teacher-broadcast-mode .teacher-room-bar > div:first-child > p, .teacher-broadcast-mode .teacher-room-bar small { margin-bottom: 0.1rem; font-size: 0.62rem; }
 .teacher-broadcast-mode .teacher-room-bar > div:first-child > div { margin-top: 0; }
 .teacher-broadcast-mode .room-code { font-size: 1.25rem; letter-spacing: 0.14em; }
-.teacher-broadcast-mode .copy-button { min-height: 1.9rem; padding: 0.25rem 0.55rem; font-size: 0.67rem; }
+/* iPad UX fix: was 1.9rem (30.4px), well under the 44pt minimum — kept the compact padding/font
+   so the live header bar stays visually dense, but the tappable height itself now meets 44px
+   regardless of how little text/padding it wraps. */
+.teacher-broadcast-mode .copy-button { min-height: 2.75rem; padding: 0.25rem 0.55rem; font-size: 0.67rem; }
 .teacher-broadcast-mode .teacher-room-bar strong.text-2xl { font-size: 1.2rem; }
 .teacher-broadcast-mode .teacher-dashboard { margin-top: 0.75rem; }
 .teacher-broadcast-mode .teacher-scoreboard { min-height: calc(100dvh - 10.5rem); border-color: rgba(226,189,101,0.2); background: linear-gradient(150deg, rgba(18,17,49,0.9), rgba(28,12,41,0.82)); box-shadow: 0 1.5rem 5rem rgba(0,0,0,0.32), 0 0 3rem rgba(140,47,93,0.08); }
@@ -581,7 +600,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .choice-button { display: flex; align-items: center; gap: 0.8rem; min-height: 4rem; width: 100%; border: 1px solid rgba(255,255,255,0.12); border-radius: 0.85rem; padding: 0.7rem 0.85rem; color: #f5eee2; background: rgba(6,7,25,0.48); text-align: left; transition: transform 160ms ease, border-color 160ms ease, background 160ms ease; }
 .choice-button span { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; flex: none; border: 1px solid rgba(226,189,101,0.23); border-radius: 0.6rem; color: #e8ca80; background: rgba(226,189,101,0.07); }
 .choice-button strong { min-width: 0; overflow-wrap: anywhere; font-weight: 500; line-height: 1.5; }
-.choice-button:not(:disabled):hover { transform: translateY(-1px); border-color: rgba(226,189,101,0.55); background: rgba(46,28,67,0.62); }
 .choice-selected { border-color: rgba(229,193,107,0.65); color: #fff5d8; background: rgba(95,62,24,0.38); box-shadow: 0 0 1.8rem rgba(226,189,101,0.15); }
 .choice-button:disabled { opacity: 0.68; }
 .choice-result-correct { opacity: 1 !important; border-color: rgba(111,220,145,0.7); color: #dfffe8; background: rgba(30,105,61,0.42); box-shadow: 0 0 1.8rem rgba(93,214,132,0.2); }
@@ -631,13 +649,16 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
    shield block) — fixed to the viewport so it's visible regardless of scroll position, shown
    once per event via sessionStorage (see services/sessionStorage.ts). */
 .magic-toast-stack { position: fixed; top: max(1rem, env(safe-area-inset-top)); left: 50%; z-index: 60; display: grid; gap: 0.6rem; width: min(92vw, 26rem); transform: translateX(-50%); pointer-events: none; }
-.magic-toast { display: flex; align-items: flex-start; gap: 0.7rem; border: 1px solid rgba(226,189,101,0.4); border-radius: 0.9rem; padding: 0.85rem 1rem; color: #fff7df; background: linear-gradient(145deg, rgba(28,20,52,0.96), rgba(15,11,34,0.96)); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 0 1px rgba(255,255,255,0.06); backdrop-filter: blur(10px); animation: gentle-rise 220ms ease-out both; pointer-events: auto; }
+/* Bug fix: purely informational (auto-dismissing, no click handler) — must never intercept a
+   tap meant for whatever is underneath it, regardless of where in the DOM it's mounted. */
+.magic-toast { display: flex; align-items: flex-start; gap: 0.7rem; border: 1px solid rgba(226,189,101,0.4); border-radius: 0.9rem; padding: 0.85rem 1rem; color: #fff7df; background: linear-gradient(145deg, rgba(28,20,52,0.96), rgba(15,11,34,0.96)); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 0 1px rgba(255,255,255,0.06); backdrop-filter: blur(10px); animation: gentle-rise 220ms ease-out both; pointer-events: none; }
 .magic-toast-icon { flex: none; font-size: 1.3rem; line-height: 1; }
 .magic-toast p { margin: 0; font-size: 0.86rem; line-height: 1.5; white-space: pre-line; }
 .magic-toast-seal { border-color: rgba(211,100,104,0.5); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #d36468; }
 .magic-toast-surge { border-color: rgba(226,189,101,0.55); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #e2bd65; }
 .magic-toast-shield { border-color: rgba(111,220,145,0.5); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #6fdc91; }
 .magic-toast-winner { border-color: rgba(246,210,119,0.6); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #f6d277, 0 0 2rem rgba(224,169,59,0.25); }
+.magic-toast-illusion { border-color: rgba(178,141,232,0.55); box-shadow: 0 1rem 3rem rgba(0,0,0,0.45), inset 3px 0 #b28de8; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes counter-spin { to { transform: rotate(-360deg); } }
@@ -810,6 +831,164 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .lobby-identity { grid-template-columns: repeat(3, 1fr); }
   .lobby-identity div + div { border-top: 0; border-left: 1px solid rgba(255,255,255,0.08); }
 }
+
+/* ================= Item 2: shared per-item icon ================= */
+.magic-item-icon { display: inline-flex; flex: none; align-items: center; justify-content: center; line-height: 1; }
+.magic-item-icon-sm { font-size: 0.95rem; }
+.magic-item-icon-md { font-size: 1.3rem; }
+.magic-item-icon-lg { font-size: 2.6rem; filter: drop-shadow(0 0 0.7rem rgba(226,189,101,0.4)); }
+
+/* ================= Item 1/7: active-effect / captain badges ================= */
+.magic-status-badges { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.6rem; }
+.magic-badge { display: inline-flex; flex: none; align-items: center; gap: 0.35rem; border: 1px solid transparent; border-radius: 999px; padding: 0.3rem 0.6rem; font-size: 0.72rem; font-weight: 700; }
+.magic-badge-captain { color: #f2d58d; background: rgba(226,189,101,0.12); border-color: rgba(226,189,101,0.32); }
+.magic-badge-surge { color: #ffe9b0; background: rgba(226,189,101,0.16); border-color: rgba(226,189,101,0.42); }
+.magic-badge-seal { color: #ffc9c5; background: rgba(211,100,104,0.18); border-color: rgba(211,100,104,0.42); }
+.magic-badge-shield { color: #bdf0cc; background: rgba(111,220,145,0.16); border-color: rgba(111,220,145,0.42); }
+.magic-badge-illusion { color: #ddc9fb; background: rgba(178,141,232,0.16); border-color: rgba(178,141,232,0.42); }
+
+/* ================= Item 1: compact icon+count inventory row ================= */
+.magic-inventory-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
+.magic-inventory-chip { display: flex; align-items: center; gap: 0.4rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 0.65rem; padding: 0.4rem 0.6rem; background: rgba(6,7,25,0.4); }
+.magic-inventory-chip-label { color: #fff7df; font-size: 0.82rem; }
+.magic-inventory-chip-count { color: #e8ca80; font-size: 0.78rem; font-weight: 700; }
+.magic-inventory-chip-count small { margin-left: 0.15rem; color: #8b8377; font-weight: 500; }
+.magic-inventory-row-compact { margin-top: 0.5rem; gap: 0.4rem; }
+.magic-inventory-row-compact .magic-inventory-chip { padding: 0.3rem 0.5rem; }
+
+/* ================= Item 1: teacher's per-team card grid ================= */
+/* 1 column on mobile, naturally 2-3 on desktop via auto-fit/minmax; the >=1100px rule pins
+   exactly 3 columns once there's clearly room, rather than letting auto-fit squeeze in a 4th. */
+.team-magic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; }
+@media (min-width: 1100px) {
+  .team-magic-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.team-magic-card { display: grid; align-content: start; gap: 0.5rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 0.95rem; padding: 0.9rem; background: rgba(9,9,28,0.42); }
+.team-magic-stats { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 0.2rem; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.7rem; background: rgba(4,5,18,0.4); }
+.team-magic-stats div { padding: 0.5rem 0.35rem; text-align: center; }
+.team-magic-stats div + div { border-left: 1px solid rgba(255,255,255,0.08); }
+.team-magic-stats dt { color: #a8a096; font-size: 0.62rem; }
+.team-magic-stats dd { margin-top: 0.15rem; color: #f2d58d; font-size: 0.92rem; font-weight: 700; }
+.team-magic-stats dd span { color: #8b8377; font-size: 0.68rem; }
+
+/* ================= Item 6: team name input (LobbyPage captain + TeacherPage override) ================= */
+.team-name-input { min-width: 0; flex: 1 1 10rem; min-height: 2.6rem; border: 1px solid rgba(255,255,255,0.16); border-radius: 0.6rem; padding: 0.5rem 0.7rem; color: #fff7df; background: rgba(7,8,27,0.58); font-size: 0.85rem; }
+.team-name-input::placeholder { color: #77717c; }
+.team-name-input:focus { border-color: #e2bd65; outline: none; box-shadow: 0 0 0 3px rgba(226,189,101,0.13); }
+
+/* ================= Item 3: centered scoreboard header + bottom action row ================= */
+.scoreboard-header-centered { flex-direction: column; justify-content: center; text-align: center; }
+.scoreboard-header-centered > div:first-child { display: flex; flex-direction: column; align-items: center; }
+.scoreboard-action-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.6rem; border-top: 1px solid rgba(255,255,255,0.1); padding: 1rem 1.35rem; }
+.emergency-stop-button-inline { position: static; }
+@media (max-width: 640px) {
+  .scoreboard-action-row { justify-content: stretch; }
+  .scoreboard-action-row > button { flex: 1 1 100%; }
+}
+
+/* ================= Item 6 follow-up: inline boss-result screen + compact history pill =========
+   Replaces the old popup-modal flow — BossResultDetails (winner name/team/stats/reward) is now
+   shared markup rendered inline by both GamePage (inside .boss-awaiting-continue) and TeacherPage
+   (inside .boss-result-inline below), instead of two divergent copies split across a modal
+   component and a page. .boss-winner-pill is unchanged — the compact post-continue history entry
+   for the rest of the round. */
+.boss-winner-pill { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid rgba(230,197,112,0.3); border-radius: 999px; padding: 0.45rem 0.85rem; color: #f1d38c; background: rgba(87,60,23,0.28); font-size: 0.82rem; font-weight: 700; }
+.boss-result-inline { display: grid; justify-items: center; text-align: center; border: 1px solid rgba(230,197,112,0.26); border-radius: 1.1rem; padding: clamp(1.5rem, 4vw, 2.5rem) 1.25rem; background: linear-gradient(160deg, rgba(42,26,61,0.5), rgba(26,16,48,0.42) 60%, rgba(44,20,32,0.4)); box-shadow: 0 0 2.8rem rgba(202,147,56,0.12); }
+.boss-result-winner-name { margin-top: 0.4rem; color: #ffe49a; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.8rem, 5vw, 2.5rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(238,192,81,0.35); }
+.boss-result-team { margin-top: 0.2rem; color: #d8d1c5; }
+.boss-result-team-tag { color: #a89f92; }
+.boss-result-stats { display: grid; grid-template-columns: repeat(2, 1fr); width: min(100%, 22rem); margin-top: 1.1rem; overflow: hidden; border: 1px solid rgba(255,255,255,0.14); border-radius: 0.8rem; background: rgba(6,7,25,0.4); }
+.boss-result-stats div { padding: 0.7rem 0.4rem; }
+.boss-result-stats div + div { border-left: 1px solid rgba(255,255,255,0.1); }
+.boss-result-stats dt { color: #afa69c; font-size: 0.7rem; }
+.boss-result-stats dd { margin-top: 0.2rem; color: #fff0c8; font-size: 1.15rem; font-weight: 700; }
+.boss-result-reward { display: flex; align-items: center; justify-content: center; gap: 0.7rem; width: min(100%, 26rem); margin-top: 1.1rem; border: 1px solid rgba(226,189,101,0.3); border-radius: 0.85rem; padding: 0.8rem 1rem; background: rgba(78,51,16,0.25); text-align: left; }
+.boss-result-reward small { display: block; color: #b6ab9e; font-size: 0.7rem; }
+.boss-result-reward strong { display: block; margin-top: 0.15rem; color: #f2d58d; font-size: 1.05rem; }
+.boss-result-reward-effect { margin-top: 0.3rem; color: #d8d1c5; font-size: 0.8rem; line-height: 1.45; }
+.boss-result-continue-button { width: min(100%, 20rem); }
+
+/* ================= Item 5: boss pause-and-continue waiting panel (student) ================= */
+.boss-awaiting-continue { display: grid; justify-items: center; padding: 3rem 1rem; text-align: center; }
+
+/* ================= Item 7: dramatic spell-impact toast (student) ================= */
+/* Upgrades the existing .magic-toast content model (icon+text) with a bigger icon behind a
+   radial glow, a scale/fade entrance, and a two-line headline/body split for stronger visual
+   hierarchy — the tone-based border/shadow colors on .magic-toast-seal etc. are unchanged. */
+.magic-toast { align-items: center; gap: 1rem; padding: 1.1rem 1.25rem; animation: spell-pop-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both; }
+.magic-toast-icon-wrap { position: relative; display: grid; flex: none; place-items: center; width: 3.4rem; height: 3.4rem; }
+.magic-toast-glow { position: absolute; inset: -0.5rem; border-radius: 50%; background: radial-gradient(circle, currentColor, transparent 70%); opacity: 0.35; filter: blur(4px); animation: pulse-glow 2s ease-in-out infinite; }
+.magic-toast-copy { min-width: 0; }
+.magic-toast-headline { display: block; color: #fff7df; font-size: 1rem; font-weight: 800; }
+.magic-toast-copy p { margin-top: 0.2rem; }
+.magic-toast-seal .magic-toast-glow, .magic-toast-seal .magic-item-icon { color: #d36468; }
+.magic-toast-surge .magic-toast-glow, .magic-toast-surge .magic-item-icon { color: #e2bd65; }
+.magic-toast-shield .magic-toast-glow, .magic-toast-shield .magic-item-icon { color: #6fdc91; }
+.magic-toast-illusion .magic-toast-glow, .magic-toast-illusion .magic-item-icon { color: #b28de8; }
+.magic-toast-winner .magic-toast-glow, .magic-toast-winner .magic-item-icon { color: #f6d277; }
+
+/* ================= Item 7: teacher-side dramatic spell-event overlay ================= */
+/* More prominent than the student toast per spec ("teacher-side major event popup can be more
+   prominent") — a centered, backdrop-blurred event card rather than a corner toast. */
+.spell-event-backdrop { position: fixed; inset: 0; z-index: 55; display: grid; place-items: center; padding: 1.5rem; background: rgba(2,3,14,0.55); backdrop-filter: blur(4px); pointer-events: none; animation: fade-in 200ms ease-out both; }
+.spell-event-overlay { display: grid; justify-items: center; gap: 0.6rem; width: min(100%, 24rem); border: 1px solid rgba(226,189,101,0.4); border-radius: 1.3rem; padding: 2rem 1.75rem; text-align: center; color: #fff7df; background: linear-gradient(160deg, rgba(28,20,52,0.97), rgba(15,11,34,0.97)); box-shadow: 0 1.5rem 4.5rem rgba(0,0,0,0.55); animation: spell-pop-in 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both; }
+.spell-event-icon-wrap { position: relative; display: grid; place-items: center; width: 5rem; height: 5rem; margin-bottom: 0.2rem; }
+.spell-event-glow { position: absolute; inset: -1rem; border-radius: 50%; background: radial-gradient(circle, currentColor, transparent 72%); opacity: 0.4; filter: blur(8px); animation: pulse-glow 2.2s ease-in-out infinite; }
+.spell-event-headline { font-size: 1.3rem; font-weight: 800; line-height: 1.3; }
+.spell-event-body { color: #d8d1c5; font-size: 0.92rem; line-height: 1.5; }
+.spell-event-seal { border-color: rgba(211,100,104,0.55); box-shadow: 0 1.5rem 4.5rem rgba(0,0,0,0.55), inset 0 0 0 1px rgba(211,100,104,0.12); }
+.spell-event-seal .spell-event-glow, .spell-event-seal .magic-item-icon { color: #d36468; }
+.spell-event-surge { border-color: rgba(226,189,101,0.6); box-shadow: 0 1.5rem 4.5rem rgba(0,0,0,0.55), inset 0 0 0 1px rgba(226,189,101,0.14); }
+.spell-event-surge .spell-event-glow, .spell-event-surge .magic-item-icon { color: #e2bd65; }
+.spell-event-shield { border-color: rgba(111,220,145,0.55); box-shadow: 0 1.5rem 4.5rem rgba(0,0,0,0.55), inset 0 0 0 1px rgba(111,220,145,0.14); }
+.spell-event-shield .spell-event-glow, .spell-event-shield .magic-item-icon { color: #6fdc91; }
+.spell-event-illusion { border-color: rgba(178,141,232,0.55); box-shadow: 0 1.5rem 4.5rem rgba(0,0,0,0.55), inset 0 0 0 1px rgba(178,141,232,0.14); }
+.spell-event-illusion .spell-event-glow, .spell-event-illusion .magic-item-icon { color: #b28de8; }
+
+@keyframes spell-pop-in { from { opacity: 0; transform: scale(0.85) translateY(0.4rem); } to { opacity: 1; transform: scale(1) translateY(0); } }
+
+/* ================= คัมภีร์มนตรา (Magic Grimoire) reference modal ================= */
+/* iPad fix: a true fixed-viewport modal — see GrimoireModal.tsx's doc comment for why this used
+   to trap/mis-size itself when it was a plain descendant of a `backdrop-filter` ancestor. The
+   backdrop covers the full viewport with safe-area-aware padding; the card is a flex column
+   capped to the padded viewport height (never taller than the screen), with a sticky header (so
+   the close button is always reachable regardless of scroll position) and a separately scrolling
+   body — the backdrop itself never scrolls, so there is exactly one scroll container, not a
+   confusing nested pair. */
+.grimoire-backdrop { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); background: rgba(2,3,14,0.78); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.grimoire-card-shell { position: relative; display: flex; flex-direction: column; width: min(100%, 54rem); max-height: 100%; border: 1px solid rgba(255,244,218,0.17); border-radius: 1.2rem; overflow: hidden; text-align: center; background: linear-gradient(145deg, #201533, #111229); box-shadow: 0 2rem 6rem rgba(0,0,0,0.55); animation: gentle-rise 220ms ease-out both; }
+.grimoire-card-header { position: sticky; top: 0; z-index: 1; flex: none; padding: 1.25rem 3.25rem 1rem 1.5rem; background: linear-gradient(145deg, #201533, #111229); border-bottom: 1px solid rgba(255,255,255,0.08); }
+.grimoire-close-button { position: absolute; top: 0.9rem; right: 0.9rem; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; flex: none; border: 1px solid rgba(255,255,255,0.15); border-radius: 50%; color: #cfc7bb; background: rgba(255,255,255,0.08); font-size: 0.9rem; }
+.grimoire-card-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 1rem 1.5rem max(1.5rem, env(safe-area-inset-bottom)); }
+.grimoire-title { margin-top: 0.3rem; color: #f5d47d; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.9rem, 4.5vw, 2.6rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(236,187,83,0.35); }
+.grimoire-subtitle { margin-top: 0.2rem; color: #d8d1c5; font-size: 0.95rem; }
+.grimoire-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1.5rem; text-align: left; }
+/* Desktop keeps the 2x2 grid; mobile AND iPad portrait (~768-834px logical width, well above the
+   old 640px phone-only breakpoint) collapse to a single column so cards aren't cramped. iPad
+   landscape (1024px+) still comfortably fits 2 columns. */
+@media (max-width: 820px) {
+  .grimoire-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.grimoire-card { display: grid; gap: 0.6rem; align-content: start; border: 1px solid rgba(255,255,255,0.12); border-radius: 1rem; padding: 1.1rem; background: rgba(9,9,28,0.5); }
+.grimoire-card-art { display: grid; place-items: center; width: 3.4rem; height: 3.4rem; border-radius: 50%; background: rgba(255,255,255,0.06); font-size: 1.8rem; }
+.grimoire-card-title { color: #fff7df; font-size: 1.1rem; font-weight: 700; }
+.grimoire-card-facts { display: grid; gap: 0.45rem; }
+.grimoire-card-facts dt { color: #9f978f; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.grimoire-card-facts dd { margin-top: 0.1rem; color: #e8dfd2; font-size: 0.86rem; line-height: 1.5; }
+.grimoire-card-note { border-top: 1px dashed rgba(255,255,255,0.14); padding-top: 0.55rem; color: #f3aaa7; font-size: 0.8rem; }
+.grimoire-card-power_surge { border-color: rgba(226,189,101,0.4); box-shadow: inset 3px 0 #e2bd65; }
+.grimoire-card-power_surge .grimoire-card-art { color: #e2bd65; }
+.grimoire-card-score_seal { border-color: rgba(211,100,104,0.4); box-shadow: inset 3px 0 #d36468; }
+.grimoire-card-score_seal .grimoire-card-art { color: #d36468; }
+.grimoire-card-rose_shield { border-color: rgba(111,220,145,0.4); box-shadow: inset 3px 0 #6fdc91; }
+.grimoire-card-rose_shield .grimoire-card-art { color: #6fdc91; }
+.grimoire-card-illusion { border-color: rgba(178,141,232,0.4); box-shadow: inset 3px 0 #b28de8; }
+.grimoire-card-illusion .grimoire-card-art { color: #b28de8; }
+.grimoire-summary { margin-top: 1.5rem; border: 1px solid rgba(226,189,101,0.3); border-radius: 0.85rem; padding: 0.9rem 1.1rem; background: rgba(78,51,16,0.22); text-align: left; }
+.grimoire-summary-title { color: #f2d58d; font-weight: 700; font-size: 0.85rem; }
+.grimoire-summary p + p { margin-top: 0.35rem; color: #e8dfd2; font-size: 0.85rem; }
+.grimoire-summary-title + p { margin-top: 0.5rem; }
+.grimoire-trigger-button { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid rgba(226,189,101,0.32); border-radius: 999px; padding: 0.45rem 0.85rem; color: #f2d58d; background: rgba(77,49,19,0.28); font-size: 0.8rem; font-weight: 700; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }

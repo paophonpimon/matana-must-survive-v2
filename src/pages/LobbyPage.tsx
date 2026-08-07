@@ -1,10 +1,12 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
-import { useRoom, usePlayer, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
+import { useAllTeamGuardianNames, useCaptainVote, useRoom, usePlayer, useTeamCaptainVoteProgress, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
 import { resolveStudentRoute } from '../lib/game'
+import { TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
+import { friendlyError } from '../services'
 import { getPlayerSession } from '../services/sessionStorage'
 
 export const LobbyPage = () => {
@@ -18,6 +20,68 @@ export const LobbyPage = () => {
   const teamId = playerState.data?.teamId ?? ''
   const rosterState = useTeamRoster(normalizedCode, teamId)
   const magicState = useTeamMagic(normalizedCode, teamId)
+  const myVoteState = useCaptainVote(normalizedCode, playerState.data?.id ?? '')
+  const voteProgressState = useTeamCaptainVoteProgress(normalizedCode, teamId)
+  const guardianNamesState = useAllTeamGuardianNames(normalizedCode)
+  const [voteBusy, setVoteBusy] = useState(false)
+  const [voteError, setVoteError] = useState('')
+  const [nameDraft, setNameDraft] = useState('')
+  const [nameBusy, setNameBusy] = useState(false)
+  const [nameError, setNameError] = useState('')
+  const [nameNotice, setNameNotice] = useState('')
+
+  // Milestone 4.1: team captain election. magicHolderPlayerId is null while voting is open —
+  // isHolder in MagicPanel already goes false for everyone while it's null, which is what
+  // naturally hides chooseStartingItem until a captain exists.
+  const captainId = magicState.data?.magicHolderPlayerId ?? null
+  const electionAttempt = magicState.data?.captainElectionAttempt ?? 0
+  const votedCount = voteProgressState.data.filter((entry) => entry.electionAttempt === electionAttempt).length
+  const rosterSize = rosterState.data?.members.length ?? 0
+  const myVote = myVoteState.data && myVoteState.data.electionAttempt === electionAttempt ? myVoteState.data.targetPlayerId : null
+  // Item 6: guardian team name — captain-editable, teacher-resettable/overridable. teamId is
+  // scoped from playerState.data.teamId above, so this always looks up the caller's own team.
+  const guardianName = guardianNamesState.data.find((entry) => entry.teamId === teamId)?.name ?? null
+  const isCaptain = captainId != null && captainId === playerState.data?.id
+
+  const castVote = async (targetPlayerId: string): Promise<void> => {
+    const player = playerState.data
+    if (!player || voteBusy) return
+    // Friendly pre-check against the already-loaded (broadly-readable) team roster — a student's
+    // own player doc read never covers a teammate's, so this can't be re-validated by reading
+    // the target's private player doc. Firestore Rules remain the authoritative check on write.
+    if (!rosterState.data?.members.some((member) => member.playerId === targetPlayerId)) {
+      setVoteError('โหวตได้เฉพาะสมาชิกในทีมของคุณเอง')
+      return
+    }
+    setVoteBusy(true)
+    setVoteError('')
+    try {
+      await service.castCaptainVote(normalizedCode, player.id, targetPlayerId)
+    } catch (reason) {
+      setVoteError(friendlyError(reason))
+    } finally {
+      setVoteBusy(false)
+    }
+  }
+
+  // Item 6: guardian team name — only the finalized captain may submit/edit it (mirrored by
+  // firestore.rules' teamNames block, which checks the same magicHolderPlayerId ownership).
+  const submitTeamName = async (): Promise<void> => {
+    const player = playerState.data
+    if (!player || !teamId || nameBusy) return
+    setNameBusy(true)
+    setNameError('')
+    setNameNotice('')
+    try {
+      await service.setTeamGuardianName(normalizedCode, teamId, player.id, nameDraft)
+      setNameDraft('')
+      setNameNotice('ตั้งชื่อทีมแล้ว')
+    } catch (reason) {
+      setNameError(friendlyError(reason))
+    } finally {
+      setNameBusy(false)
+    }
+  }
 
   useEffect(() => {
     if (!roomState.data || !playerState.data) return
@@ -63,19 +127,90 @@ export const LobbyPage = () => {
                 <p className="mt-2 text-[#d8d1c5]">รอครูจัดทีม</p>
               ) : rosterState.data ? (
                 <>
-                  <h2 className="mt-2 text-2xl font-semibold text-[#fff7df]">{rosterState.data.teamName}</h2>
+                  <h2 className="mt-2 text-2xl font-semibold text-[#fff7df]">{guardianName ?? rosterState.data.teamName}</h2>
+                  {guardianName ? <p className="text-xs text-[#8b8377]">{rosterState.data.teamName}</p> : null}
                   <p className="mt-1 text-sm text-[#c0b7ab]">สมาชิก {rosterState.data.members.length} คน</p>
                   <p className={`mt-2 text-sm ${room.teamsLocked ? 'text-[#7fdc9d]' : 'text-[#f2d58d]'}`}>
                     {room.teamsLocked ? 'ยืนยันทีมแล้ว' : 'ทีมชั่วคราว — ครูยังสามารถสุ่มใหม่ได้'}
                   </p>
+                  {captainId ? (
+                    // Milestone 4.1: the captain announcement, per the exact required text —
+                    // stays visible (not a one-time dismissible toast) since "who is captain"
+                    // is a stable fact, not a transient event.
+                    <div className="mt-4 rounded-xl border border-[#e2bd65]/40 bg-[#3a2a12]/30 p-3 text-left text-sm">
+                      <p className="font-semibold text-[#f2d58d]">
+                        👑 หัวหน้าทีมของคุณคือ {rosterState.data.members.find((member) => member.playerId === captainId)?.displayName ?? '-'}
+                      </p>
+                      <p className="mt-1 text-xs text-[#d8d1c5]">ได้รับสิทธิ์ถือคทา เลือกไอเทม และบริหารมนตราของทีม</p>
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-sm text-[#f2d58d]" aria-live="polite">
+                      โหวตแล้ว {votedCount}/{rosterSize} คน
+                    </p>
+                  )}
+
+                  {/* Item 6: guardian team name — required once a captain is finalized; only
+                      the captain may submit/edit it (mirrored by firestore.rules' teamNames
+                      block, which checks the same magicHolderPlayerId ownership). */}
+                  {captainId ? (
+                    <div className="mt-4 rounded-xl border border-[#e2bd65]/40 bg-[#3a2a12]/30 p-3 text-left text-sm">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-[#b6ab9e]">ชื่อทีมผู้พิทักษ์</p>
+                      {isCaptain ? (
+                        <>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              className="team-name-input"
+                              placeholder={guardianName ? 'แก้ไขชื่อทีม' : 'ตั้งชื่อทีมของคุณ'}
+                              value={nameDraft}
+                              maxLength={TEAM_GUARDIAN_NAME_MAX_LENGTH}
+                              onChange={(event) => setNameDraft(event.target.value)}
+                              aria-label="ตั้งชื่อทีมผู้พิทักษ์"
+                            />
+                            <button type="button" className="copy-button" onClick={() => void submitTeamName()} disabled={nameBusy || !nameDraft.trim()}>
+                              {nameBusy ? 'กำลังบันทึก...' : guardianName ? 'แก้ไข' : 'ยืนยันชื่อทีม'}
+                            </button>
+                          </div>
+                          <small className="mt-1 block text-[#8b8377]">{TEAM_GUARDIAN_NAME_MIN_LENGTH}-{TEAM_GUARDIAN_NAME_MAX_LENGTH} ตัวอักษร ต้องไม่ซ้ำกับทีมอื่นในห้อง</small>
+                          {guardianName ? <p className="mt-2 text-[#fff7df]">ชื่อปัจจุบัน: <strong>{guardianName}</strong></p> : null}
+                          {nameError ? <p className="error-message mt-2" role="alert">{nameError}</p> : null}
+                          {nameNotice && !nameError ? <p className="success-message mt-2" role="status">{nameNotice}</p> : null}
+                        </>
+                      ) : guardianName ? (
+                        <p className="mt-1 text-[#fff7df]">{guardianName}</p>
+                      ) : (
+                        <p className="mt-1 text-[#c6baa7]">รอหัวหน้าทีมตั้งชื่อทีม</p>
+                      )}
+                    </div>
+                  ) : null}
+
                   <ul className="mt-4 space-y-1 text-left text-sm">
-                    {rosterState.data.members.map((member) => (
-                      <li key={member.playerId} className="flex items-center justify-between border-t border-white/10 py-1.5">
-                        <span>{member.displayName}</span>
-                        {member.playerId === player.id ? <span className="text-xs font-semibold text-[#f2d58d]">คุณ</span> : null}
-                      </li>
-                    ))}
+                    {rosterState.data.members.map((member) => {
+                      const isCaptain = member.playerId === captainId
+                      const isMyPick = myVote === member.playerId
+                      return (
+                        <li key={member.playerId} className="flex items-center justify-between gap-3 border-t border-white/10 py-1.5">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate">{member.displayName}</span>
+                            {member.playerId === player.id ? <span className="text-xs font-semibold text-[#f2d58d]">คุณ</span> : null}
+                            {isCaptain ? <span className="text-xs font-semibold text-[#f2d58d]" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
+                          </span>
+                          {!captainId ? (
+                            <button
+                              type="button"
+                              className={`copy-button ${isMyPick ? 'choice-selected' : ''}`}
+                              onClick={() => void castVote(member.playerId)}
+                              disabled={voteBusy}
+                              aria-pressed={isMyPick}
+                            >
+                              {isMyPick ? '✓ โหวตแล้ว' : 'โหวต'}
+                            </button>
+                          ) : null}
+                        </li>
+                      )
+                    })}
                   </ul>
+                  {voteError ? <p className="error-message mt-3" role="alert">{voteError}</p> : null}
                 </>
               ) : (
                 // player.teamId has arrived but the roster listener hasn't delivered its first
@@ -97,6 +232,7 @@ export const LobbyPage = () => {
                 roomStatus={room.status}
                 roomCode={normalizedCode}
                 currentRound={room.currentRound}
+                currentQuestionIndex={room.currentQuestionIndex}
                 events={[]}
                 canActivateNow={false}
                 affectedQuestionIndex={null}

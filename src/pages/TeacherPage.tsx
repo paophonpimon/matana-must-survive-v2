@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { BossResultDetails } from '../components/BossResultDetails'
+import { GrimoireModal } from '../components/GrimoireModal'
 import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
+import { MagicItemIcon } from '../components/MagicItemIcon'
 import { useGame } from '../context/GameContext'
-import { useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
+import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { resolveTeacherRoomSession } from '../lib/game'
-import { computeTeamCompetitionStats, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES } from '../lib/magic'
-import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats } from '../lib/teamScoring'
+import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
+import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
 import { friendlyError } from '../services'
-import { getTeacherSession, saveTeacherSession } from '../services/sessionStorage'
-import type { Player } from '../types/game'
+import { getTeacherSession, hasShownMagicPopup, markMagicPopupShown, saveTeacherSession } from '../services/sessionStorage'
+import { createEmptyMagicInventory, type Player } from '../types/game'
 
 type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | null
 
@@ -135,6 +138,8 @@ export const TeacherPage = () => {
 
   const magicState = useAllTeamMagic(roomCode)
   const magicEventsState = useMagicEvents(roomCode)
+  const captainVoteProgressState = useAllCaptainVoteProgress(roomCode)
+  const guardianNamesState = useAllTeamGuardianNames(roomCode)
 
   // teamStats stays raw (memberCount/submittedCount/correctCount/full-game completion) — the
   // magic-item system must never touch it. competitionStats is the magic-adjusted score shown
@@ -165,15 +170,70 @@ export const TeacherPage = () => {
     [playersState.data, roomState.data?.teams, currentQuestionId],
   )
   const teamNameById = useMemo(() => new Map((roomState.data?.teams ?? []).map((team) => [team.id, team.name])), [roomState.data?.teams])
+  // Item 6: guardian name (once a captain sets one) replaces the generic "ทีม N" label
+  // everywhere on this screen — teamNameById above stays the "ทีม N" fallback source, never
+  // itself replaced, so guardianDisplayName always has something to fall back to.
+  const guardianNameById = useMemo(() => new Map(guardianNamesState.data.map((entry) => [entry.teamId, entry.name])), [guardianNamesState.data])
+  // Merged lookup ("ทีม N" fallback under a guardian name once set) so every existing
+  // `teamNameById.get(...)` call site (including the standalone IndividualResultsTable
+  // component below, which receives this as a prop) picks up guardian names automatically.
+  const displayTeamNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    teamNameById.forEach((fallbackName, teamId) => map.set(teamId, guardianNameById.get(teamId) ?? fallbackName))
+    return map
+  }, [teamNameById, guardianNameById])
+  const guardianDisplayName = (teamId: string): string => displayTeamNameById.get(teamId) ?? teamId
   const magicByTeamId = useMemo(() => new Map(magicState.data.map((magic) => [magic.teamId, magic])), [magicState.data])
   const playerNameById = useMemo(() => new Map(playersState.data.map((player) => [player.id, player.displayName])), [playersState.data])
+  // Milestone 4.1: only counts progress entries matching the team's CURRENT election attempt —
+  // a stale entry from before a reopen/reset is simply never counted again (see
+  // captainElectionAttempt's doc comment in types/game.ts).
+  const votedCountByTeam = useMemo(() => {
+    const counts = new Map<string, number>()
+    captainVoteProgressState.data.forEach((entry) => {
+      const magic = magicByTeamId.get(entry.teamId)
+      if (!magic || entry.electionAttempt !== magic.captainElectionAttempt) return
+      counts.set(entry.teamId, (counts.get(entry.teamId) ?? 0) + 1)
+    })
+    return counts
+  }, [captainVoteProgressState.data, magicByTeamId])
+
+  // Item 1 (follow-up): incoming (still-queued, unresolved) score_seal count per team this
+  // round — was previously only computed inline inside the (now-removed) per-team card map;
+  // memoized here since the scoreboard row now needs it too, alongside the lower history log.
+  // questionIndex tracks the soonest affected question per team — used to tell whether the
+  // badge should read "queued" (ข้อต่อไป) or "active" (กำลังมีผลในข้อนี้), same distinction
+  // MagicPanel's incomingSealSummaries already makes on the student side.
+  const incomingSealCountByTeam = useMemo(() => {
+    const counts = new Map<string, { count: number; questionIndex: number }>()
+    magicEventsState.data.forEach((event) => {
+      if (event.round !== roomState.data?.currentRound || event.status !== 'queued' || event.itemType !== 'score_seal' || !event.targetTeamId || event.affectedQuestionIndex == null) return
+      const existing = counts.get(event.targetTeamId)
+      counts.set(event.targetTeamId, {
+        count: (existing?.count ?? 0) + 1,
+        questionIndex: existing ? Math.min(existing.questionIndex, event.affectedQuestionIndex) : event.affectedQuestionIndex,
+      })
+    })
+    return counts
+  }, [magicEventsState.data, roomState.data?.currentRound])
 
   const highestAverage = competitionStats[0]?.competitionAverage ?? 0
   const overallAverage = competitionStats.length > 0 ? competitionStats.reduce((total, team) => total + team.competitionAverage, 0) / competitionStats.length : 0
   const leadingTeams = competitionStats.filter((team) => team.memberCount > 0 && team.competitionAverage === highestAverage)
-  const leadingTeamLabel = leadingTeams.length > 1 ? `${leadingTeams.length} ทีมคะแนนเท่ากัน` : leadingTeams[0]?.name ?? '-'
+  const leadingTeamLabel = leadingTeams.length > 1 ? `${leadingTeams.length} ทีมคะแนนเท่ากัน` : (leadingTeams[0] ? guardianDisplayName(leadingTeams[0].id) : '-')
   const podiumFollowers = competitionStats.filter((team) => team.competitionAverage < highestAverage).slice(0, 2)
   const unassignedCount = sortedPlayers.filter((player) => player.teamId == null).length
+  // Milestone 4.1: mirrors startRoom's own server-side gate, purely for a clearer disabled
+  // button + helper message — the service call remains the actual enforcement.
+  const teamsWithoutCaptain = (roomState.data?.teams ?? []).filter((team) => magicByTeamId.get(team.id)?.magicHolderPlayerId == null)
+  // Item 6: same "clearer disabled button" purpose as teamsWithoutCaptain above — the actual
+  // enforcement is startRoom's own precondition check (firebaseService.ts/demoService.ts).
+  const teamsWithoutName = (roomState.data?.teams ?? []).filter((team) => !(guardianNameById.get(team.id) ?? '').trim())
+  // This precondition already existed server-side (startRoom throws if any team never chose a
+  // starting item) but was never mirrored into the button's disabled condition until now —
+  // completing it here alongside the name check, per the requirement that all three
+  // (captain + name + item) gate game start together.
+  const teamsWithoutStartingItem = (roomState.data?.teams ?? []).filter((team) => !hasAnyMagicItem(magicByTeamId.get(team.id)?.inventory ?? createEmptyMagicInventory()))
 
   // Milestone 2.2: teacher early-reveal / manual-advance controls. "All answered" only
   // considers currently-registered players (sortedPlayers), matching currentQuestionStats.
@@ -215,7 +275,11 @@ export const TeacherPage = () => {
   // bossQuestionDurationSeconds, questionClosedAt: null} object (boss has no early-close).
   useEffect(() => {
     const room = roomState.data
-    if (!room || room.status !== 'playing' || room.phase !== 'boss') return
+    // Item 5: bossAwaitingContinue is the pause gate — once the 3rd boss question resolves and
+    // sets it, this polling effect must stop ticking (belt-and-suspenders with the service-side
+    // guard in advanceBossQuestion) so nothing re-fires while the room waits for the teacher's
+    // explicit "เล่นต่อ" (continueAfterBoss is the only method that ever clears it).
+    if (!room || room.status !== 'playing' || room.phase !== 'boss' || room.bossAwaitingContinue) return
     const bossKey = `${room.currentRound}-boss-${room.bossQuestionIndex}`
     if (advancingBossQuestion.current.key && advancingBossQuestion.current.key !== bossKey) advancingBossQuestion.current = { key: '', attemptedAt: 0 }
     const tick = (): void => {
@@ -234,6 +298,191 @@ export const TeacherPage = () => {
     const intervalId = window.setInterval(tick, 250)
     return () => window.clearInterval(intervalId)
   }, [roomCode, roomState.data, service, teacherSessionId])
+
+  // Milestone 4.1: "when all members of a team have voted, finalize that team automatically" —
+  // driven by the TEACHER's client polling vote progress (mirroring how main-question/boss
+  // auto-advance are already teacher-client-driven), not by the last voter's own write — see
+  // firestore.rules' doc comment on magic/{teamId} for why a student-triggered finalize could
+  // never be safely validated there. finalizingCaptain guards against firing a second
+  // finalizeCaptainElection call for the same team while an earlier one is still in flight.
+  const finalizingCaptain = useRef<Record<string, boolean>>({})
+  useEffect(() => {
+    const room = roomState.data
+    if (!room || room.status !== 'waiting' || !room.teamsLocked) return
+    room.teams.forEach((team) => {
+      const magic = magicByTeamId.get(team.id)
+      if (!magic || magic.magicHolderPlayerId != null) return
+      const memberCount = teamStatsById.get(team.id)?.memberCount ?? 0
+      const votedCount = votedCountByTeam.get(team.id) ?? 0
+      if (memberCount === 0 || votedCount < memberCount) return
+      if (finalizingCaptain.current[team.id]) return
+      finalizingCaptain.current[team.id] = true
+      void service.finalizeCaptainElection(roomCode, teacherSessionId, team.id)
+        .catch((reason) => setError(friendlyError(reason)))
+        .finally(() => { finalizingCaptain.current[team.id] = false })
+    })
+  }, [roomState.data, magicByTeamId, teamStatsById, votedCountByTeam, roomCode, service, teacherSessionId])
+
+  // Milestone 4.1: manual "finalize early" (for teams with missing voters) and "reopen/reset the
+  // election" — both teacher-only, both usable only before the game starts.
+  const handleFinalizeCaptain = async (teamId: string): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      await service.finalizeCaptainElection(roomCode, teacherSessionId, teamId)
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleResetCaptain = async (teamId: string): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      await service.resetCaptainElection(roomCode, teacherSessionId, teamId)
+      setNotice('รีเซ็ตการเลือกตั้งหัวหน้าทีมแล้ว')
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Item 6 follow-up: the boss-result popup modal is gone — the teacher now sees the same
+  // inline "ศึกด่านชิงมนตราจบแล้ว" result screen the student does (rendered further down, in
+  // place of the old small .boss-winner-pill), driven directly by room.bossAwaitingContinue via
+  // the normal realtime room subscription. There is no local "is the popup open" state left to
+  // manage or restore on refresh — a reload just re-renders off the current field value, exactly
+  // like GamePage.
+  //
+  // iPad UX fix: this replaces the dashboard in place (same route, no navigation), so the browser
+  // never resets scroll position on its own. A teacher who had scrolled down through a long
+  // scoreboard/team list would land on the SAME scroll offset once this screen swaps in — on a
+  // shorter page that can put the result and the "เล่นต่อ" button entirely above the fold,
+  // contradicting "prominent." Scrolls to the top only on the false->true rising edge (never on
+  // every render while still awaiting, so it can't fight the teacher's own scrolling while they're
+  // reading the result) and never fires for any other state change, so ordinary scrolling
+  // elsewhere on this page is untouched.
+  const wasBossAwaitingContinue = useRef(false)
+  useEffect(() => {
+    const isAwaiting = roomState.data?.bossAwaitingContinue ?? false
+    if (isAwaiting && !wasBossAwaitingContinue.current) {
+      window.scrollTo(0, 0)
+    }
+    wasBossAwaitingContinue.current = isAwaiting
+  }, [roomState.data?.bossAwaitingContinue])
+
+  //
+  // Guards a rapid double-click from firing two overlapping continueAfterBoss calls (the
+  // service call is itself idempotent/safe either way — this just avoids a redundant request).
+  // continuingBossRef is checked/set synchronously inside the handler (a ref read is never
+  // stale the way a state read inside a closure could be); continuingBossBusy is the reactive
+  // twin that actually drives the button's disabled/label state.
+  const continuingBossRef = useRef(false)
+  const [continuingBossBusy, setContinuingBossBusy] = useState(false)
+  const handleContinueAfterBoss = (): void => {
+    const room = roomState.data
+    if (!room || continuingBossRef.current) return
+    continuingBossRef.current = true
+    setContinuingBossBusy(true)
+    setError('')
+    void service.continueAfterBoss(roomCode, teacherSessionId, room.currentRound)
+      .catch((reason) => setError(friendlyError(reason)))
+      .finally(() => { continuingBossRef.current = false; setContinuingBossBusy(false) })
+  }
+
+  // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
+  // magicEvents subscription the "ประวัติล่าสุด" log already reads, queues a popup for every
+  // newly-observed event, deduped via sessionStorage with a "teacher:" prefix so this never
+  // collides with the student toast's dedup keys for the same event id (see MagicPanel.tsx).
+  //
+  // Root-cause fix: this used to fire on 'applied'/'blocked' only — but those outcomes are set
+  // by computeMagicResolution at QUESTION RESOLUTION time (advanceQuestion/closeQuestionEarly),
+  // not at activation. That made the teacher's popup appear a full question-cycle after the
+  // student had already seen their own 'queued'-triggered toast. 'queued' is the status written
+  // atomically with the activation itself (see magicEvents' firestore.rules create rule), so
+  // firing on it here is what makes "teacher popup appears immediately on activation" true —
+  // matching the moment students' own toasts already fire on (MagicPanel keys the exact same
+  // 'queued' status for power_surge/illusion/incoming-seal). 'blocked' is kept as a second,
+  // genuinely later trigger — a shield defending is only known at resolution, so that dramatic
+  // beat legitimately can't fire any earlier than this. 'applied' (a seal/surge resolving
+  // without being blocked) intentionally gets no popup, mirroring the student side, which never
+  // shows one for silent 'applied' resolution either — the 'queued' popup already announced it.
+  const [spellEventQueue, setSpellEventQueue] = useState<Array<MagicEventCopy & { key: string }>>([])
+  const [activeSpellEvent, setActiveSpellEvent] = useState<(MagicEventCopy & { key: string }) | null>(null)
+  useEffect(() => {
+    const relevant = magicEventsState.data.filter((event) => event.status === 'queued' || event.status === 'blocked')
+    if (relevant.length === 0) return
+    const sorted = [...relevant].sort((a, b) => a.createdAt - b.createdAt)
+    const fresh: Array<MagicEventCopy & { key: string }> = []
+    for (const event of sorted) {
+      const popupKey = `teacher:${event.id}:${event.status}`
+      if (hasShownMagicPopup(roomCode, popupKey)) continue
+      const copy = buildTeacherSpellEventCopy(
+        event,
+        guardianDisplayName(event.sourceTeamId),
+        event.targetTeamId ? guardianDisplayName(event.targetTeamId) : null,
+      )
+      fresh.push({ key: popupKey, ...copy })
+      markMagicPopupShown(roomCode, popupKey)
+    }
+    if (fresh.length > 0) setSpellEventQueue((current) => [...current, ...fresh])
+    // guardianDisplayName intentionally excluded from deps — it's recomputed every render off
+    // stable data (teamNameById/guardianNameById) and including it would re-run this effect on
+    // every render; only new magicEvents/roomCode should trigger a re-scan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [magicEventsState.data, roomCode])
+
+  useEffect(() => {
+    if (activeSpellEvent || spellEventQueue.length === 0) return
+    setActiveSpellEvent(spellEventQueue[0])
+    setSpellEventQueue((current) => current.slice(1))
+  }, [activeSpellEvent, spellEventQueue])
+
+  useEffect(() => {
+    if (!activeSpellEvent) return
+    const timeoutId = window.setTimeout(() => setActiveSpellEvent(null), 5_500)
+    return () => window.clearTimeout(timeoutId)
+  }, [activeSpellEvent])
+
+  // Grimoire access point — purely local UI state, never touches room/service state, so opening
+  // it can't pause the timer or alter game state (matches the same guarantee MagicPanel's own
+  // grimoire trigger already gives students).
+  const [grimoireOpen, setGrimoireOpen] = useState(false)
+
+  // Item 6: team guardian name — teacher override/reset. Both are teacher-authorized regardless
+  // of captain/election state (see firestore.rules' teamNames block).
+  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({})
+  const handleOverrideTeamName = async (teamId: string): Promise<void> => {
+    const draft = (nameDrafts[teamId] ?? '').trim()
+    if (!draft) return
+    setBusy(true)
+    setError('')
+    try {
+      await service.overrideTeamGuardianName(roomCode, teacherSessionId, teamId, draft)
+      setNameDrafts((current) => ({ ...current, [teamId]: '' }))
+      setNotice('ตั้งชื่อทีมแล้ว')
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleResetTeamName = async (teamId: string): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      await service.resetTeamGuardianName(roomCode, teacherSessionId, teamId)
+      setNotice('รีเซ็ตชื่อทีมแล้ว')
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   // Milestone 2.2: manual "ไปข้อถัดไปทันที" — shares the SAME advancingQuestion ref/debounce as
   // the automatic tick effect above, so a manual click and the automatic timer can never both
@@ -474,18 +723,39 @@ export const TeacherPage = () => {
 
             {(error || (notice && !broadcastMode && !finalMode)) ? <div className={error ? 'error-message mt-4' : 'success-message mt-4'} role="status">{error || notice}</div> : null}
 
-            {/* Milestone 4: "announce the winner and reward on every screen" — persists for the
-                rest of the round (not auto-dismissed like the student toast) since this screen
-                is often the one projected for the whole class. */}
-            {roomState.data.bossCompleted && roomState.data.bossWinner ? (
-              <section className="winner-card mt-4" aria-live="polite">
-                <small>🏆 ผู้พิชิตด่านชิงมนตรา</small>
-                <strong>
-                  {roomState.data.bossWinner.displayName} จากทีม{roomState.data.bossWinner.teamName ?? '-'}
-                  {' — '}ตอบถูก {roomState.data.bossWinner.correctCount}/3 ใช้เวลา {(roomState.data.bossWinner.totalTimeMs / 1_000).toFixed(2)} วินาที
-                  {' — '}ทีมได้รับ {MAGIC_ITEM_INFO[roomState.data.bossWinner.rewardItemType].label}เพิ่ม 1 ครั้ง
-                </strong>
+            {/* Item 6 follow-up: replaces the old popup modal. While bossAwaitingContinue is
+                true, this prominent inline screen — the same BossResultDetails content the
+                student sees — takes over with a big "เล่นต่อ" button; the room stays paused
+                (timer stopped, no next-question entry for any client) until the teacher presses
+                it. A refresh lands right back here for free (driven by the normal room
+                subscription, no separate "is this open" state). Once continued, this collapses
+                back to the small persistent history pill for the rest of the round, exactly as
+                before. */}
+            {roomState.data.bossAwaitingContinue && roomState.data.bossWinner ? (
+              <section className="boss-result-inline mt-4" aria-live="polite">
+                <p className="eyebrow">🏆 ผู้พิชิตด่านชิงมนตรา</p>
+                <h2 className="mt-2 text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h2>
+                <BossResultDetails
+                  winner={roomState.data.bossWinner}
+                  guardianTeamName={roomState.data.bossWinner.teamId ? guardianDisplayName(roomState.data.bossWinner.teamId) : roomState.data.bossWinner.teamName ?? '-'}
+                />
+                <button type="button" className="primary-button boss-result-continue-button mt-5" onClick={handleContinueAfterBoss} disabled={continuingBossBusy} autoFocus>
+                  {continuingBossBusy ? 'กำลังดำเนินการ...' : 'เล่นต่อ'}
+                </button>
               </section>
+            ) : roomState.data.bossAwaitingContinue ? (
+              // Rare tie/no-winner case: still pause and still require an explicit continue, but
+              // there is no winner to show yet.
+              <section className="boss-result-inline mt-4" aria-live="polite">
+                <h2 className="text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h2>
+                <button type="button" className="primary-button boss-result-continue-button mt-5" onClick={handleContinueAfterBoss} disabled={continuingBossBusy} autoFocus>
+                  {continuingBossBusy ? 'กำลังดำเนินการ...' : 'เล่นต่อ'}
+                </button>
+              </section>
+            ) : roomState.data.bossCompleted && roomState.data.bossWinner ? (
+              <p className="boss-winner-pill mt-4" aria-live="polite">
+                🏆 {roomState.data.bossWinner.displayName} ({roomState.data.bossWinner.teamId ? guardianDisplayName(roomState.data.bossWinner.teamId) : '-'})
+              </p>
             ) : null}
 
             {finalMode && teamStats.length > 0 ? (
@@ -500,7 +770,7 @@ export const TeacherPage = () => {
                   <div className={`champion-team-list ${leadingTeams.length > 1 ? 'champion-team-list-tied' : ''}`}>
                     {leadingTeams.map((team) => (
                       <div className="champion-team" key={team.id}>
-                        <strong>{team.name}</strong>
+                        <strong>{guardianDisplayName(team.id)}</strong>
                         <span>{sortedPlayers.filter((player) => player.teamId === team.id).map((player) => player.displayName).join(', ')}</span>
                       </div>
                     ))}
@@ -513,7 +783,7 @@ export const TeacherPage = () => {
                         return (
                           <article className={`podium-place podium-place-${Math.min(rank, 3)}`} key={team.id}>
                             <RankEmblem rank={rank} leading={false} />
-                            <div><small>อันดับที่ {rank}</small><strong>{team.name}</strong><span>{team.memberCount} คน</span></div>
+                            <div><small>อันดับที่ {rank}</small><strong>{guardianDisplayName(team.id)}</strong><span>{team.memberCount} คน</span></div>
                             <b>{team.competitionAverage.toFixed(1)}<span>เฉลี่ย</span></b>
                           </article>
                         )
@@ -526,7 +796,12 @@ export const TeacherPage = () => {
 
             <div className={`teacher-dashboard mt-6 grid items-start gap-6 ${finalMode ? 'teacher-final-dashboard ' : ''}${broadcastMode ? '' : 'lg:grid-cols-[1.45fr_0.75fr]'}`}>
               <section className={`glass-panel teacher-scoreboard overflow-hidden ${broadcastMode ? 'teacher-scoreboard-live' : ''}`}>
-                <div className="scoreboard-header">
+                {/* Item 3: header is centered while playing (LIVE badge sits directly under the
+                    title, not pinned top-right) — the close/reveal/advance-now controls used to
+                    live in this row's top-right corner; they've moved to .scoreboard-action-row
+                    at the bottom of this section, beside หยุดเกม, so this header is just the
+                    title + a status indicator, not a control cluster. */}
+                <div className={`scoreboard-header ${roomState.data.status === 'playing' ? 'scoreboard-header-centered' : ''}`}>
                   <div>
                     <p className="eyebrow">
                       {roomState.data.status === 'playing' ? 'คะแนนสดแบบเรียลไทม์' : finalMode ? 'สรุปผลภารกิจ' : 'รายชื่อผู้เข้าร่วม'}
@@ -534,16 +809,7 @@ export const TeacherPage = () => {
                     <h2>{roomState.data.status === 'waiting' ? 'ผู้เล่นและทีม' : 'กระดานคะแนนทุกทีม'}</h2>
                   </div>
                   {roomState.data.status === 'playing' ? (
-                    <div className="broadcast-header-actions">
-                      <span className="live-score-pill"><i />LIVE</span>
-                      {canCloseQuestionEarly ? (
-                        <button className="secondary-button" type="button" onClick={handleCloseQuestionEarly}>ปิดรับคำตอบและเฉลยทันที</button>
-                      ) : null}
-                      {canAdvanceNow ? (
-                        <button className="secondary-button" type="button" onClick={handleAdvanceNow}>ไปข้อถัดไปทันที</button>
-                      ) : null}
-                      <button className="emergency-stop-button" type="button" onClick={() => setConfirmAction('stop')} disabled={busy}>หยุดเกม</button>
-                    </div>
+                    <span className="live-score-pill"><i />LIVE</span>
                   ) : finalMode ? (
                     <div className="broadcast-header-actions" role="tablist" aria-label="มุมมองผลคะแนน">
                       <button type="button" className={resultsTab === 'team' ? 'live-score-pill' : 'copy-button'} onClick={() => setResultsTab('team')} aria-pressed={resultsTab === 'team'}>ทีม</button>
@@ -604,9 +870,9 @@ export const TeacherPage = () => {
                           </div>
                           <span className="team-status team-status-waiting">
                             {roomState.data?.teamsLocked
-                              ? teamNameById.get(player.teamId ?? '') ?? 'ยังไม่ได้จัดทีม'
+                              ? displayTeamNameById.get(player.teamId ?? '') ?? 'ยังไม่ได้จัดทีม'
                               : player.teamId
-                                ? `${teamNameById.get(player.teamId) ?? ''} (ยังไม่ล็อก)`
+                                ? `${displayTeamNameById.get(player.teamId) ?? ''} (ยังไม่ล็อก)`
                                 : 'ยังไม่ได้จัดทีม'}
                           </span>
                         </li>
@@ -614,7 +880,7 @@ export const TeacherPage = () => {
                     </ol>
                   )
                 ) : showIndividualResults ? (
-                  <IndividualResultsTable players={sortedPlayers} questionIds={roomState.data.questionIds} teamNameById={teamNameById} />
+                  <IndividualResultsTable players={sortedPlayers} questionIds={roomState.data.questionIds} teamNameById={displayTeamNameById} />
                 ) : competitionStats.length === 0 ? (
                   <div className="empty-state">
                     <div aria-hidden="true">✦</div>
@@ -630,7 +896,10 @@ export const TeacherPage = () => {
                         <li key={team.id} className={`scoreboard-row ${isLeader ? 'scoreboard-row-leading' : ''}`}>
                           <RankEmblem rank={index + 1} leading={isLeader} />
                           <div className="scoreboard-team">
-                            <strong>{team.name}</strong>
+                            <span className="flex flex-wrap items-baseline gap-x-2">
+                              <strong>{guardianDisplayName(team.id)}</strong>
+                              {guardianNameById.get(team.id) ? <small className="text-[#8b8377]">{team.name}</small> : null}
+                            </span>
                             <small>
                               {team.memberCount} คน
                               {roomState.data?.status === 'playing' ? ` · ตอบแล้ว ${currentQuestionCount}/${team.memberCount}` : ''}
@@ -638,6 +907,42 @@ export const TeacherPage = () => {
                               {' · ถูก '}{fullGame?.correctCount ?? 0} ข้อ
                             </small>
                             <div className="scoreboard-progress" aria-label={`เล่นจบแล้ว ${fullGame?.submittedCount ?? 0} จาก ${team.memberCount} คน`}><i style={{ width: `${team.memberCount > 0 ? ((fullGame?.submittedCount ?? 0) / team.memberCount) * 100 : 0}%` }} /></div>
+                            {/* Item 1 (follow-up): current magic status lives directly on the
+                                scoreboard row now — the teacher reads every team's active/queued
+                                effect here without scrolling to the (now history-only) section
+                                below. Playing-only: queuedEffect/incoming seals only ever exist
+                                once the room is 'playing'. */}
+                            {roomState.data?.status === 'playing' ? (() => {
+                              const magic = magicByTeamId.get(team.id)
+                              const incomingSeal = incomingSealCountByTeam.get(team.id)
+                              const hasShield = (magic?.inventory.rose_shield.available ?? 0) > 0
+                              const currentQuestionIndex = roomState.data?.currentQuestionIndex ?? 0
+                              if (!magic?.queuedEffect && !incomingSeal && !hasShield) return null
+                              return (
+                                <div className="magic-status-badges" role="list" aria-label="สถานะมนตราปัจจุบัน">
+                                  {magic?.queuedEffect ? (() => {
+                                    const phaseLabel = getMagicEffectPhase(magic.queuedEffect.affectedQuestionIndex, currentQuestionIndex) === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'
+                                    const itemLabel = magic.queuedEffect.itemType === 'power_surge' ? 'x2' : magic.queuedEffect.itemType === 'illusion' ? 'มายา' : `ผนึก ${displayTeamNameById.get(magic.queuedEffect.targetTeamId) ?? '-'}`
+                                    return (
+                                      <span className={`magic-badge magic-badge-${magic.queuedEffect.itemType === 'power_surge' ? 'surge' : magic.queuedEffect.itemType === 'illusion' ? 'illusion' : 'seal'}`} role="listitem">
+                                        <MagicItemIcon itemType={magic.queuedEffect.itemType} size="sm" />
+                                        {itemLabel} {phaseLabel}
+                                      </span>
+                                    )
+                                  })() : null}
+                                  {incomingSeal ? (
+                                    <span className="magic-badge magic-badge-seal" role="listitem">
+                                      <MagicItemIcon itemType="score_seal" size="sm" /> เหลือ {formatHostilePercent(computeHostileMultiplier(incomingSeal.count))}% {getMagicEffectPhase(incomingSeal.questionIndex, currentQuestionIndex) === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'}
+                                    </span>
+                                  ) : null}
+                                  {hasShield ? (
+                                    <span className="magic-badge magic-badge-shield" role="listitem">
+                                      <MagicItemIcon itemType="rose_shield" size="sm" /> ป้องกันอัตโนมัติได้อีก {magic?.inventory.rose_shield.available} ครั้ง
+                                    </span>
+                                  ) : null}
+                                </div>
+                              )
+                            })() : null}
                           </div>
                           <span className={`team-status team-status-${finalMode ? (roomState.data?.status === 'closed' ? 'stopped' : 'submitted') : 'playing'}`}>
                             {finalMode ? (roomState.data?.status === 'closed' ? 'สรุปแล้ว' : 'จบรอบแล้ว') : 'กำลังเล่น'}
@@ -648,6 +953,22 @@ export const TeacherPage = () => {
                     })}
                   </ol>
                 )}
+                {/* Item 3: bottom action row — close/reveal-now and advance-now moved out of the
+                    header, alongside หยุดเกม (kept visually destructive via
+                    .emergency-stop-button). Only rendered while playing, since the controls
+                    aside below (which used to hold the room-level "ยุติห้อง") is hidden during
+                    broadcastMode — this is the only destructive control visible mid-game. */}
+                {roomState.data.status === 'playing' ? (
+                  <div className="scoreboard-action-row">
+                    {canCloseQuestionEarly ? (
+                      <button className="secondary-button" type="button" onClick={handleCloseQuestionEarly}>ปิดรับคำตอบและเฉลยทันที</button>
+                    ) : null}
+                    {canAdvanceNow ? (
+                      <button className="secondary-button" type="button" onClick={handleAdvanceNow}>ไปข้อถัดไปทันที</button>
+                    ) : null}
+                    <button className="emergency-stop-button emergency-stop-button-inline" type="button" onClick={() => setConfirmAction('stop')} disabled={busy}>หยุดเกม</button>
+                  </div>
+                ) : null}
               </section>
 
               {!broadcastMode ? <aside className="space-y-5">
@@ -702,10 +1023,22 @@ export const TeacherPage = () => {
                           </div>
                           <small>กำหนดได้ตั้งแต่ 5 วินาทีถึง 10 นาที ทุกคนใช้เวลาเท่ากัน</small>
                         </div>
-                        <button className="primary-button w-full" onClick={requestStart} disabled={busy || sortedPlayers.length === 0 || !durationValid || !roomState.data.teamsLocked}>
+                        <button
+                          className="primary-button w-full"
+                          onClick={requestStart}
+                          disabled={busy || sortedPlayers.length === 0 || !durationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
+                        >
                           {roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
                         </button>
-                        {!roomState.data.teamsLocked ? <p className="text-sm text-[#bdb5ac]">ต้องล็อกทีมก่อนจึงจะเริ่มภารกิจได้</p> : null}
+                        {!roomState.data.teamsLocked ? (
+                          <p className="text-sm text-[#bdb5ac]">ต้องล็อกทีมก่อนจึงจะเริ่มภารกิจได้</p>
+                        ) : teamsWithoutCaptain.length > 0 ? (
+                          <p className="text-sm text-[#bdb5ac]">ยังมี {teamsWithoutCaptain.length} ทีมที่ยังไม่ได้เลือกหัวหน้าทีม กรุณาให้สมาชิกโหวตหรือสรุปผลก่อนเริ่มภารกิจ</p>
+                        ) : teamsWithoutName.length > 0 ? (
+                          <p className="text-sm text-[#bdb5ac]">ยังมี {teamsWithoutName.length} ทีมที่ยังไม่ได้ตั้งชื่อทีม กรุณาให้หัวหน้าทีมตั้งชื่อก่อนเริ่มภารกิจ</p>
+                        ) : teamsWithoutStartingItem.length > 0 ? (
+                          <p className="text-sm text-[#bdb5ac]">ยังมี {teamsWithoutStartingItem.length} ทีมที่ยังไม่ได้เลือกไอเทมเริ่มต้น กรุณาให้หัวหน้าทีมเลือกไอเทมก่อนเริ่มภารกิจ</p>
+                        ) : null}
                       </>
                     ) : null}
                     {roomState.data.status === 'completed' ? (
@@ -729,84 +1062,115 @@ export const TeacherPage = () => {
               </aside> : null}
             </div>
 
+            {/* Grimoire access point — always visible once teams exist, regardless of round
+                status or whether any magic event has happened yet (unlike the history log
+                below, which only renders once there's something to show), since it's a pure
+                reference the teacher may want to consult before a single item is ever used. */}
             {roomState.data.teams.length > 0 ? (
-              <section className="glass-panel mt-6 p-5" aria-label="สถานะมนตรา">
-                <p className="eyebrow">สถานะมนตรา</p>
-                <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">ไอเทมประจำทีม</h2>
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  {roomState.data.teams.map((team, index) => {
+              <div className="mt-6 flex justify-end">
+                <button type="button" className="grimoire-trigger-button" onClick={() => setGrimoireOpen(true)}>
+                  📜 คัมภีร์มนตรา
+                </button>
+              </div>
+            ) : null}
+
+            {/* Item 2 (follow-up): the big per-team status cards (score stats, inventory,
+                active-status badges) used to duplicate what the main scoreboard now shows
+                directly on each team row (item 1) — removed here. What's left: the waiting-only
+                team setup controls (captain election + guardian name, which have no scoreboard
+                equivalent and must stay per item 7), a recent-activity history log, and a small
+                icon legend. Information hierarchy is now: scoreboard = current state, this
+                section = setup controls (waiting) + history (always). */}
+            {roomState.data.teams.length > 0 && roomState.data.status === 'waiting' ? (
+              <section className="glass-panel mt-6 p-5" aria-label="ตั้งค่าทีม">
+                <p className="eyebrow">ตั้งค่าทีม</p>
+                <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">หัวหน้าทีมและชื่อทีม</h2>
+                <ul className="mt-4 space-y-3">
+                  {roomState.data.teams.map((team) => {
                     const magic = magicByTeamId.get(team.id)
                     const holderName = magic?.magicHolderPlayerId ? playerNameById.get(magic.magicHolderPlayerId) ?? '-' : '-'
-                    const heldTypes = magic ? MAGIC_ITEM_TYPES.filter((itemType) => magic.inventory[itemType].available > 0 || magic.inventory[itemType].consumed > 0) : []
-                    const competition = competitionStats.find((entry) => entry.id === team.id)
-                    // Milestone 4: incoming (still-queued, unresolved) score_seal count targeting
-                    // this team this round — what makes "buffs, debuffs" visible to the teacher
-                    // before a question actually resolves, not just after.
-                    const incomingSealCount = magicEventsState.data.filter(
-                      (event) => event.round === roomState.data?.currentRound && event.status === 'queued' && event.itemType === 'score_seal' && event.targetTeamId === team.id,
-                    ).length
+                    const memberCount = teamStatsById.get(team.id)?.memberCount ?? 0
+                    const votedCount = votedCountByTeam.get(team.id) ?? 0
+                    const guardianName = guardianNameById.get(team.id)
                     return (
-                      <div key={team.id} className={`text-sm ${index > 0 ? 'border-t border-white/10 pt-4 sm:border-t-0 sm:pt-0' : ''}`}>
-                        <div className="flex items-center justify-between gap-3">
-                          <strong className="text-[#fff7df]">{team.name}</strong>
-                          <span className="text-xs text-[#c0b7ab]">ผู้ถือคทา: {holderName}</span>
+                      <li key={team.id} className="border-t border-white/10 pt-3 text-sm first:border-t-0 first:pt-0">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <span className="flex flex-wrap items-baseline gap-x-2">
+                            <strong className="text-[#fff7df]">{guardianName ?? team.name}</strong>
+                            {guardianName ? <small className="text-[#8b8377]">{team.name}</small> : null}
+                          </span>
+                          {magic?.magicHolderPlayerId ? <span className="magic-badge magic-badge-captain">👑 {holderName}</span> : <span className="text-xs text-[#c0b7ab]">ยังไม่มีหัวหน้าทีม</span>}
                         </div>
-                        {/* Milestone 4: shown separately per the score-scale requirement — knowledge
-                            score (raw, /100), magic adjustment (own x hostile multiplier), and the
-                            resulting competition score (uncapped). */}
-                        <p className="mt-1 text-xs text-[#c0b7ab]">
-                          คะแนนความรู้ {(competition?.rawTotal ?? 0).toFixed(1)}/100 · มนตรา ×{((competition?.competitionTotal ?? 0) / (competition?.rawTotal || 1)).toFixed(2)} · คะแนนแข่งขัน {(competition?.competitionTotal ?? 0).toFixed(1)}
-                        </p>
-                        <ul className="mt-2 space-y-0.5">
-                          {heldTypes.length === 0 ? (
-                            <li className="text-[#8b8377]">ยังไม่มีไอเทม</li>
-                          ) : heldTypes.map((itemType) => {
-                            const entry = magic?.inventory[itemType]
-                            return (
-                              <li key={itemType} className="text-[#fff7df]">
-                                {MAGIC_ITEM_INFO[itemType].label} — พร้อมใช้ {entry?.available ?? 0}
-                                {entry && entry.consumed > 0 ? <span className="text-[#8b8377]">{` · ใช้ไปแล้ว ${entry.consumed}`}</span> : null}
-                              </li>
-                            )
-                          })}
-                        </ul>
-                        {magic?.queuedEffect ? (
-                          <p className="mt-2 text-xs text-[#f2d58d]">
-                            กำลังใช้ {MAGIC_ITEM_INFO[magic.queuedEffect.itemType].label} เป้าหมาย {teamNameById.get(magic.queuedEffect.targetTeamId) ?? '-'} · มีผลข้อที่ {magic.queuedEffect.affectedQuestionIndex + 1}
-                          </p>
-                        ) : null}
-                        {incomingSealCount > 0 ? (
-                          <p className="mt-1 text-xs text-[#f3aaa7]">⚠️ กำลังถูกผนึกคะแนน {incomingSealCount} ครั้ง (รอผล)</p>
-                        ) : null}
-                        {magic && magic.inventory.rose_shield.available > 0 ? <p className="mt-1 text-xs text-[#7fdc9d]">พร้อมป้องกันด้วยเกราะกุหลาบ {magic.inventory.rose_shield.available} ชิ้น</p> : null}
-                      </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <input
+                            type="text"
+                            className="team-name-input"
+                            placeholder={guardianName ? 'ตั้งชื่อใหม่ (override)' : 'ตั้งชื่อทีม'}
+                            value={nameDrafts[team.id] ?? ''}
+                            maxLength={TEAM_GUARDIAN_NAME_MAX_LENGTH}
+                            onChange={(event) => setNameDrafts((current) => ({ ...current, [team.id]: event.target.value }))}
+                            aria-label={`ตั้งชื่อทีม ${team.name}`}
+                          />
+                          <button type="button" className="copy-button" onClick={() => void handleOverrideTeamName(team.id)} disabled={busy || !(nameDrafts[team.id] ?? '').trim()}>
+                            {guardianName ? 'แก้ไข' : 'ตั้งชื่อ'}
+                          </button>
+                          {guardianName ? (
+                            <button type="button" className="copy-button" onClick={() => void handleResetTeamName(team.id)} disabled={busy}>รีเซ็ตชื่อ</button>
+                          ) : null}
+                        </div>
+                        <small className="mt-1 block text-[#8b8377]">{TEAM_GUARDIAN_NAME_MIN_LENGTH}-{TEAM_GUARDIAN_NAME_MAX_LENGTH} ตัวอักษร ไทย/อังกฤษ/ตัวเลข</small>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#c0b7ab]">
+                          {!magic?.magicHolderPlayerId ? <span>โหวตแล้ว {votedCount}/{memberCount} คน</span> : null}
+                          {!magic?.magicHolderPlayerId ? (
+                            <button type="button" className="copy-button" onClick={() => void handleFinalizeCaptain(team.id)} disabled={busy || memberCount === 0}>
+                              สรุปผลหัวหน้าทีมตอนนี้
+                            </button>
+                          ) : null}
+                          <button type="button" className="copy-button" onClick={() => void handleResetCaptain(team.id)} disabled={busy}>
+                            รีเซ็ตการเลือกตั้ง
+                          </button>
+                        </div>
+                      </li>
                     )
                   })}
+                </ul>
+              </section>
+            ) : null}
+
+            {magicEventsState.data.length > 0 ? (
+              <section className="glass-panel mt-6 p-5" aria-label="ประวัติมนตรา">
+                <p className="eyebrow">ประวัติ</p>
+                <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">กิจกรรมมนตราล่าสุด</h2>
+                {/* Small, genuinely-useful legend — the scoreboard badges above are icon-first,
+                    so a one-time reference for what each icon means earns its place here rather
+                    than repeating per-team (which would just recreate the removed cards). */}
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#8b8377]">
+                  {MAGIC_ITEM_TYPES.map((itemType) => (
+                    <span key={itemType} className="inline-flex items-center gap-1">
+                      <MagicItemIcon itemType={itemType} size="sm" /> {MAGIC_ITEM_INFO[itemType].label}
+                    </span>
+                  ))}
                 </div>
-                {magicEventsState.data.length > 0 ? (
-                  <div className="mt-5 border-t border-white/10 pt-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-[#b6ab9e]">ประวัติล่าสุด</p>
-                    <ul className="mt-2 space-y-1 text-xs text-[#c0b7ab]">
-                      {magicEventsState.data.slice(0, 8).map((event) => {
-                        const statusLabel = {
-                          queued: 'รอผล',
-                          applied: 'สำเร็จ',
-                          blocked: 'ถูกบล็อก',
-                          expired: 'หมดอายุ',
-                          rejected: 'ถูกปฏิเสธ',
-                        }[event.status]
-                        return (
-                          <li key={event.id}>
-                            {teamNameById.get(event.sourceTeamId) ?? event.sourceTeamId} ใช้ {MAGIC_ITEM_INFO[event.itemType].label}
-                            {event.targetTeamId && event.targetTeamId !== event.sourceTeamId ? ` → ${teamNameById.get(event.targetTeamId) ?? event.targetTeamId}` : ''}
-                            {event.affectedQuestionIndex != null ? ` (ข้อ ${event.affectedQuestionIndex + 1})` : ''}
-                            {' — '}{statusLabel}
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </div>
-                ) : null}
+                <ul className="mt-3 space-y-1 border-t border-white/10 pt-3 text-xs text-[#c0b7ab]">
+                  {magicEventsState.data.slice(0, 8).map((event) => {
+                    const statusLabel = {
+                      queued: 'รอผล',
+                      applied: 'สำเร็จ',
+                      blocked: 'ถูกบล็อก',
+                      expired: 'หมดอายุ',
+                      rejected: 'ถูกปฏิเสธ',
+                    }[event.status]
+                    return (
+                      <li key={event.id} className="flex items-center gap-1.5">
+                        <MagicItemIcon itemType={event.itemType} size="sm" />
+                        {displayTeamNameById.get(event.sourceTeamId) ?? event.sourceTeamId} ใช้ {MAGIC_ITEM_INFO[event.itemType].label}
+                        {event.targetTeamId && event.targetTeamId !== event.sourceTeamId ? ` → ${displayTeamNameById.get(event.targetTeamId) ?? event.targetTeamId}` : ''}
+                        {event.affectedQuestionIndex != null ? ` (ข้อ ${event.affectedQuestionIndex + 1})` : ''}
+                        {' — '}{statusLabel}
+                      </li>
+                    )
+                  })}
+                </ul>
               </section>
             ) : null}
           </>
@@ -824,6 +1188,28 @@ export const TeacherPage = () => {
           onCancel={() => setConfirmAction(null)}
           onConfirm={() => void runAction(confirmAction)}
         />
+      ) : null}
+
+
+      <GrimoireModal open={grimoireOpen} onClose={() => setGrimoireOpen(false)} />
+
+      {/* Item 7: teacher-side dramatic spell-event overlay — one event at a time, 5.5s, same
+          copy/tone the student toast uses (buildTeacherSpellEventCopy), but centered/prominent
+          per "teacher-side major event popup can be more prominent". */}
+      {activeSpellEvent ? (
+        <div className="spell-event-backdrop" aria-live="assertive">
+          <div className={`spell-event-overlay spell-event-${activeSpellEvent.tone}`}>
+            <span className="spell-event-icon-wrap" aria-hidden="true">
+              <span className="spell-event-glow" />
+              <MagicItemIcon
+                itemType={activeSpellEvent.tone === 'surge' ? 'power_surge' : activeSpellEvent.tone === 'seal' ? 'score_seal' : activeSpellEvent.tone === 'illusion' ? 'illusion' : 'rose_shield'}
+                size="lg"
+              />
+            </span>
+            <strong className="spell-event-headline">{activeSpellEvent.headline}</strong>
+            <p className="spell-event-body">{activeSpellEvent.body}</p>
+          </div>
+        </div>
       ) : null}
     </ScenePage>
   )

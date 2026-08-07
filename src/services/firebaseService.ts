@@ -2,7 +2,9 @@ import { initializeApp } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
 import {
   collection,
+  disableNetwork,
   doc,
+  enableNetwork,
   getDoc,
   getDocs,
   getFirestore,
@@ -20,8 +22,8 @@ import { questions, questionsById } from '../data/questions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
-import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickHolders } from '../lib/magic'
-import { buildTeamMetas, distributeTeamsEvenly } from '../lib/teamScoring'
+import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
 import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService } from './gameService'
 import {
@@ -34,6 +36,8 @@ import type {
   AnswerRecord,
   BossAnswerRecord,
   BossWinner,
+  CaptainVote,
+  CaptainVoteProgress,
   JoinInput,
   JoinResult,
   MagicEvent,
@@ -43,6 +47,7 @@ import type {
   Player,
   QueuedMagicEffect,
   Room,
+  TeamGuardianName,
   TeamMagicBreakdown,
   TeamMagicState,
   TeamMeta,
@@ -63,6 +68,26 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig)
 const auth = getAuth(app)
 const db = getFirestore(app)
+
+// Realtime staleness fix (remote-device boss/main-question transitions not rendering until a
+// manual reload): iOS/iPadOS Safari aggressively suspends a backgrounded tab's underlying
+// network connection (app-switch, screen lock, or just sitting idle long enough) and, unlike an
+// explicit offline/online transition, the Firestore SDK does not always reliably detect that the
+// suspended WebChannel stream died and needs to be torn down and re-opened — so every onSnapshot
+// listener on that tab can silently stop receiving new server data indefinitely, even though the
+// underlying documents keep changing correctly (confirmed: a manual reload immediately shows the
+// current server state, proving the WRITE path and persisted data were never the problem — only
+// this tab's live stream was). A `visibilitychange` handler that forces the network off and back
+// on the moment the tab regains focus is the standard, documented mitigation for this exact class
+// of bug: it makes the SDK actually re-establish its stream and re-deliver the current state to
+// every active listener. This is event-driven (fires only on a real foreground transition), not a
+// polling loop or a page reload.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    void disableNetwork(db).then(() => enableNetwork(db))
+  })
+}
 
 const toMillis = (value: unknown): number | null => {
   if (typeof value === 'number') return value
@@ -129,6 +154,7 @@ const mapRoom = (data: DocumentData): Room => ({
   bossQuestionDurationSeconds: Number(data.bossQuestionDurationSeconds ?? DEFAULT_BOSS_QUESTION_DURATION_SECONDS),
   bossCompleted: Boolean(data.bossCompleted),
   bossWinner: mapBossWinner(data.bossWinner),
+  bossAwaitingContinue: Boolean(data.bossAwaitingContinue),
 })
 
 // Shared by player.answers and player.bossAnswers (Milestone 4) — identical shape.
@@ -195,11 +221,33 @@ const mapQueuedMagicEffect = (value: unknown): QueuedMagicEffect | null => {
   const effect = value as Record<string, unknown>
   return {
     id: String(effect.id ?? ''),
-    itemType: effect.itemType as 'power_surge' | 'score_seal',
+    itemType: effect.itemType as 'power_surge' | 'score_seal' | 'illusion',
     sourceTeamId: String(effect.sourceTeamId ?? ''),
     targetTeamId: String(effect.targetTeamId ?? ''),
     affectedQuestionIndex: Number(effect.affectedQuestionIndex ?? 0),
     createdAt: Number(effect.createdAt ?? 0),
+    ...(typeof effect.hiddenChoiceId === 'string' ? { hiddenChoiceId: effect.hiddenChoiceId } : {}),
+  }
+}
+
+const mapCaptainVote = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): CaptainVote => {
+  const data = snapshot.data()
+  return {
+    playerId: snapshot.id,
+    teamId: String(data.teamId ?? ''),
+    targetPlayerId: String(data.targetPlayerId ?? ''),
+    electionAttempt: Number(data.electionAttempt ?? 0),
+    votedAt: toMillis(data.votedAt) ?? Date.now(),
+  }
+}
+
+const mapCaptainVoteProgress = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): CaptainVoteProgress => {
+  const data = snapshot.data()
+  return {
+    playerId: snapshot.id,
+    teamId: String(data.teamId ?? ''),
+    electionAttempt: Number(data.electionAttempt ?? 0),
+    votedAt: toMillis(data.votedAt) ?? Date.now(),
   }
 }
 
@@ -223,6 +271,7 @@ const mapTeamMagic = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: stri
   return {
     teamId: snapshot.id,
     magicHolderPlayerId: data.magicHolderPlayerId == null ? null : String(data.magicHolderPlayerId),
+    captainElectionAttempt: Number(data.captainElectionAttempt ?? 1),
     inventory: mapMagicInventory(data.inventory),
     queuedEffect: mapQueuedMagicEffect(data.queuedEffect),
     lastResolvedBreakdown: mapTeamMagicBreakdown(data.lastResolvedBreakdown),
@@ -258,6 +307,16 @@ const mapTeamRoster = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: str
           displayName: String(member.displayName ?? ''),
         }))
       : [],
+  }
+}
+
+const mapTeamGuardianName = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): TeamGuardianName => {
+  const data = snapshot.data()
+  return {
+    teamId: snapshot.id,
+    name: String(data.name ?? ''),
+    updatedAt: toMillis(data.updatedAt) ?? Date.now(),
+    updatedByPlayerId: String(data.updatedByPlayerId ?? ''),
   }
 }
 
@@ -325,8 +384,12 @@ const computeMagicResolution = (
     consumeOne(magic.teamId, effect.itemType)
   }
 
+  // power_surge and illusion are both self-only buffs — never blockable, always applied.
+  // Illusion contributes no score multiplier at all (computeAppliedMagicMultipliers in
+  // lib/magic.ts only branches on power_surge/score_seal, so illusion is correctly ignored
+  // there) — marking it 'applied' here only affects event-history/UI visibility, never scoring.
   for (const { effect } of effectsThisQuestion) {
-    if (effect.itemType === 'power_surge') eventOutcomes.set(effect.id, 'applied')
+    if (effect.itemType === 'power_surge' || effect.itemType === 'illusion') eventOutcomes.set(effect.id, 'applied')
   }
 
   const sealsByTarget = new Map<string, QueuedMagicEffect[]>()
@@ -381,7 +444,15 @@ const resetMagicForNewRound = async (roomCode: string): Promise<void> => {
   const batch = writeBatch(db)
   magicSnapshots.docs.forEach((document) => {
     const magic = mapTeamMagic(document)
-    batch.update(document.ref, { inventory: createEmptyMagicInventory(), queuedEffect: null, lastResolvedBreakdown: null })
+    // Milestone 4.1: a new round needs a fresh captain election too — the old captain does not
+    // automatically carry over (matches "starting-item choice happens fresh each round").
+    batch.update(document.ref, {
+      inventory: createEmptyMagicInventory(),
+      queuedEffect: null,
+      lastResolvedBreakdown: null,
+      magicHolderPlayerId: null,
+      captainElectionAttempt: magic.captainElectionAttempt + 1,
+    })
     if (magic.queuedEffect) {
       batch.update(doc(db, 'rooms', roomCode, 'magicEvents', magic.queuedEffect.id), { status: 'expired', resolvedAt: serverTimestamp() })
     }
@@ -410,7 +481,14 @@ const logPermissionDenied = (operation: string, contextUid: string, roomCode: st
 // what "fresh" means.
 const createFreshBossFields = (): Pick<
   Room,
-  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner'
+  | 'phase'
+  | 'bossQuestionIds'
+  | 'bossQuestionIndex'
+  | 'bossQuestionStartedAt'
+  | 'bossQuestionDurationSeconds'
+  | 'bossCompleted'
+  | 'bossWinner'
+  | 'bossAwaitingContinue'
 > => ({
   phase: 'main',
   bossQuestionIds: [],
@@ -419,6 +497,7 @@ const createFreshBossFields = (): Pick<
   bossQuestionDurationSeconds: DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
   bossCompleted: false,
   bossWinner: null,
+  bossAwaitingContinue: false,
 })
 
 export class FirebaseGameService implements GameService {
@@ -443,43 +522,55 @@ export class FirebaseGameService implements GameService {
     // teacherSessionId, which is what every later isTeacher(roomCode) rule check compares
     // against request.auth.uid.
     const resolvedTeacherSessionId = await resolveOwnerUid(auth, teacherSessionId)
-    let roomCode = generateRoomCode()
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      if (!(await getDoc(doc(db, 'rooms', roomCode))).exists()) break
-      roomCode = generateRoomCode()
+    const COLLISION_MESSAGE = 'ผู้ใช้:รหัสห้องซ้ำ กรุณาลองสร้างอีกครั้ง'
+    // 4-digit codes (0000-9999) are a much smaller space than the old 6-character format, so a
+    // collision — while still unlikely — is no longer astronomically rare. The getDoc pre-check
+    // loop below finds a probably-free code; the transaction is what actually guarantees "never
+    // overwrite an existing room" (it re-checks existence and set()s atomically, closing the
+    // TOCTOU gap between the pre-check and the write). This outer loop is what turns a
+    // transaction-detected collision into "generate another code and retry" end-to-end, instead
+    // of surfacing a hard failure to the teacher on the rare unlucky race.
+    for (let outerAttempt = 0; outerAttempt < 5; outerAttempt += 1) {
+      let roomCode = generateRoomCode()
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (!(await getDoc(doc(db, 'rooms', roomCode))).exists()) break
+        roomCode = generateRoomCode()
+      }
+      const room: Room = {
+        roomCode,
+        status: 'waiting',
+        currentRound: 1,
+        createdAt: Date.now(),
+        startedAt: null,
+        completedAt: null,
+        currentQuestionIndex: 0,
+        questionDurationSeconds: 30,
+        questionStartedAt: null,
+        questionClosedAt: null,
+        ...createFreshBossFields(),
+        questionIds: selectRoundQuestions(questions),
+        previousQuestionIds: [],
+        winner: null,
+        teacherSessionId: resolvedTeacherSessionId,
+        teamCount: 0,
+        teamsLocked: false,
+        teams: [],
+      }
+      try {
+        await runTransaction(db, async (transaction) => {
+          const roomRef = doc(db, 'rooms', roomCode)
+          if ((await transaction.get(roomRef)).exists()) throw new Error(COLLISION_MESSAGE)
+          transaction.set(roomRef, { ...room, createdAt: serverTimestamp() })
+        })
+        return room
+      } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+        if (code === 'permission-denied') logPermissionDenied('createRoom', resolvedTeacherSessionId, roomCode)
+        const isCollision = error instanceof Error && error.message === COLLISION_MESSAGE
+        if (!isCollision || outerAttempt === 4) throw error
+      }
     }
-    const room: Room = {
-      roomCode,
-      status: 'waiting',
-      currentRound: 1,
-      createdAt: Date.now(),
-      startedAt: null,
-      completedAt: null,
-      currentQuestionIndex: 0,
-      questionDurationSeconds: 30,
-      questionStartedAt: null,
-      questionClosedAt: null,
-      ...createFreshBossFields(),
-      questionIds: selectRoundQuestions(questions),
-      previousQuestionIds: [],
-      winner: null,
-      teacherSessionId: resolvedTeacherSessionId,
-      teamCount: 0,
-      teamsLocked: false,
-      teams: [],
-    }
-    try {
-      await runTransaction(db, async (transaction) => {
-        const roomRef = doc(db, 'rooms', roomCode)
-        if ((await transaction.get(roomRef)).exists()) throw new Error('ผู้ใช้:รหัสห้องซ้ำ กรุณาลองสร้างอีกครั้ง')
-        transaction.set(roomRef, { ...room, createdAt: serverTimestamp() })
-      })
-    } catch (error) {
-      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-      if (code === 'permission-denied') logPermissionDenied('createRoom', resolvedTeacherSessionId, roomCode)
-      throw error
-    }
-    return room
+    throw new Error(COLLISION_MESSAGE)
   }
 
   async joinRoom(input: JoinInput, requestedOwnerUid: string): Promise<JoinResult> {
@@ -630,8 +721,21 @@ export class FirebaseGameService implements GameService {
       if (roomForMagicCheck.teams.length > 0) {
         const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
         const magicByTeamId = new Map(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
+        // Milestone 4.1: every team must have finished electing a captain before the game can
+        // start (chooseStartingItem/activateItem are already holder-gated, so this surfaces a
+        // clear, specific error instead of relying on that indirect consequence).
+        const teamsWithoutCaptain = roomForMagicCheck.teams.filter((team) => magicByTeamId.get(team.id)?.magicHolderPlayerId == null)
+        if (teamsWithoutCaptain.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
         const teamsWithoutStartingItem = roomForMagicCheck.teams.filter((team) => !hasAnyMagicItem(magicByTeamId.get(team.id)?.inventory ?? createEmptyMagicInventory()))
         if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
+        // Every team must also have a guardian name set before the game can start (same
+        // best-effort outside-transaction shape as the two checks above).
+        const teamNameSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teamNames'))
+        const teamIdsWithName = new Set(
+          teamNameSnapshots.docs.map((document) => mapTeamGuardianName(document)).filter((entry) => entry.name.trim().length > 0).map((entry) => entry.teamId),
+        )
+        const teamsWithoutName = roomForMagicCheck.teams.filter((team) => !teamIdsWithName.has(team.id))
+        if (teamsWithoutName.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
       }
     }
     await runTransaction(db, async (transaction) => {
@@ -820,7 +924,14 @@ export class FirebaseGameService implements GameService {
       if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
-      if (room.status !== 'playing' || room.phase !== 'boss' || room.bossQuestionIndex !== expectedBossIndex) return
+      if (
+        room.status !== 'playing' ||
+        room.phase !== 'boss' ||
+        room.bossQuestionIndex !== expectedBossIndex ||
+        room.bossAwaitingContinue === true
+      ) {
+        return
+      }
       const nextBossIndex = expectedBossIndex + 1
 
       if (nextBossIndex < room.bossQuestionIds.length) {
@@ -865,13 +976,46 @@ export class FirebaseGameService implements GameService {
           }
         }
       }
+      // Pause-and-continue gate: resolving the 3rd boss question no longer advances
+      // phase/currentQuestionIndex on its own — it only grants the reward (idempotently, above)
+      // and flips bossAwaitingContinue so every client's boss-phase render stays put until the
+      // teacher explicitly presses "เล่นต่อ" (continueAfterBoss, the only method that clears it).
+      transaction.update(roomRef, {
+        bossCompleted: true,
+        bossWinner,
+        bossAwaitingContinue: true,
+      })
+    })
+  }
+
+  // Pause-and-continue gate: fired only by the teacher's "เล่นต่อ" button after
+  // advanceBossQuestion has paused the room with bossAwaitingContinue=true. Writes exactly what
+  // advanceBossQuestion used to write unconditionally on resolving the 3rd boss question — moving
+  // the room back into the main phase at the question right after the boss trigger point.
+  // expectedRound mirrors advanceQuestion/advanceBossQuestion's "expected token" no-op guard
+  // shape, so a stale/duplicate call (e.g. a double-click, or a call arriving after the room
+  // somehow moved on) is always a safe no-op rather than a re-advance.
+  async continueAfterBoss(roomCode: string, teacherSessionId: string, expectedRound: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (
+        room.status !== 'playing' ||
+        room.phase !== 'boss' ||
+        room.bossAwaitingContinue !== true ||
+        room.currentRound !== expectedRound
+      ) {
+        return
+      }
       transaction.update(roomRef, {
         phase: 'main',
         currentQuestionIndex: BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1,
         questionStartedAt: serverTimestamp(),
         questionClosedAt: null,
-        bossCompleted: true,
-        bossWinner,
+        bossAwaitingContinue: false,
       })
     })
   }
@@ -1075,27 +1219,31 @@ export class FirebaseGameService implements GameService {
       throw new Error('ผู้ใช้:มีผู้เล่นบางคนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้ง')
     }
 
-    // Success: (re)select exactly one holder per team and give every team a fresh, empty
-    // magic state — "re-locking after unlock may select holders again."
+    // Success: give every team a fresh magic doc with NO captain yet — Milestone 4.1 replaces
+    // the old random holder pick with a team vote (see castCaptainVote/finalizeCaptainElection
+    // below). captainElectionAttempt is bumped, never reused, so any vote docs cast under a
+    // PRIOR attempt for this team id — including ones from before an unlock+re-randomize — are
+    // simply never counted again without needing to delete them (see CaptainVote's doc comment
+    // in types/game.ts for why deletion isn't how this codebase scopes stale data).
     const roomSnapshot = await getDoc(roomRef)
     if (!roomSnapshot.exists()) return
     const room = mapRoom(roomSnapshot.data())
-    const memberIdsByTeam: Record<string, string[]> = {}
-    room.teams.forEach((team) => { memberIdsByTeam[team.id] = [] })
-    playerSnapshots.docs.forEach((playerDocument) => {
-      const player = mapPlayer(playerDocument)
-      if (player.teamId && memberIdsByTeam[player.teamId]) memberIdsByTeam[player.teamId].push(player.id)
-    })
-    const holders = pickHolders(memberIdsByTeam)
+    const existingMagicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+    const previousAttempts = new Map(existingMagicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document).captainElectionAttempt]))
     const magicBatch = writeBatch(db)
     room.teams.forEach((team) => {
       magicBatch.set(doc(db, 'rooms', roomCode, 'magic', team.id), {
         teamId: team.id,
-        magicHolderPlayerId: holders[team.id] ?? null,
+        magicHolderPlayerId: null,
+        captainElectionAttempt: (previousAttempts.get(team.id) ?? 0) + 1,
         inventory: createEmptyMagicInventory(),
         queuedEffect: null,
         lastResolvedBreakdown: null,
       })
+      // Team guardian names reset on the same cadence as captain election/inventory — a
+      // (re-)lock always starts every team unnamed again, same as it starts every team
+      // captain-less and item-less.
+      magicBatch.delete(doc(db, 'rooms', roomCode, 'teamNames', team.id))
     })
     await magicBatch.commit()
   }
@@ -1176,6 +1324,15 @@ export class FirebaseGameService implements GameService {
     })
   }
 
+  // Milestone: the captain may change this pick any number of times while the room is still
+  // 'waiting' (a fresh pick or a change are the exact same operation — both just replace
+  // whatever the inventory currently holds with exactly one entry). Once room.status leaves
+  // 'waiting' this method is unreachable (guarded below, and mirrored server-side by
+  // firestore.rules' isValidActivationWindow-adjacent starting-item branch), which is what makes
+  // the choice permanent once the mission actually starts. Pre-start, inventory can only ever
+  // hold the single starting pick (boss rewards — the only other inventory mutation — are
+  // 'playing'-only), so replacing is always just "every other type zeroed, the requested type set
+  // to exactly 1" — it can never leave two types both holding an item.
   async chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void> {
     const roomRef = doc(db, 'rooms', roomCode)
     const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
@@ -1189,11 +1346,8 @@ export class FirebaseGameService implements GameService {
       if (room.status !== 'waiting' || !room.teamsLocked) {
         throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
       }
-      if (hasAnyMagicItem(magic.inventory)) throw new Error('ผู้ใช้:ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
-      const nextInventory: MagicInventory = {
-        ...magic.inventory,
-        [itemType]: { ...magic.inventory[itemType], available: magic.inventory[itemType].available + 1 },
-      }
+      const nextInventory: MagicInventory = createEmptyMagicInventory()
+      nextInventory[itemType] = { available: 1, consumed: 0 }
       transaction.update(magicRef, { inventory: nextInventory })
     })
   }
@@ -1202,7 +1356,7 @@ export class FirebaseGameService implements GameService {
     roomCode: string,
     teamId: string,
     playerId: string,
-    itemType: 'power_surge' | 'score_seal',
+    itemType: 'power_surge' | 'score_seal' | 'illusion',
     targetTeamId?: string,
   ): Promise<void> {
     const roomRef = doc(db, 'rooms', roomCode)
@@ -1219,7 +1373,9 @@ export class FirebaseGameService implements GameService {
       if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
       // Milestone 4: magic is a main-phase-only concept — the boss mini-game has its own,
       // separate 3-question flow, and status stays 'playing' throughout both, so this check is
-      // what actually prevents activation from leaking into the boss phase.
+      // what actually prevents activation from leaking into the boss phase. This also covers
+      // Milestone 4.1's "illusion cannot affect boss questions" — activation is unavailable in
+      // the boss phase for every item, not just illusion.
       if (room.phase !== 'main') throw new Error('ผู้ใช้:ไม่สามารถใช้ไอเทมได้ในขณะนี้ กรุณารอช่วงพักหรือรอบถัดไป')
 
       const window = getMagicActivationWindow(room)
@@ -1251,7 +1407,7 @@ export class FirebaseGameService implements GameService {
       }
 
       if (magic.queuedEffect) {
-        logRejectedEvent(itemType === 'power_surge' ? teamId : (targetTeamId ?? null))
+        logRejectedEvent(itemType === 'score_seal' ? (targetTeamId ?? null) : teamId)
         throw new Error('ผู้ใช้:ทีมนี้มีไอเทมที่กำลังรอผลอยู่แล้ว')
       }
 
@@ -1273,10 +1429,25 @@ export class FirebaseGameService implements GameService {
         // "already targeted" rejection here.
       }
 
-      // itemType === 'power_surge' targets the source team itself; score_seal's targetTeamId
-      // is validated non-empty above, so this cast is safe at this point.
-      const finalTargetTeamId = itemType === 'power_surge' ? teamId : (targetTeamId as string)
+      // Milestone 4.1: illusion is a self-only buff, exactly like power_surge — score_seal's
+      // targetTeamId is validated non-empty above, so this cast is safe at this point.
+      const finalTargetTeamId = itemType === 'score_seal' ? (targetTeamId as string) : teamId
       const now = Date.now()
+
+      // Milestone 4.1: the hidden choice is chosen exactly ONCE, right here, and stored on the
+      // queued effect — never recomputed later (resolution just marks the event 'applied' and
+      // consumes the item, it never touches hiddenChoiceId again). This is what makes every team
+      // member see the identical hidden choice and makes a refresh/retry unable to reroll it.
+      let hiddenChoiceId: string | undefined
+      if (itemType === 'illusion') {
+        const targetQuestionId = room.questionIds[affectedQuestionIndex]
+        const targetQuestion = targetQuestionId ? questionsById.get(targetQuestionId) : undefined
+        if (!targetQuestion) {
+          logRejectedEvent(finalTargetTeamId)
+          throw new Error('ผู้ใช้:ไม่พบคำถามข้อที่จะมีผล กรุณาลองใหม่')
+        }
+        hiddenChoiceId = pickIllusionHiddenChoice(targetQuestion)
+      }
 
       transaction.update(magicRef, {
         queuedEffect: {
@@ -1286,6 +1457,7 @@ export class FirebaseGameService implements GameService {
           targetTeamId: finalTargetTeamId,
           affectedQuestionIndex,
           createdAt: now,
+          ...(hiddenChoiceId ? { hiddenChoiceId } : {}),
         },
       })
       transaction.set(eventRef, {
@@ -1298,6 +1470,221 @@ export class FirebaseGameService implements GameService {
         round: room.currentRound,
         createdAt: serverTimestamp(),
         resolvedAt: null,
+      })
+    })
+  }
+
+  // Milestone 4.1: student-authored — writes ONLY the voter's own vote (+ its broadly-readable
+  // progress counterpart), never the finalization result. "Auto-finalize once everyone has
+  // voted" is deliberately driven by the TEACHER's client polling vote progress (see
+  // TeacherPage.tsx), mirroring how main-question/boss auto-advance are already
+  // teacher-client-driven rather than student-triggered — see gameService.ts's doc comment on
+  // why a student-triggered finalize could never be safely validated by security rules (rules
+  // cannot aggregate/count across a collection).
+  async castCaptainVote(roomCode: string, playerId: string, targetPlayerId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const voterRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, voterSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(voterRef),
+      ])
+      if (!roomSnapshot.exists() || !voterSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+      const room = mapRoom(roomSnapshot.data())
+      const voter = mapPlayer(voterSnapshot)
+      if (room.status !== 'waiting' || !room.teamsLocked) {
+        throw new Error('ผู้ใช้:โหวตหัวหน้าทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      }
+      if (!voter.teamId) throw new Error('ผู้ใช้:คุณยังไม่ได้อยู่ในทีมใด')
+      // Self-voting is allowed — targetPlayerId === playerId simply passes the same rules-layer
+      // check. targetPlayerId itself is never read back from Firestore here: the target's own
+      // player doc is private (players/{playerId}'s allow get only permits the owner or a
+      // pre-lock read), so this transaction cannot fetch it without a permission-denied error
+      // for any teammate other than the voter. The captainVotes/{playerId} security rule is the
+      // authoritative check that voter and target share the same locked team — this method only
+      // needs to pass targetPlayerId through untouched (see LobbyPage.tsx for the friendly,
+      // roster-based pre-check that runs before this is ever called).
+      const magicRef = doc(db, 'rooms', roomCode, 'magic', voter.teamId)
+      const magicSnapshot = await transaction.get(magicRef)
+      if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+      const magic = mapTeamMagic(magicSnapshot)
+      if (magic.magicHolderPlayerId != null) throw new Error('ผู้ใช้:ทีมนี้เลือกหัวหน้าทีมเรียบร้อยแล้ว')
+      // Overwrite (never append) — this is what makes "students may change their vote until
+      // finalized" true: casting a second vote just replaces this same playerId-keyed doc.
+      transaction.set(doc(db, 'rooms', roomCode, 'captainVotes', playerId), {
+        teamId: voter.teamId,
+        targetPlayerId,
+        electionAttempt: magic.captainElectionAttempt,
+        votedAt: serverTimestamp(),
+      })
+      transaction.set(doc(db, 'rooms', roomCode, 'captainVoteProgress', playerId), {
+        teamId: voter.teamId,
+        electionAttempt: magic.captainElectionAttempt,
+        votedAt: serverTimestamp(),
+      })
+    })
+  }
+
+  // Milestone 4.1: teacher-authored, idempotent (a stale/duplicate call after the captain is
+  // already set is a silent no-op — refresh/retry can never reroll the tie-break). Also the
+  // manual "finalize early" path for teams with missing voters, and the implicit target of the
+  // teacher's auto-finalize-on-all-voted effect (see TeacherPage.tsx). Vote ids are enumerated
+  // OUTSIDE the transaction (bounded by roster size, mirrors advanceBossQuestion's pattern for
+  // reading all players), but every vote's actual DATA is read fresh, inside the transaction.
+  async finalizeCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
+    const rosterRef = doc(db, 'rooms', roomCode, 'rosters', teamId)
+    const voteSnapshotsForIds = await getDocs(query(collection(db, 'rooms', roomCode, 'captainVotes'), where('teamId', '==', teamId)))
+    const voteIds = voteSnapshotsForIds.docs.map((document) => document.id)
+
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, magicSnapshot, rosterSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(magicRef),
+        transaction.get(rosterRef),
+      ])
+      if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(roomSnapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (!magicSnapshot.exists()) return
+      const magic = mapTeamMagic(magicSnapshot)
+      if (magic.magicHolderPlayerId != null) return
+      const memberIds = rosterSnapshot.exists() ? mapTeamRoster(rosterSnapshot).members.map((member) => member.playerId) : []
+      const voteSnapshots = await Promise.all(voteIds.map((id) => transaction.get(doc(db, 'rooms', roomCode, 'captainVotes', id))))
+      const votesByVoter: Record<string, string> = {}
+      voteSnapshots.filter((snapshot) => snapshot.exists()).map((snapshot) => mapCaptainVote(snapshot)).forEach((vote) => {
+        if (vote.electionAttempt !== magic.captainElectionAttempt) return
+        votesByVoter[vote.playerId] = vote.targetPlayerId
+      })
+      // pickElectedCaptain falls back to a uniform random draw across the WHOLE roster when no
+      // votes were cast at all — a team can never get permanently stuck with no captain, even
+      // if the teacher force-finalizes before anyone voted.
+      const captainId = pickElectedCaptain(memberIds, votesByVoter)
+      if (!captainId) return
+      transaction.update(magicRef, { magicHolderPlayerId: captainId })
+    })
+  }
+
+  // Milestone 4.1: teacher-authored, only while the room hasn't started playing yet ("reopen the
+  // election before the game starts"). Bumps captainElectionAttempt rather than deleting vote
+  // docs — see CaptainVote's doc comment in types/game.ts.
+  async resetCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, magicSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(magicRef)])
+      if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(roomSnapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'waiting') throw new Error('ผู้ใช้:รีเซ็ตการเลือกตั้งหัวหน้าทีมได้เฉพาะก่อนเริ่มภารกิจ')
+      if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+      const magic = mapTeamMagic(magicSnapshot)
+      transaction.update(magicRef, { magicHolderPlayerId: null, captainElectionAttempt: magic.captainElectionAttempt + 1 })
+    })
+  }
+
+  subscribeCaptainVote(roomCode: string, playerId: string, listener: (vote: CaptainVote | null) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      doc(db, 'rooms', roomCode.toUpperCase(), 'captainVotes', playerId),
+      (snapshot) => listener(snapshot.exists() ? mapCaptainVote(snapshot) : null),
+      () => onError('ไม่สามารถโหลดข้อมูลการโหวตได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeTeamCaptainVoteProgress(roomCode: string, teamId: string, listener: (entries: CaptainVoteProgress[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      query(collection(db, 'rooms', roomCode.toUpperCase(), 'captainVoteProgress'), where('teamId', '==', teamId)),
+      (snapshot) => listener(snapshot.docs.map(mapCaptainVoteProgress)),
+      () => onError('ไม่สามารถโหลดความคืบหน้าการโหวตได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeAllCaptainVoteProgress(roomCode: string, listener: (entries: CaptainVoteProgress[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      collection(db, 'rooms', roomCode.toUpperCase(), 'captainVoteProgress'),
+      (snapshot) => listener(snapshot.docs.map(mapCaptainVoteProgress)),
+      () => onError('ไม่สามารถโหลดความคืบหน้าการโหวตของทุกทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeAllTeamGuardianNames(roomCode: string, listener: (names: TeamGuardianName[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      collection(db, 'rooms', roomCode.toUpperCase(), 'teamNames'),
+      (snapshot) => listener(snapshot.docs.map(mapTeamGuardianName)),
+      () => onError('ไม่สามารถโหลดชื่อทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  // Captain-authored path. Every OTHER team's teamNames doc is read individually INSIDE this
+  // transaction (not batched via getDocs outside it) so two captains racing to claim the same
+  // name genuinely conflict on each other's read-set — Firestore's optimistic-concurrency retry
+  // is what makes the uniqueness check race-safe, not the validation call itself.
+  async setTeamGuardianName(roomCode: string, teamId: string, playerId: string, name: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, magicSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(magicRef)])
+      if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(roomSnapshot.data())
+      if (room.status !== 'waiting' || !room.teamsLocked) {
+        throw new Error('ผู้ใช้:ตั้งชื่อทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      }
+      if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
+      const magic = mapTeamMagic(magicSnapshot)
+      if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:เฉพาะหัวหน้าทีมที่ได้รับเลือกเท่านั้นที่ตั้งชื่อทีมได้')
+
+      const otherTeamIds = room.teams.map((team) => team.id).filter((id) => id !== teamId)
+      const otherNameSnapshots = await Promise.all(otherTeamIds.map((id) => transaction.get(doc(db, 'rooms', roomCode, 'teamNames', id))))
+      const otherNames = otherNameSnapshots.filter((snapshot) => snapshot.exists()).map((snapshot) => mapTeamGuardianName(snapshot).name)
+
+      const validationError = validateTeamGuardianName(name, otherNames)
+      if (validationError) throw new Error(validationError)
+
+      transaction.set(doc(db, 'rooms', roomCode, 'teamNames', teamId), {
+        teamId,
+        name: normalizeTeamGuardianName(name),
+        updatedAt: serverTimestamp(),
+        updatedByPlayerId: playerId,
+      })
+    })
+  }
+
+  // Teacher-only. Deletes the doc entirely — absence means "unnamed", matching setTeamGuardianName
+  // never being called yet.
+  async resetTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      transaction.delete(doc(db, 'rooms', roomCode, 'teamNames', teamId))
+    })
+  }
+
+  // Teacher-only. Same uniqueness-check transaction shape as setTeamGuardianName, but skips the
+  // captain-ownership check entirely — the teacher is always authorized to set any team's name.
+  async overrideTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string, name: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+
+      const otherTeamIds = room.teams.map((team) => team.id).filter((id) => id !== teamId)
+      const otherNameSnapshots = await Promise.all(otherTeamIds.map((id) => transaction.get(doc(db, 'rooms', roomCode, 'teamNames', id))))
+      const otherNames = otherNameSnapshots.filter((snapshot) => snapshot.exists()).map((snapshot) => mapTeamGuardianName(snapshot).name)
+
+      const validationError = validateTeamGuardianName(name, otherNames)
+      if (validationError) throw new Error(validationError)
+
+      transaction.set(doc(db, 'rooms', roomCode, 'teamNames', teamId), {
+        teamId,
+        name: normalizeTeamGuardianName(name),
+        updatedAt: serverTimestamp(),
+        updatedByPlayerId: teacherSessionId,
       })
     })
   }

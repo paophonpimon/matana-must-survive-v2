@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTeamMetas, computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, distributeTeamsEvenly } from './teamScoring'
+import { buildTeamMetas, computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from './teamScoring'
 import type { Player } from '../types/game'
 
 const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
@@ -156,5 +156,52 @@ describe('computeTeamCurrentQuestionCounts', () => {
     const counts = computeTeamCurrentQuestionCounts([], teams, undefined)
     expect(counts.get('team-1')).toBe(0)
     expect(counts.get('team-2')).toBe(0)
+  })
+})
+
+describe('normalizeTeamGuardianName', () => {
+  it('trims and collapses internal whitespace', () => {
+    expect(normalizeTeamGuardianName('  ทีม   มังกร  ')).toBe('ทีม มังกร')
+  })
+
+  it('reduces a whitespace-only string to empty', () => {
+    expect(normalizeTeamGuardianName('   ')).toBe('')
+  })
+})
+
+describe('validateTeamGuardianName', () => {
+  it('accepts a valid Thai/English/number name with no conflicts', () => {
+    expect(validateTeamGuardianName('มังกรทอง 99', [])).toBeNull()
+  })
+
+  it('rejects an empty or whitespace-only name', () => {
+    expect(validateTeamGuardianName('   ', [])).toBe('ผู้ใช้:กรุณากรอกชื่อทีม')
+  })
+
+  it('rejects a name shorter than the minimum length', () => {
+    expect(validateTeamGuardianName('ก', [])).toContain('ผู้ใช้:')
+  })
+
+  it('rejects a name longer than the maximum length', () => {
+    expect(validateTeamGuardianName('a'.repeat(21), [])).toContain('ผู้ใช้:')
+  })
+
+  it('rejects unsupported characters (e.g. emoji)', () => {
+    expect(validateTeamGuardianName('ทีมมังกร🔥', [])).toBe('ผู้ใช้:ชื่อทีมมีอักขระที่ไม่รองรับ กรุณาใช้ตัวอักษรไทย/อังกฤษ ตัวเลข และเครื่องหมายทั่วไปเท่านั้น')
+  })
+
+  it('accepts common punctuation within the charset allow-list', () => {
+    expect(validateTeamGuardianName("Team-1 (A.B)!?", [])).toBeNull()
+  })
+
+  it('rejects a case-insensitive duplicate of another team\'s current name', () => {
+    expect(validateTeamGuardianName('มังกรทอง', ['มังกรทอง'])).toBe('ผู้ใช้:ชื่อทีมนี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น')
+    expect(validateTeamGuardianName('Dragon', ['dragon'])).toBe('ผู้ใช้:ชื่อทีมนี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น')
+  })
+
+  it('does not flag a name against itself (excluding-self contract)', () => {
+    // Caller is responsible for excluding the team's OWN current name from existingNamesExcludingSelf —
+    // this asserts the validator has no independent self-conflict special-casing beyond that contract.
+    expect(validateTeamGuardianName('มังกรทอง', [])).toBeNull()
   })
 })

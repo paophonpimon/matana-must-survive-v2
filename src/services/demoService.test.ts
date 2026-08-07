@@ -3,7 +3,7 @@ import { questionsById } from '../data/questions'
 import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
 import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
 import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX } from '../types/game'
-import type { AnswerProgressEntry, MagicEvent, Player, Room, TeamMagicState, TeamRosterSummary } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
 import { DEMO_STORAGE_KEY, DemoGameService } from './demoService'
 
 class MemoryStorage implements Storage {
@@ -34,7 +34,20 @@ const answerAt = async (
   })
 }
 
-const getHolderId = async (service: DemoGameService, roomCode: string, teamId: string): Promise<string> => {
+// Milestone 4.1: magicHolderPlayerId is no longer auto-assigned at lockTeams — it's the team's
+// ELECTED captain, null until finalizeCaptainElection runs. Most pre-existing flow tests only
+// care about "who is the holder for follow-up chooseStartingItem/activateItem calls," not the
+// election mechanics themselves, so this force-finalizes with zero votes cast (pickElectedCaptain
+// then draws uniformly at random across the whole roster — see lib/magic.ts) before waiting for
+// the subscription to reflect it. Tests that exercise the election flow itself use
+// castCaptainVote/finalizeCaptainElection/resetCaptainElection directly instead of this helper.
+// Item 6: also names the team right after electing its captain — startRoom now additionally
+// requires every team to have a guardian name (alongside captain + starting item), and this
+// helper is the shared entry point every manual-item-selection test (score_seal/rose_shield/
+// illusion — chooseAllStartingItems above only covers the power_surge-only flow tests) already
+// calls to obtain a holder id, so naming it here covers every one of those call sites at once.
+const getHolderId = async (service: DemoGameService, roomCode: string, teamId: string, teacherSessionId = 'teacher-1'): Promise<string> => {
+  await service.finalizeCaptainElection(roomCode, teacherSessionId, teamId)
   const magic: { value: TeamMagicState | null } = { value: null }
   const stop = service.subscribeTeamMagic(roomCode, teamId, (value) => { magic.value = value })
   // Deliberately toBeTruthy(), not not.toBeNull(): magic.value starts out `null`, so
@@ -43,6 +56,7 @@ const getHolderId = async (service: DemoGameService, roomCode: string, teamId: s
   await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeTruthy())
   const holderId = magic.value?.magicHolderPlayerId as string
   stop()
+  await service.setTeamGuardianName(roomCode, teamId, holderId, `Guardian-${teamId}`)
   return holderId
 }
 
@@ -50,6 +64,10 @@ const getHolderId = async (service: DemoGameService, roomCode: string, teamId: s
 // 3-question boss phase (status stays 'playing', currentQuestionIndex frozen at 4) before the
 // room moves on to question 6 — any test loop that walks through all 10 questions must drain the
 // boss phase at that point too, or the room simply never advances past it.
+// Item 5: draining the 3rd boss question no longer auto-advances back to 'main' — it sets
+// bossAwaitingContinue=true and pauses. This helper also plays the teacher's "เล่นต่อ"
+// (continueAfterBoss) so every existing test that walks through the boss phase keeps working
+// exactly as before, without each test needing to know about the new pause gate individually.
 const advanceQuestionThroughBoss = async (
   service: DemoGameService,
   roomCode: string,
@@ -61,21 +79,50 @@ const advanceQuestionThroughBoss = async (
   for (let bossIndex = 0; bossIndex < BOSS_QUESTION_COUNT; bossIndex += 1) {
     await service.advanceBossQuestion(roomCode, teacherSessionId, bossIndex)
   }
+  const room: { value: Room | null } = { value: null }
+  const stop = service.subscribeRoom(roomCode, (value) => { room.value = value })
+  await vi.waitFor(() => expect(room.value?.bossAwaitingContinue).toBe(true))
+  stop()
+  await service.continueAfterBoss(roomCode, teacherSessionId, room.value?.currentRound as number)
 }
 
-// startRoom requires every team's holder to have chosen a starting item — this drives every
-// currently-empty team's holder to pick มนตร์ทวีพลัง (power_surge) so pre-existing flow tests
-// that only care about the normal answer/scoring path can reach 'playing' without needing to
-// individually think about magic items.
-const chooseAllStartingItems = async (service: DemoGameService, roomCode: string): Promise<void> => {
+// startRoom requires every team to have an elected captain, a chosen starting item, AND a
+// guardian team name (item 6) — this force-finalizes any still-open election (zero votes, so
+// pickElectedCaptain draws uniformly at random across the whole roster), drives every team's
+// captain to pick มนตร์ทวีพลัง (power_surge), then has that same captain set a unique guardian
+// name, so pre-existing flow tests that only care about the normal answer/scoring path can reach
+// 'playing' without needing to individually think about magic items, elections, or naming.
+const chooseAllStartingItems = async (service: DemoGameService, roomCode: string, teacherSessionId = 'teacher-1'): Promise<void> => {
   const magic: { value: TeamMagicState[] } = { value: [] }
   const stop = service.subscribeAllTeamMagic(roomCode, (value) => { magic.value = value })
   await vi.waitFor(() => expect(magic.value.length).toBeGreaterThan(0))
-  for (const team of magic.value) {
-    if (team.magicHolderPlayerId && !hasAnyMagicItem(team.inventory)) {
-      await service.chooseStartingItem(roomCode, team.teamId, team.magicHolderPlayerId, 'power_surge')
+
+  const teamIds = magic.value.map((team) => team.teamId)
+  for (const teamId of teamIds) {
+    const team = magic.value.find((entry) => entry.teamId === teamId)
+    if (team && team.magicHolderPlayerId == null) {
+      await service.finalizeCaptainElection(roomCode, teacherSessionId, teamId)
     }
   }
+  await vi.waitFor(() => expect(magic.value.every((team) => team.magicHolderPlayerId != null)).toBe(true))
+
+  for (const teamId of teamIds) {
+    const team = magic.value.find((entry) => entry.teamId === teamId)
+    if (team?.magicHolderPlayerId && !hasAnyMagicItem(team.inventory)) {
+      await service.chooseStartingItem(roomCode, teamId, team.magicHolderPlayerId, 'power_surge')
+    }
+  }
+
+  const names: { value: Array<{ teamId: string; name: string }> } = { value: [] }
+  const stopNames = service.subscribeAllTeamGuardianNames(roomCode, (value) => { names.value = value })
+  for (const teamId of teamIds) {
+    const team = magic.value.find((entry) => entry.teamId === teamId)
+    const hasName = names.value.some((entry) => entry.teamId === teamId && entry.name.trim())
+    if (team?.magicHolderPlayerId && !hasName) {
+      await service.setTeamGuardianName(roomCode, teamId, team.magicHolderPlayerId, `Guardian-${teamId}`)
+    }
+  }
+  stopNames()
   stop()
 }
 
@@ -160,6 +207,15 @@ describe('Demo timed classroom flow', () => {
     // Cannot start until locked.
     await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('กรุณาล็อกทีมก่อนเริ่มภารกิจ')
     await service.lockTeams(room.roomCode, 'teacher-1')
+    // Milestone 4.1: captains must be elected before startRoom even looks at starting items.
+    await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+    const magicForElection: { value: TeamMagicState[] } = { value: [] }
+    const stopMagicForElection = service.subscribeAllTeamMagic(room.roomCode, (value) => { magicForElection.value = value })
+    await vi.waitFor(() => expect(magicForElection.value.length).toBeGreaterThan(0))
+    for (const team of magicForElection.value) {
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', team.teamId)
+    }
+    stopMagicForElection()
     await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
     await chooseAllStartingItems(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 30)
@@ -406,7 +462,7 @@ describe('Demo timed classroom flow', () => {
   })
 
   describe('Magic items', () => {
-    it('selects exactly one holder per team, each a real member of that team', async () => {
+    it('captain election: no holder exists right after lockTeams; finalizing selects exactly one real member per team', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       for (let index = 0; index < 6; index += 1) {
@@ -419,10 +475,14 @@ describe('Demo timed classroom flow', () => {
       const players: { value: Player[] } = { value: [] }
       const stopMagic = service.subscribeAllTeamMagic(room.roomCode, (value) => { magic.value = value })
       const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
-      await vi.waitFor(() => {
-        expect(magic.value).toHaveLength(3)
-        expect(magic.value.every((team) => team.magicHolderPlayerId != null)).toBe(true)
-      })
+      await vi.waitFor(() => expect(magic.value).toHaveLength(3))
+      // Milestone 4.1: no more random assignment at lockTeams — every team's election starts open.
+      expect(magic.value.every((team) => team.magicHolderPlayerId == null)).toBe(true)
+
+      for (const team of magic.value) {
+        await service.finalizeCaptainElection(room.roomCode, 'teacher-1', team.teamId)
+      }
+      await vi.waitFor(() => expect(magic.value.every((team) => team.magicHolderPlayerId != null)).toBe(true))
       for (const team of magic.value) {
         const holder = players.value.find((player) => player.id === team.magicHolderPlayerId)
         expect(holder?.teamId).toBe(team.teamId)
@@ -438,6 +498,7 @@ describe('Demo timed classroom flow', () => {
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
       await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
@@ -453,7 +514,7 @@ describe('Demo timed classroom flow', () => {
         .rejects.toThrow('คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
     })
 
-    it('lets the holder choose exactly one starting item — a second choice is rejected', async () => {
+    it('lets the holder choose exactly one starting item at a time — a second choice while still waiting replaces it, never adds to it', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -462,14 +523,15 @@ describe('Demo timed classroom flow', () => {
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
 
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'rose_shield')
-      await expect(service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge'))
-        .rejects.toThrow('ทีมนี้เลือกไอเทมเริ่มต้นไปแล้ว')
+      // Milestone: changing before the mission starts is now allowed (see the dedicated "may
+      // change their starting item" test below for the full replace-not-append coverage) —
+      // this must NOT reject, and must leave only the newest pick.
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
-      await vi.waitFor(() => expect(magic.value ? hasAnyMagicItem(magic.value.inventory) : false).toBe(true))
-      expect(magic.value?.inventory.rose_shield.available).toBe(1)
-      expect(magic.value?.inventory.power_surge.available).toBe(0)
+      await vi.waitFor(() => expect(magic.value?.inventory.power_surge.available).toBe(1))
+      expect(magic.value?.inventory.rose_shield.available).toBe(0)
       stop()
     })
 
@@ -717,6 +779,538 @@ describe('Demo timed classroom flow', () => {
     })
   })
 
+  describe('Milestone 4.1: team captain election', () => {
+    it('students can vote only for members of their own locked team', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
+      const gamma = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+
+      const players: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
+      // .every() on an empty array is vacuously true, so also require a non-empty length —
+      // otherwise this resolves before subscribePlayers delivers its first real snapshot.
+      await vi.waitFor(() => {
+        expect(players.value.length).toBe(3)
+        expect(players.value.every((player) => player.teamId != null)).toBe(true)
+      })
+      const alphaLive = players.value.find((player) => player.id === alpha.id) as Player
+      const gammaLive = players.value.find((player) => player.id === gamma.id) as Player
+      stopPlayers()
+
+      if (alphaLive.teamId === gammaLive.teamId) {
+        // Extremely unlikely with 3 players over 2 teams, but stay correct either way: this
+        // test needs voter and target on DIFFERENT teams.
+        await expect(service.castCaptainVote(room.roomCode, alphaLive.id, alphaLive.id)).resolves.not.toThrow()
+        return
+      }
+      await expect(service.castCaptainVote(room.roomCode, alphaLive.id, gammaLive.id))
+        .rejects.toThrow('โหวตได้เฉพาะสมาชิกในทีมของคุณเอง')
+    })
+
+    it('one vote per student, but changeable until the election is finalized (self-voting allowed)', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+
+      await service.castCaptainVote(room.roomCode, alpha.id, alpha.id) // self-vote — allowed
+      const vote: { value: CaptainVote | null } = { value: null }
+      const stopVote = service.subscribeCaptainVote(room.roomCode, alpha.id, (value) => { vote.value = value })
+      await vi.waitFor(() => expect(vote.value?.targetPlayerId).toBe(alpha.id))
+
+      // Changing the vote before finalization overwrites, it never appends a second entry.
+      await service.castCaptainVote(room.roomCode, alpha.id, beta.id)
+      await vi.waitFor(() => expect(vote.value?.targetPlayerId).toBe(beta.id))
+
+      const progress: { value: CaptainVoteProgress[] } = { value: [] }
+      const stopProgress = service.subscribeTeamCaptainVoteProgress(room.roomCode, 'team-1', (value) => { progress.value = value })
+      await vi.waitFor(() => expect(progress.value).toHaveLength(1)) // still exactly one voter, not two
+      stopVote()
+      stopProgress()
+    })
+
+    it('students cannot see live vote totals — the broadly-readable progress entries never carry the vote target', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await service.castCaptainVote(room.roomCode, alpha.id, alpha.id)
+
+      const progress: { value: CaptainVoteProgress[] } = { value: [] }
+      const stop = service.subscribeTeamCaptainVoteProgress(room.roomCode, 'team-1', (value) => { progress.value = value })
+      await vi.waitFor(() => expect(progress.value).toHaveLength(1))
+      // Structural guarantee, not just a type-level one: the progress entry literally has no
+      // field that could reveal who anyone voted for — only that they voted.
+      expect(Object.keys(progress.value[0]).sort()).toEqual(['electionAttempt', 'playerId', 'teamId', 'votedAt'])
+      stop()
+    })
+
+    it('once all members of a team have voted, the teacher can finalize and the highest candidate wins', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      const gamma = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+
+      // 2 votes for Beta, 1 for Alpha — Beta must win. Note: "auto-finalize once everyone has
+      // voted" is a TEACHER-CLIENT-DRIVEN UI behavior (see TeacherPage.tsx's polling effect,
+      // and gameService.ts's doc comment on castCaptainVote for why) — the service layer here
+      // always requires an explicit finalizeCaptainElection call, whether triggered by that
+      // effect or a manual click.
+      await service.castCaptainVote(room.roomCode, alpha.id, beta.id)
+      await service.castCaptainVote(room.roomCode, beta.id, beta.id)
+      await service.castCaptainVote(room.roomCode, gamma.id, alpha.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBe(beta.id))
+      stop()
+    })
+
+    it('tied highest candidates produce one persisted random winner — refresh/retry cannot reroll it', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+
+      // 1-1 tie between Alpha and Beta.
+      await service.castCaptainVote(room.roomCode, alpha.id, alpha.id)
+      await service.castCaptainVote(room.roomCode, beta.id, beta.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeTruthy())
+      const winnerId = magic.value?.magicHolderPlayerId
+      expect([alpha.id, beta.id]).toContain(winnerId)
+
+      // A retry/refresh (a second finalize call, or simply re-reading the same subscription)
+      // must never change the already-decided winner.
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+      expect(magic.value?.magicHolderPlayerId).toBe(winnerId)
+      stop()
+    })
+
+    it('teacher early-finalize works with missing voters, and reset reopens the election for a fresh vote', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+
+      // Only Alpha votes (for herself) — Beta never gets around to it. The teacher can still
+      // finalize early.
+      await service.castCaptainVote(room.roomCode, alpha.id, alpha.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBe(alpha.id))
+
+      // Reopen/reset before the game starts — the old captain is cleared and a stale vote from
+      // the superseded attempt no longer counts.
+      await service.resetCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeNull())
+      await service.castCaptainVote(room.roomCode, beta.id, beta.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+      // Alpha's OLD vote (cast under the previous attempt) does not carry over — only Beta's
+      // fresh vote counts, so Beta wins outright.
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBe(beta.id))
+      stop()
+    })
+
+    it('startRoom rejects a room where any team is missing a finalized captain', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+    })
+
+    it('the elected captain — and only the elected captain — becomes the team\'s magic holder', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await service.castCaptainVote(room.roomCode, alpha.id, beta.id)
+      await service.castCaptainVote(room.roomCode, beta.id, beta.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+
+      await expect(service.chooseStartingItem(room.roomCode, 'team-1', alpha.id, 'power_surge'))
+        .rejects.toThrow('คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+      await expect(service.chooseStartingItem(room.roomCode, 'team-1', beta.id, 'power_surge')).resolves.not.toThrow()
+    })
+
+    it('a new round resets the election — the previous captain does not carry over and a fresh vote is required', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      expect(holderId).toBe(p1.id)
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.stopRound(room.roomCode, 'teacher-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeNull())
+      expect(magic.value?.captainElectionAttempt).toBeGreaterThan(1)
+      // No captain -> starting the next round is blocked again until a fresh election finishes.
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 60)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+      stop()
+    })
+  })
+
+  describe('Item 6: team guardian name', () => {
+    const setUpTwoTeamRoom = async (service: DemoGameService) => {
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holder1 = await getHolderIdWithoutNaming(service, room.roomCode, 'team-1')
+      const holder2 = await getHolderIdWithoutNaming(service, room.roomCode, 'team-2')
+      return { room, alpha, beta, holder1, holder2 }
+    }
+
+    // getHolderId (used elsewhere in this file) already names the team as a side effect — these
+    // tests need to control naming themselves, so this is a local, naming-free variant.
+    const getHolderIdWithoutNaming = async (service: DemoGameService, roomCode: string, teamId: string): Promise<string> => {
+      await service.finalizeCaptainElection(roomCode, 'teacher-1', teamId)
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(roomCode, teamId, (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeTruthy())
+      const holderId = magic.value?.magicHolderPlayerId as string
+      stop()
+      return holderId
+    }
+
+    // Deliberately toBeNull() as the "not yet loaded" sentinel (not `[]`), matching this file's
+    // established "toBeTruthy(), not not.toBeNull()" rationale elsewhere: an empty array is a
+    // legitimate real snapshot (no team named yet), and would otherwise satisfy a lesser check
+    // before the subscription's first real emit ever arrives.
+    const readNames = async (service: DemoGameService, roomCode: string): Promise<TeamGuardianName[]> => {
+      const names: { value: TeamGuardianName[] | null } = { value: null }
+      const stop = service.subscribeAllTeamGuardianNames(roomCode, (value) => { names.value = value })
+      await vi.waitFor(() => expect(names.value).not.toBeNull())
+      stop()
+      return names.value as TeamGuardianName[]
+    }
+
+    it('the finalized captain can submit the team name', async () => {
+      const service = new DemoGameService()
+      const { room, holder1 } = await setUpTwoTeamRoom(service)
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      const names = await readNames(service, room.roomCode)
+      expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('มังกรทอง')
+    })
+
+    it('a non-captain teammate cannot set the team name', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      // Deterministic election (not the random-draw finalize helper): alpha votes for herself,
+      // beta votes for alpha too, so alpha wins outright and beta is guaranteed the non-captain.
+      await service.castCaptainVote(room.roomCode, alpha.id, alpha.id)
+      await service.castCaptainVote(room.roomCode, beta.id, alpha.id)
+      await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
+      await expect(service.setTeamGuardianName(room.roomCode, 'team-1', beta.id, 'ชื่อปลอม'))
+        .rejects.toThrow('เฉพาะหัวหน้าทีมที่ได้รับเลือกเท่านั้นที่ตั้งชื่อทีมได้')
+    })
+
+    it('rejects a duplicate name already used by another team in the room', async () => {
+      const service = new DemoGameService()
+      const { room, holder1, holder2 } = await setUpTwoTeamRoom(service)
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      await expect(service.setTeamGuardianName(room.roomCode, 'team-2', holder2, 'มังกรทอง'))
+        .rejects.toThrow('ชื่อทีมนี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น')
+    })
+
+    it('the captain can edit the name again before the game starts (overwrite, not append)', async () => {
+      const service = new DemoGameService()
+      const { room, holder1 } = await setUpTwoTeamRoom(service)
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรเงิน')
+      const names = await readNames(service, room.roomCode)
+      expect(names.filter((entry) => entry.teamId === 'team-1')).toHaveLength(1)
+      expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('มังกรเงิน')
+    })
+
+    it('teacher reset clears the name and blocks startRoom again until it is renamed', async () => {
+      const service = new DemoGameService()
+      const { room, holder1, holder2 } = await setUpTwoTeamRoom(service)
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      await service.setTeamGuardianName(room.roomCode, 'team-2', holder2, 'เสือเงิน')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'power_surge')
+
+      // Reset team-1's name only — teacher-authorized regardless of captain/room state — and
+      // confirm startRoom is blocked again on the name check specifically (captain + item are
+      // still both satisfied for every team, isolating what's actually under test here).
+      await service.resetTeamGuardianName(room.roomCode, 'teacher-1', 'team-1')
+      const names = await readNames(service, room.roomCode)
+      expect(names.find((entry) => entry.teamId === 'team-1')).toBeUndefined()
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
+
+      // Renaming it clears the block.
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทองใหม่')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).resolves.not.toThrow()
+    })
+
+    it('teacher override sets a team name directly, regardless of captain state', async () => {
+      const service = new DemoGameService()
+      const { room } = await setUpTwoTeamRoom(service)
+      await service.overrideTeamGuardianName(room.roomCode, 'teacher-1', 'team-1', 'ชื่อที่ครูตั้ง')
+      const names = await readNames(service, room.roomCode)
+      expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('ชื่อที่ครูตั้ง')
+    })
+
+    it('startRoom rejects when any team has not been named, even with a captain and starting item', async () => {
+      const service = new DemoGameService()
+      const { room, holder1, holder2 } = await setUpTwoTeamRoom(service)
+      await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'power_surge')
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      // team-2 deliberately left unnamed.
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
+    })
+
+    it('display fallback: a team has no guardian-name entry until one is submitted', async () => {
+      const service = new DemoGameService()
+      const { room } = await setUpTwoTeamRoom(service)
+      const names = await readNames(service, room.roomCode)
+      expect(names).toHaveLength(0)
+      const rosters: { value: TeamRosterSummary | null } = { value: null }
+      const stop = service.subscribeTeamRoster(room.roomCode, 'team-1', (value) => { rosters.value = value })
+      await vi.waitFor(() => expect(rosters.value).not.toBeNull())
+      // The "ทีม N" fallback label itself lives on the roster/room.teams — unaffected by the
+      // (currently absent) guardian name, matching "show ทีม X only while unnamed".
+      expect(rosters.value?.teamName).toBe('ทีม 1')
+      stop()
+    })
+
+    it('the name persists across a fresh subscription (refresh-equivalent)', async () => {
+      const service = new DemoGameService()
+      const { room, holder1 } = await setUpTwoTeamRoom(service)
+      await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
+      // A brand-new subscription (simulating a reconnect/refresh) must see the persisted name,
+      // not just the one the writer's own subscription happened to already hold in memory.
+      const names = await readNames(service, room.roomCode)
+      expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('มังกรทอง')
+    })
+  })
+
+  describe('Milestone 4.1: illusion magic', () => {
+    it('is selectable as the one starting item, and can also be randomly awarded by the boss (duplicate rewards increment the count)', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.inventory.illusion.available).toBe(1))
+
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      for (let index = 0; index < BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {
+        await answerAt(service, room, p1, index, true)
+        await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+      }
+      await answerAt(service, room, p1, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX) // triggers the boss phase
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 0)
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 1)
+      // Force the boss reward roll onto illusion (the 4th of the 4 equally-likely item types) —
+      // the single player in this room is the trivial boss winner regardless of this mock.
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.99)
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 2)
+      randomSpy.mockRestore()
+
+      // 1 from the starting choice + 1 duplicate from the boss reward.
+      await vi.waitFor(() => expect(magic.value?.inventory.illusion.available).toBe(2))
+      stop()
+    })
+
+    it('activating illusion chooses and persists one incorrect choice — never the correct one, never rerolled by a refresh', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets question index 1
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.queuedEffect?.itemType).toBe('illusion'))
+      const hiddenChoiceId = magic.value?.queuedEffect?.hiddenChoiceId
+      expect(hiddenChoiceId).toBeTruthy()
+
+      const targetedQuestion = questionsById.get(room.questionIds[1])
+      expect(hiddenChoiceId).not.toBe(targetedQuestion?.correctChoiceId) // never the correct choice
+      expect(targetedQuestion?.choices.map((choice) => choice.id)).toContain(hiddenChoiceId) // a real choice
+
+      // Re-reading the same queued effect (simulating a refresh) never changes the value —
+      // it was chosen once, at activation time, and is only ever read afterward.
+      for (let i = 0; i < 3; i += 1) {
+        await vi.waitFor(() => expect(magic.value?.queuedEffect?.hiddenChoiceId).toBe(hiddenChoiceId))
+      }
+      stop()
+    })
+
+    it('all teammates see the exact same hidden choice (one shared team doc, not per-player)', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion')
+
+      // Two independent subscriptions to the SAME team doc, simulating two different
+      // teammates' devices.
+      const viewA: { value: TeamMagicState | null } = { value: null }
+      const viewB: { value: TeamMagicState | null } = { value: null }
+      const stopA = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { viewA.value = value })
+      const stopB = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { viewB.value = value })
+      await vi.waitFor(() => {
+        expect(viewA.value?.queuedEffect?.hiddenChoiceId).toBeTruthy()
+        expect(viewB.value?.queuedEffect?.hiddenChoiceId).toBeTruthy()
+      })
+      expect(viewA.value?.queuedEffect?.hiddenChoiceId).toBe(viewB.value?.queuedEffect?.hiddenChoiceId)
+      stopA()
+      stopB()
+    })
+
+    it('the effect applies only to its target main question — it resolves and clears once that question is left, consuming the item exactly once', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 1
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.queuedEffect).not.toBeNull())
+
+      // Question 0 (index 0) is not the targeted question — leaving it must not resolve or
+      // consume the effect.
+      await answerAt(service, room, p1, 0, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(1)
+      expect(magic.value?.inventory.illusion.consumed).toBe(0)
+
+      // Question 1 (index 1) IS the targeted question — leaving it resolves and clears the
+      // effect, consuming the item exactly once.
+      await answerAt(service, room, p1, 1, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
+      await vi.waitFor(() => expect(magic.value?.queuedEffect).toBeNull())
+      expect(magic.value?.inventory.illusion.available).toBe(0)
+      expect(magic.value?.inventory.illusion.consumed).toBe(1)
+
+      // A stale/duplicate advanceQuestion retry for the question already left must never
+      // double-consume the item (existing expectedQuestionIndex guard already covers this).
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
+      expect(magic.value?.inventory.illusion.consumed).toBe(1)
+      stop()
+    })
+
+    it('never changes answer correctness, individual knowledge score, team raw knowledge score, or answer history', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 1
+
+      await answerAt(service, room, p1, 0, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await answerAt(service, room, p1, 1, true) // correct answer on the illusion-affected question
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
+
+      const players: { value: Player[] } = { value: [] }
+      const events: { value: MagicEvent[] } = { value: [] }
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
+      const stopEvents = service.subscribeMagicEvents(room.roomCode, (value) => { events.value = value })
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(events.value.find((event) => event.itemType === 'illusion')?.status).toBe('applied'))
+
+      // Individual: exactly plain correct-answer counting — untouched by illusion.
+      const player = players.value.find((entry) => entry.id === p1.id)
+      expect(player?.score).toBe(2)
+      expect(player?.answers).toHaveLength(2)
+      expect(player?.answers.every((answer) => answer.isCorrect)).toBe(true)
+
+      // Team: illusion contributes no own/hostile multiplier at all — competitionTotal equals
+      // rawTotal exactly, same as if illusion had never been used.
+      const stats = computeTeamCompetitionStats(players.value, liveRoom.value?.teams ?? [], liveRoom.value?.questionIds ?? [], events.value, liveRoom.value?.currentRound ?? 1)
+      const team1Stats = stats.find((team) => team.id === 'team-1')
+      expect(team1Stats?.competitionTotal).toBe(team1Stats?.rawTotal)
+      expect(team1Stats?.rawTotal).toBe(20) // 1 member, 2/2 correct so far: 10 + 10
+
+      stopPlayers()
+      stopEvents()
+      stopRoom()
+    })
+
+    it('a new round resets any leftover illusion state (fresh empty inventory, no stale queued effect)', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // leaves a queued effect
+
+      await service.stopRound(room.roomCode, 'teacher-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.queuedEffect).toBeNull())
+      expect(magic.value?.inventory.illusion).toEqual({ available: 0, consumed: 0 })
+      stop()
+    })
+  })
+
   describe('Milestone 2.1 stability fixes', () => {
     it('an applied magic event from round 1 does not affect round 2\'s competition score, even though the event log is never cleared', async () => {
       const service = new DemoGameService()
@@ -921,6 +1515,90 @@ describe('Demo timed classroom flow', () => {
       stop()
     })
 
+    it('the captain may change their starting item any number of times while the room is still waiting, and A -> B leaves only B, never both', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await vi.waitFor(() => expect(magic.value?.inventory.power_surge.available).toBe(1))
+
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal')
+      await vi.waitFor(() => expect(magic.value?.inventory.score_seal.available).toBe(1))
+      // The old pick must be fully replaced, never left alongside the new one.
+      expect(magic.value?.inventory.power_surge).toMatchObject({ available: 0, consumed: 0 })
+      expect(magic.value?.inventory.rose_shield).toMatchObject({ available: 0, consumed: 0 })
+      expect(magic.value?.inventory.illusion).toMatchObject({ available: 0, consumed: 0 })
+
+      // Change again, to a third type — still only ever one entry held.
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await vi.waitFor(() => expect(magic.value?.inventory.illusion.available).toBe(1))
+      expect(magic.value?.inventory.power_surge).toMatchObject({ available: 0, consumed: 0 })
+      expect(magic.value?.inventory.score_seal).toMatchObject({ available: 0, consumed: 0 })
+      expect(magic.value?.inventory.rose_shield).toMatchObject({ available: 0, consumed: 0 })
+
+      // Re-confirming the SAME type the captain already holds is also a legal, harmless no-op
+      // change (covers "select/confirm ... may change and reconfirm").
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await vi.waitFor(() => expect(magic.value?.inventory.illusion.available).toBe(1))
+
+      stop()
+    })
+
+    it('rejects a non-captain team member changing the starting item', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      const holderId = await getHolderId(service, room.roomCode, 'team-1')
+      await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+
+      const nonCaptainId = holderId === alpha.id ? beta.id : alpha.id
+      await expect(service.chooseStartingItem(room.roomCode, 'team-1', nonCaptainId, 'score_seal'))
+        .rejects.toThrow('คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
+
+      // The captain's original pick must be completely untouched by the rejected attempt.
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value).not.toBeNull())
+      expect(magic.value?.inventory.power_surge).toMatchObject({ available: 1, consumed: 0 })
+      expect(magic.value?.inventory.score_seal).toMatchObject({ available: 0, consumed: 0 })
+      stop()
+    })
+
+    it('locks the starting item permanently once the mission has started — even the captain can no longer change it', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode) // every team picks power_surge
+      const magicBefore: { value: TeamMagicState[] } = { value: [] }
+      const stopBefore = service.subscribeAllTeamMagic(room.roomCode, (value) => { magicBefore.value = value })
+      await vi.waitFor(() => expect(magicBefore.value.length).toBeGreaterThan(0))
+      const holderId = magicBefore.value[0].magicHolderPlayerId as string
+      stopBefore()
+
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      await expect(service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal'))
+        .rejects.toThrow('เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await vi.waitFor(() => expect(magic.value?.inventory.power_surge.available).toBe(1))
+      expect(magic.value?.inventory.score_seal).toMatchObject({ available: 0, consumed: 0 })
+      stop()
+    })
+
     it('rejects activation from the waiting lobby, before the room has started playing', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
@@ -1086,6 +1764,121 @@ describe('Demo timed classroom flow', () => {
 
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
       await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(1))
+
+      stopRoom()
+    })
+  })
+
+  // Regression coverage for the "remote device doesn't render boss phase transitions until
+  // reload" investigation. The reported bug turned out to live in the realtime TRANSPORT (a
+  // dead/suspended Firestore connection on iOS Safari — see firebaseService.ts's visibilitychange
+  // handler), which is outside what a Vitest/jsdom unit test can exercise (there is no real
+  // Firestore connection here to suspend). What IS fully testable, and just as load-bearing for
+  // "does a remote device ever see this transition," is the STATE MACHINE itself: one single,
+  // never-unsubscribed `subscribeRoom` listener must observe every step of the full sequence in
+  // order, exactly like a student's `useRoom` hook would. If a future change ever broke a step of
+  // this chain (e.g. a boss-advance call that forgot to bump bossQuestionStartedAt, or a
+  // continueAfterBoss guard that no-ops when it shouldn't), this test fails without needing a real
+  // device — this is the regression guard for that class of bug.
+  describe('Boss phase full transition sequence: one subscription observes every step, in order', () => {
+    it('main -> boss q1 -> q2 -> q3 -> bossAwaitingContinue -> teacher continue -> resumed main, all via a single long-lived subscription', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 60)
+
+      // One subscription, opened before any transition and never torn down or replaced — exactly
+      // the shape of a student's GamePage staying on screen through the whole boss sequence.
+      const seenPhases: Array<{ phase: string; questionIndex: number; bossQuestionIndex: number; bossAwaitingContinue: boolean }> = []
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => {
+        liveRoom.value = value
+        if (value) {
+          seenPhases.push({
+            phase: value.phase,
+            questionIndex: value.currentQuestionIndex,
+            bossQuestionIndex: value.bossQuestionIndex,
+            bossAwaitingContinue: value.bossAwaitingContinue,
+          })
+        }
+      })
+      await vi.waitFor(() => expect(liveRoom.value?.status).toBe('playing'))
+
+      // Walk main questions 0..3 normally (still phase 'main').
+      for (let index = 0; index < BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {
+        await answerAt(service, room, p1, index, true)
+        await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+        await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(index + 1))
+        expect(liveRoom.value?.phase).toBe('main')
+      }
+
+      // main -> boss: leaving question index BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX enters the
+      // boss phase on question 1 of 3, without ever unsubscribing.
+      await answerAt(service, room, p1, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, true)
+      await service.advanceQuestion(room.roomCode, 'teacher-1', BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX)
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('boss'))
+      expect(liveRoom.value?.bossQuestionIndex).toBe(0)
+      expect(liveRoom.value?.currentQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX)
+      const firstBossStartedAt = liveRoom.value?.bossQuestionStartedAt
+
+      // boss q1 -> q2: bossQuestionIndex advances and the per-question timer resets, still the
+      // same subscription, still phase 'boss'.
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 0)
+      await vi.waitFor(() => expect(liveRoom.value?.bossQuestionIndex).toBe(1))
+      expect(liveRoom.value?.phase).toBe('boss')
+      expect(liveRoom.value?.bossAwaitingContinue).toBe(false)
+      expect(liveRoom.value?.bossQuestionStartedAt).not.toBe(firstBossStartedAt)
+
+      // boss q2 -> q3.
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 1)
+      await vi.waitFor(() => expect(liveRoom.value?.bossQuestionIndex).toBe(2))
+      expect(liveRoom.value?.bossAwaitingContinue).toBe(false)
+
+      // boss q3 resolves -> bossAwaitingContinue=true, phase stays 'boss' (the pause gate),
+      // currentQuestionIndex still frozen at the trigger point.
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 2)
+      await vi.waitFor(() => expect(liveRoom.value?.bossAwaitingContinue).toBe(true))
+      expect(liveRoom.value?.phase).toBe('boss')
+      expect(liveRoom.value?.bossCompleted).toBe(true)
+      expect(liveRoom.value?.currentQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX)
+
+      // A duplicate/stale advanceBossQuestion call while paused must be a no-op the SAME
+      // subscription can observe doing nothing (still paused, still boss q index 2).
+      await service.advanceBossQuestion(room.roomCode, 'teacher-1', 2)
+      expect(liveRoom.value?.bossAwaitingContinue).toBe(true)
+      expect(liveRoom.value?.bossQuestionIndex).toBe(2)
+
+      // Teacher presses "เล่นต่อ" -> resumed main, right after the boss trigger point, still the
+      // exact same subscription that has been live since before question 0 even advanced.
+      await service.continueAfterBoss(room.roomCode, 'teacher-1', liveRoom.value?.currentRound as number)
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
+      expect(liveRoom.value?.bossAwaitingContinue).toBe(false)
+      expect(liveRoom.value?.currentQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1)
+
+      // The full ordered sequence of phase/bossQuestionIndex pairs this one subscription actually
+      // observed must include every step in order — proving no step was silently skipped or only
+      // reachable via a resubscribe.
+      const sequenceKey = (entry: (typeof seenPhases)[number]): string => `${entry.phase}:${entry.questionIndex}:${entry.bossQuestionIndex}:${entry.bossAwaitingContinue}`
+      const observedKeys = seenPhases.map(sequenceKey)
+      const requiredMilestones = [
+        `main:0:0:false`,
+        `boss:${BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX}:0:false`,
+        `boss:${BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX}:1:false`,
+        `boss:${BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX}:2:false`,
+        `boss:${BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX}:2:true`,
+        `main:${BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1}:2:false`,
+      ]
+      requiredMilestones.forEach((milestone) => expect(observedKeys).toContain(milestone))
+      // Order matters — every milestone's index in the observed stream must be strictly
+      // increasing, i.e. this subscription really did walk the sequence forward, never backward,
+      // never skipping straight from one end to the other.
+      const milestoneIndexes = requiredMilestones.map((milestone) => observedKeys.indexOf(milestone))
+      for (let index = 1; index < milestoneIndexes.length; index += 1) {
+        expect(milestoneIndexes[index]).toBeGreaterThan(milestoneIndexes[index - 1])
+      }
 
       stopRoom()
     })
@@ -1334,5 +2127,189 @@ describe('Demo timed classroom flow', () => {
 
     expect(joined.room.roomCode).toBe(room.roomCode)
     expect(joined.player.displayName).toBe('Separate browser')
+  })
+})
+
+// Realtime read path regression (reported: teacher randomizes teams, a same-device tab updates
+// automatically, a remote device does not — until manually reloaded, at which point the correct
+// data appears immediately). Root cause: demoService's cross-device transport is a poll (see
+// `listen` in demoService.ts) gated on a module-level `sharedStateAvailable` flag that is only
+// ever recomputed as a SIDE EFFECT of the poll's own callback — so if the very first fetch ever
+// attempted (a subscription's initial bootstrap read) failed for any transient reason, the flag
+// latched false forever and the poll stopped calling back at all, since the gate prevented the
+// one thing that could have un-stuck it. A same-device request essentially never fails that way;
+// a genuinely remote device sometimes does — and once it does, only a full reload (a fresh
+// bootstrap attempt) ever recovers, matching the reported symptom exactly.
+//
+// This suite uses its OWN window stub with a real setInterval — unlike the outer suite's bare
+// `new EventTarget()` (which deliberately has no setInterval, so poll-specific behavior never
+// engages for any of those tests; they rely entirely on the same-window UPDATE_EVENT instead).
+// It also mocks `fetch` directly and never calls this test's own writeState/UPDATE_EVENT after
+// the initial room/player setup, so the only way the assertions below can pass is via the
+// interval poll itself retrying past the earlier failure — exactly the path the bug broke.
+describe('Realtime read path resilience: cross-device polling must self-heal, no reload required', () => {
+  let getShouldFail = true
+  let serverState: unknown = null
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', new MemoryStorage())
+    vi.stubGlobal('sessionStorage', new MemoryStorage())
+    const target = new EventTarget()
+    vi.stubGlobal('window', Object.assign(target, {
+      setInterval: (...args: Parameters<typeof setInterval>) => setInterval(...args),
+      clearInterval: (id: number) => clearInterval(id),
+    }))
+    getShouldFail = true
+    serverState = null
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) }
+      }
+      if (getShouldFail) throw new Error('simulated network failure reaching the shared demo-state endpoint')
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ state: serverState }) }
+    }))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('a player subscription bootstrapped while the shared endpoint is unreachable recovers on its own once it becomes reachable, and a roster subscription follows the newly-assigned team', async () => {
+    const service = new DemoGameService()
+    const room = await service.createRoom('teacher-1')
+    const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+    expect(alpha.teamId).toBeNull()
+
+    const playerSnapshot: { value: Player | null } = { value: null }
+    const stopPlayer = service.subscribePlayer(room.roomCode, alpha.id, (value) => { playerSnapshot.value = value })
+    // The subscription's own bootstrap read hits the mocked failure, so it falls back to local
+    // state — this is the "old/null team assignment" starting point, and also reproduces
+    // sharedStateAvailable never having become true in the first place.
+    await vi.waitFor(() => expect(playerSnapshot.value).not.toBeNull())
+    expect(playerSnapshot.value?.teamId).toBeNull()
+
+    // Simulate the teacher's randomizeTeams write having already reached the shared endpoint by
+    // the time it becomes reachable again — this is the "-> realtime player update -> new team"
+    // step, delivered purely through the shared "server," never through this test's own
+    // writeState/UPDATE_EVENT (which never fires again after the joinRoom above).
+    const localRaw = localStorage.getItem(DEMO_STORAGE_KEY)
+    if (!localRaw) throw new Error('expected seeded local demo state after createRoom/joinRoom')
+    const updated = JSON.parse(localRaw)
+    updated.rooms[room.roomCode].players[alpha.id].teamId = 'team-1'
+    updated.rooms[room.roomCode].rosters['team-1'] = {
+      teamId: 'team-1',
+      teamName: 'ทีม 1',
+      members: [{ playerId: alpha.id, displayName: alpha.displayName }],
+    }
+    serverState = updated
+    getShouldFail = false
+
+    // No unsubscribe/resubscribe, no manual refresh — the SAME long-lived subscription from
+    // above must pick this up entirely on its own.
+    await vi.waitFor(() => expect(playerSnapshot.value?.teamId).toBe('team-1'), { timeout: 3000 })
+
+    // "-> roster subscription/UI follows the new team": exactly what useTeamRoster(roomCode,
+    // teamId) re-subscribes to once LobbyPage observes the player's new teamId.
+    const rosterSnapshot: { value: TeamRosterSummary | null } = { value: null }
+    const stopRoster = service.subscribeTeamRoster(room.roomCode, 'team-1', (value) => { rosterSnapshot.value = value })
+    await vi.waitFor(() => expect(rosterSnapshot.value?.members.map((member) => member.playerId)).toEqual([alpha.id]), { timeout: 3000 })
+
+    stopPlayer()
+    stopRoster()
+  })
+})
+
+// Write path regression (follow-up to the read-path fix above): `writeState` used to gate the
+// push to the shared endpoint behind the SAME `sharedStateAvailable` flag —
+// `if (sharedStateAvailable) await writeSharedState(state)`. That flag is only ever recomputed
+// as a side effect of a *previous* successful read or write, so a write attempted while it was
+// false (its pessimistic initial value, or latched false by any earlier transient failure) was
+// silently skipped: applied to local storage only, dispatched only to the writer's own window,
+// and never even attempted against the shared endpoint. Because the flag can only turn true
+// again via another read/write actually succeeding, and this one never even tried, the write was
+// gone for good unless some *unrelated later* write happened to flush the by-then-current full
+// state — a remote device could be permanently denied a mutation that the writer's own device
+// believed had gone through.
+//
+// This suite deliberately keeps every GET (read) call failing for its entire duration, so
+// `sharedStateAvailable` can never be flipped true by a read — the only thing that can prove the
+// fix is the write path itself retrying on its own merit, not an incidental read recovering the
+// flag first and masking the bug.
+describe('Write path resilience: a write must not be permanently suppressed by an earlier shared-endpoint failure', () => {
+  let putShouldFail = true
+  let serverState: unknown = null
+  let putCount = 0
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', new MemoryStorage())
+    vi.stubGlobal('sessionStorage', new MemoryStorage())
+    vi.stubGlobal('window', new EventTarget())
+    putShouldFail = true
+    serverState = null
+    putCount = 0
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        putCount += 1
+        if (putShouldFail) throw new Error('simulated network failure reaching the shared demo-state endpoint')
+        serverState = JSON.parse(String(init.body))
+        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) }
+      }
+      // Reads never succeed in this suite — see the comment above: this isolates the write
+      // path so a read can never be what flips sharedStateAvailable back to true.
+      throw new Error('simulated network failure reaching the shared demo-state endpoint')
+    }))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('a write made while the shared endpoint is unreachable does not permanently suppress a later write once it becomes reachable, and does not duplicate the mutation', async () => {
+    const teacherService = new DemoGameService()
+
+    // createRoom's writeState call is this service's very first ever write, made while the
+    // shared endpoint is unreachable (PUT fails). Old code: sharedStateAvailable starts false,
+    // so this write's push was never even attempted. New code: it's attempted and fails —
+    // caught internally, local state still updates correctly, no throw.
+    const room = await teacherService.createRoom('teacher-1')
+    expect(putCount).toBe(1)
+    expect(serverState).toBeNull()
+
+    // Network recovers.
+    putShouldFail = false
+
+    // A second, independent write (joinRoom) — under the old gated code this would still be
+    // silently skipped, since sharedStateAvailable was never set true (no read ever succeeded
+    // in this suite, and the first write never got the chance either). Under the fix, this
+    // write attempts the push on its own merit and succeeds now that the network is up.
+    const joined = await teacherService.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+
+    expect(putCount).toBe(2)
+    expect(serverState).not.toBeNull()
+    const pushed = serverState as { rooms: Record<string, { room: { roomCode: string }, players: Record<string, { id: string }> }> }
+    // Our room reached the server with exactly the one player who joined — proves this was a
+    // normal single retry-on-next-write, not a duplicated/replayed mutation. (The built-in
+    // 'MATANA' demo seed room is also present in the pushed state — that's createSeedState's
+    // default local seed, unrelated to this test.)
+    expect(pushed.rooms[room.roomCode]).toBeDefined()
+    expect(Object.keys(pushed.rooms[room.roomCode].players)).toEqual([joined.player.id])
+
+    // A wholly separate service instance with isolated local storage (simulating a remote
+    // device) can only see this room by actually reading it from the shared endpoint — proving
+    // the write really reached "the server," not just this device's own localStorage.
+    vi.stubGlobal('localStorage', new MemoryStorage())
+    // From this point on reads must succeed so the remote device can fetch what was pushed.
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        serverState = JSON.parse(String(init.body))
+        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) }
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ state: serverState }) }
+    }))
+    const remoteService = new DemoGameService()
+    const remoteJoin = await remoteService.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
+    expect(remoteJoin.room.roomCode).toBe(room.roomCode)
   })
 })

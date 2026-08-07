@@ -1,4 +1,4 @@
-import type { AnswerProgressEntry, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
 
 export interface AnswerInput {
   questionId: string
@@ -35,6 +35,13 @@ export interface GameService {
   closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void>
   advanceBossQuestion(roomCode: string, teacherSessionId: string, expectedBossIndex: number): Promise<void>
+  // Pause-and-continue gate: advanceBossQuestion resolving the 3rd boss question sets
+  // bossAwaitingContinue=true instead of also advancing phase/currentQuestionIndex — this is
+  // the only method that ever clears it, and only ever fired by the teacher's "เล่นต่อ" button
+  // (never a polling effect), which is what makes "resume only on explicit teacher action" true.
+  // expectedRound is the same idempotent "expected token" shape as advanceQuestion/
+  // advanceBossQuestion's expected-index guards, so a stale/duplicate call is a safe no-op.
+  continueAfterBoss(roomCode: string, teacherSessionId: string, expectedRound: number): Promise<void>
   stopRound(roomCode: string, teacherSessionId: string): Promise<void>
   prepareNextRound(roomCode: string, teacherSessionId: string): Promise<void>
   closeRoom(roomCode: string, teacherSessionId: string): Promise<void>
@@ -46,9 +53,30 @@ export interface GameService {
   subscribeAllTeamMagic(roomCode: string, listener: (magic: TeamMagicState[]) => void, onError: (message: string) => void): Unsubscribe
   subscribeMagicEvents(roomCode: string, listener: (events: MagicEvent[]) => void, onError: (message: string) => void): Unsubscribe
   chooseStartingItem(roomCode: string, teamId: string, playerId: string, itemType: MagicItemType): Promise<void>
-  activateItem(roomCode: string, teamId: string, playerId: string, itemType: 'power_surge' | 'score_seal', targetTeamId?: string): Promise<void>
+  activateItem(roomCode: string, teamId: string, playerId: string, itemType: 'power_surge' | 'score_seal' | 'illusion', targetTeamId?: string): Promise<void>
   subscribeTeamRoster(roomCode: string, teamId: string, listener: (roster: TeamRosterSummary | null) => void, onError: (message: string) => void): Unsubscribe
   subscribeTeamAnswerProgress(roomCode: string, teamId: string, listener: (entries: AnswerProgressEntry[]) => void, onError: (message: string) => void): Unsubscribe
+  // Milestone 4.1: team captain election. castCaptainVote is student-authored (self-vote only,
+  // target must be a member of the voter's own locked team); finalize/reset are teacher-only.
+  // "Auto-finalize once everyone has voted" is deliberately driven by the TEACHER's client
+  // polling vote progress (mirroring how main-question/boss auto-advance are already
+  // teacher-client-driven, never student-triggered) rather than embedding a tally-dependent
+  // write inside castCaptainVote itself — see firestore.rules for why a student-triggered
+  // finalize could never be safely validated (rules cannot aggregate/count).
+  castCaptainVote(roomCode: string, playerId: string, targetPlayerId: string): Promise<void>
+  finalizeCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void>
+  resetCaptainElection(roomCode: string, teacherSessionId: string, teamId: string): Promise<void>
+  subscribeCaptainVote(roomCode: string, playerId: string, listener: (vote: CaptainVote | null) => void, onError: (message: string) => void): Unsubscribe
+  subscribeTeamCaptainVoteProgress(roomCode: string, teamId: string, listener: (entries: CaptainVoteProgress[]) => void, onError: (message: string) => void): Unsubscribe
+  subscribeAllCaptainVoteProgress(roomCode: string, listener: (entries: CaptainVoteProgress[]) => void, onError: (message: string) => void): Unsubscribe
+  // Team guardian name: captain-editable, teacher-resettable/overridable. Names reset every
+  // lockTeams call (same lifecycle as captainElectionAttempt/inventory) — see lockTeams' doc
+  // comment in firebaseService.ts. setTeamGuardianName is the captain-authored path (rules
+  // verify playerId is the team's finalized captain); reset/override are teacher-only.
+  subscribeAllTeamGuardianNames(roomCode: string, listener: (names: TeamGuardianName[]) => void, onError: (message: string) => void): Unsubscribe
+  setTeamGuardianName(roomCode: string, teamId: string, playerId: string, name: string): Promise<void>
+  resetTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string): Promise<void>
+  overrideTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string, name: string): Promise<void>
 }
 
 // Used by FirebaseGameService.joinRoom's catch block when the transaction's read of the

@@ -1,14 +1,35 @@
 import { useEffect, useMemo, useState } from 'react'
-import { MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, computeHostileMultiplier, hasAnyMagicItem } from '../lib/magic'
+import { createPortal } from 'react-dom'
+import { GrimoireModal } from './GrimoireModal'
+import { MagicItemIcon } from './MagicItemIcon'
+import {
+  MAGIC_ITEM_INFO,
+  MAGIC_ITEM_TYPES,
+  buildIllusionCopy,
+  buildIncomingSealCopy,
+  buildPowerSurgeCopy,
+  buildShieldBlockCopy,
+  computeHostileMultiplier,
+  getMagicEffectPhase,
+  hasAnyMagicItem,
+  type MagicEventCopy,
+} from '../lib/magic'
 import { friendlyError } from '../services'
 import { hasShownMagicPopup, markMagicPopupShown } from '../services/sessionStorage'
 import type { MagicEvent, MagicItemType, RoomStatus, TeamMagicState, TeamMeta } from '../types/game'
 
-interface MagicToast {
+interface MagicToast extends MagicEventCopy {
   key: string
-  icon: string
-  tone: 'seal' | 'surge' | 'shield'
-  message: string
+}
+
+// Icon shown on the toast/badge for each tone — a 1:1 mapping since every tone corresponds to
+// exactly one item type (the "shield" tone always means rose_shield, whether it's the passive
+// availability badge or a shield-block toast).
+const ICON_ITEM_BY_TONE: Record<MagicEventCopy['tone'], MagicItemType> = {
+  surge: 'power_surge',
+  seal: 'score_seal',
+  shield: 'rose_shield',
+  illusion: 'illusion',
 }
 
 interface MagicPanelProps {
@@ -24,14 +45,19 @@ interface MagicPanelProps {
   // to filter the shared magicEvents log down to the current round.
   roomCode: string
   currentRound: number
+  // Grimoire follow-up: the room's actual live question position — distinct from
+  // affectedQuestionIndex below (which is only "what a FRESH activation would target," and is
+  // null whenever activation isn't currently possible). Needed to tell whether an ALREADY-queued
+  // effect is still upcoming ("ข้อต่อไป") or is now the question in progress ("กำลังมีผลในข้อนี้").
+  currentQuestionIndex: number
   events: MagicEvent[]
   canActivateNow: boolean
   affectedQuestionIndex: number | null
   onChoose: (itemType: MagicItemType) => Promise<void>
-  onActivate: (itemType: 'power_surge' | 'score_seal', targetTeamId?: string) => Promise<void>
+  onActivate: (itemType: 'power_surge' | 'score_seal' | 'illusion', targetTeamId?: string) => Promise<void>
 }
 
-const ACTIVATABLE_TYPES: Array<'power_surge' | 'score_seal'> = ['power_surge', 'score_seal']
+const ACTIVATABLE_TYPES: Array<'power_surge' | 'score_seal' | 'illusion'> = ['power_surge', 'score_seal', 'illusion']
 
 const formatPercent = (multiplier: number): string => {
   const percent = multiplier * 100
@@ -49,6 +75,7 @@ export const MagicPanel = ({
   roomStatus,
   roomCode,
   currentRound,
+  currentQuestionIndex,
   events,
   canActivateNow,
   affectedQuestionIndex,
@@ -56,13 +83,18 @@ export const MagicPanel = ({
   onActivate,
 }: MagicPanelProps) => {
   const [selectedStartingItem, setSelectedStartingItem] = useState<MagicItemType | ''>('')
-  const [selectedActivationItem, setSelectedActivationItem] = useState<'power_surge' | 'score_seal' | ''>('')
+  const [selectedActivationItem, setSelectedActivationItem] = useState<'power_surge' | 'score_seal' | 'illusion' | ''>('')
   const [selectedTargetTeamId, setSelectedTargetTeamId] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [toastQueue, setToastQueue] = useState<MagicToast[]>([])
   const [activeToast, setActiveToast] = useState<MagicToast | null>(null)
+  // Grimoire access point: covers both "Lobby / starting-item selection" (via LobbyPage) and
+  // "student game/inventory area" (via GamePage) in one place, since both render MagicPanel.
+  // Purely local UI state — never touches room/service state, so opening it can't pause the
+  // timer or alter game state.
+  const [grimoireOpen, setGrimoireOpen] = useState(false)
 
   const teamId = magic?.teamId ?? ''
 
@@ -108,36 +140,28 @@ export const MagicPanel = ({
         if (!hasShownMagicPopup(roomCode, popupKey)) {
           const key = `${teamId}:${event.affectedQuestionIndex}`
           const count = queuedSealCountByKey.get(key) ?? 1
-          const questionNumber = event.affectedQuestionIndex + 1
-          const message = count >= 2
-            ? `ถูกผนึกคะแนน ${count} ครั้ง — คะแนนแข่งขันจะเหลือ ${formatPercent(computeHostileMultiplier(count))}%`
-            : `🔒 ทีมของคุณถูกผนึกคะแนน!\nคะแนนแข่งขันจากคำถามข้อ ${questionNumber} จะถูกลดลงเหลือครึ่งหนึ่ง`
-          newToasts.push({ key: popupKey, icon: '🔒', tone: 'seal', message })
+          newToasts.push({ key: popupKey, ...buildIncomingSealCopy(count, event.affectedQuestionIndex + 1) })
           markMagicPopupShown(roomCode, popupKey)
         }
       }
       if (event.status === 'queued' && event.itemType === 'power_surge' && event.sourceTeamId === teamId && event.affectedQuestionIndex != null) {
         const popupKey = `${event.id}:power-surge`
         if (!hasShownMagicPopup(roomCode, popupKey)) {
-          const questionNumber = event.affectedQuestionIndex + 1
-          newToasts.push({
-            key: popupKey,
-            icon: '⚡',
-            tone: 'surge',
-            message: `⚡ มนตร์ทวีคะแนนทำงาน!\nคะแนนแข่งขันจากคำถามข้อ ${questionNumber} จะเพิ่มขึ้นเป็น 2 เท่า`,
-          })
+          newToasts.push({ key: popupKey, ...buildPowerSurgeCopy(event.affectedQuestionIndex + 1) })
+          markMagicPopupShown(roomCode, popupKey)
+        }
+      }
+      if (event.status === 'queued' && event.itemType === 'illusion' && event.sourceTeamId === teamId && event.affectedQuestionIndex != null) {
+        const popupKey = `${event.id}:illusion`
+        if (!hasShownMagicPopup(roomCode, popupKey)) {
+          newToasts.push({ key: popupKey, ...buildIllusionCopy(event.affectedQuestionIndex + 1) })
           markMagicPopupShown(roomCode, popupKey)
         }
       }
       if (event.status === 'blocked' && event.itemType === 'score_seal' && event.targetTeamId === teamId) {
         const popupKey = `${event.id}:shield-block`
         if (!hasShownMagicPopup(roomCode, popupKey)) {
-          newToasts.push({
-            key: popupKey,
-            icon: '🛡️',
-            tone: 'shield',
-            message: '🛡️ เกราะกุหลาบป้องกันสำเร็จ!\nทีมของคุณไม่ถูกลดคะแนน และเกราะถูกใช้ไปแล้ว',
-          })
+          newToasts.push({ key: popupKey, ...buildShieldBlockCopy() })
           markMagicPopupShown(roomCode, popupKey)
         }
       }
@@ -173,15 +197,21 @@ export const MagicPanel = ({
   const activatableTypes = ACTIVATABLE_TYPES.filter((itemType) => magic.inventory[itemType].available > 0)
   const effectiveActivationItem = activatableTypes.length === 1 ? activatableTypes[0] : (selectedActivationItem || null)
   const opponentTeams = teams.filter((team) => team.id !== magic.teamId)
+  // Milestone: while the room is still 'waiting', the current pick (if any) is always exactly
+  // one type — this is what the picker below pre-selects, and what a re-submit without touching
+  // any button (re-confirm) would resubmit unchanged.
+  const currentStartingItemType = heldTypes.length === 1 ? heldTypes[0] : null
+  const effectiveStartingItem = selectedStartingItem || currentStartingItemType || ''
 
   const submitChoice = async (): Promise<void> => {
-    if (!selectedStartingItem) return
+    if (!effectiveStartingItem) return
     setBusy(true)
     setError('')
     setNotice('')
     try {
-      await onChoose(selectedStartingItem)
-      setNotice('เลือกไอเทมเริ่มต้นเรียบร้อยแล้ว')
+      await onChoose(effectiveStartingItem)
+      setNotice(hasChosenStartingItem ? 'เปลี่ยนไอเทมเริ่มต้นเรียบร้อยแล้ว' : 'เลือกไอเทมเริ่มต้นเรียบร้อยแล้ว')
+      setSelectedStartingItem('')
     } catch (reason) {
       setError(friendlyError(reason))
     } finally {
@@ -210,23 +240,81 @@ export const MagicPanel = ({
     }
   }
 
+  // Bug fix: this toast is purely informational (no click handler, nothing to dismiss by hand —
+  // it auto-clears itself above) and used to be mounted as a normal child of this section, whose
+  // `.glass-panel` class carries `backdrop-filter`. Per the CSS spec, a `backdrop-filter` (like
+  // `transform`/`filter`/`perspective`) on an ancestor makes THAT ancestor the containing block
+  // for any `position: fixed` descendant — so instead of staying pinned to the viewport, the
+  // toast was being positioned relative to this panel's own (scrolled-down, mid-page) box,
+  // landing on top of this panel's own controls (the item-activation buttons, grimoire trigger)
+  // for as long as it was visible. Portaling it to `document.body` escapes every such ancestor so
+  // it is always genuinely viewport-fixed, and `pointer-events: none` (added in CSS) means it can
+  // never intercept a tap even while visible, on top of whatever it happens to render over.
+  const toastOverlay = activeToast ? createPortal(
+    <div className="magic-toast-stack" aria-live="assertive">
+      <div className={`magic-toast magic-toast-${activeToast.tone}`}>
+        <span className="magic-toast-icon-wrap" aria-hidden="true">
+          <span className="magic-toast-glow" />
+          <MagicItemIcon itemType={ICON_ITEM_BY_TONE[activeToast.tone]} size="lg" />
+        </span>
+        <div className="magic-toast-copy">
+          <strong className="magic-toast-headline">{activeToast.headline}</strong>
+          <p>{activeToast.body}</p>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  ) : null
+
   return (
     <section className="glass-panel mt-5 p-5" aria-label="สถานะมนตรา">
-      {activeToast ? (
-        <div className="magic-toast-stack" aria-live="assertive">
-          <div className={`magic-toast magic-toast-${activeToast.tone}`}>
-            <span className="magic-toast-icon" aria-hidden="true">{activeToast.icon}</span>
-            <p>{activeToast.message}</p>
-          </div>
-        </div>
-      ) : null}
+      {toastOverlay}
 
-      <p className="eyebrow">มนตรา</p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="eyebrow">มนตรา</p>
+        <div className="flex items-center gap-2">
+          {magic.magicHolderPlayerId ? <span className="magic-badge magic-badge-captain">👑 {isHolder ? 'คุณคือผู้ถือคทา' : 'มีผู้ถือคทาแล้ว'}</span> : null}
+          <button type="button" className="grimoire-trigger-button" onClick={() => setGrimoireOpen(true)}>
+            📜 คัมภีร์มนตรา
+          </button>
+        </div>
+      </div>
       <p className="mt-1 text-sm text-[#c0b7ab]">
         {magic.magicHolderPlayerId
           ? (isHolder ? 'คุณคือผู้ถือคทาเวทมนตร์ของทีมนี้' : 'ผู้ถือคทาเวทมนตร์ของทีมนี้เท่านั้นที่ใช้ไอเทมได้')
           : 'ยังไม่มีผู้ถือคทาเวทมนตร์'}
       </p>
+
+      {/* Item 7: compact "active effect" badges — icon + short Thai label, remain visible for as
+          long as the underlying state is true, distinct from the transient toast above.
+          Grimoire follow-up: wording now distinguishes queued ("ข้อต่อไป") from active
+          ("กำลังมีผลในข้อนี้") via getMagicEffectPhase, instead of always saying "ข้อต่อไป" even
+          once the target question is actually the one in progress. */}
+      {magic.queuedEffect || incomingSealSummaries.length > 0 || magic.inventory.rose_shield.available > 0 ? (
+        <div className="magic-status-badges" role="list" aria-label="สถานะมนตราปัจจุบัน">
+          {magic.queuedEffect ? (() => {
+            const phase = getMagicEffectPhase(magic.queuedEffect.affectedQuestionIndex, currentQuestionIndex)
+            const phaseLabel = phase === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'
+            const itemLabel = magic.queuedEffect.itemType === 'power_surge' ? 'x2' : magic.queuedEffect.itemType === 'illusion' ? 'มายา' : 'ผนึก'
+            return (
+              <span className={`magic-badge magic-badge-${magic.queuedEffect.itemType === 'power_surge' ? 'surge' : magic.queuedEffect.itemType === 'illusion' ? 'illusion' : 'seal'}`} role="listitem">
+                <MagicItemIcon itemType={magic.queuedEffect.itemType} size="sm" />
+                {itemLabel} {phaseLabel}
+              </span>
+            )
+          })() : null}
+          {incomingSealSummaries.length > 0 ? (
+            <span className="magic-badge magic-badge-seal" role="listitem">
+              <MagicItemIcon itemType="score_seal" size="sm" /> ถูกผนึก {getMagicEffectPhase(incomingSealSummaries[0].questionIndex, currentQuestionIndex) === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'}
+            </span>
+          ) : null}
+          {magic.inventory.rose_shield.available > 0 ? (
+            <span className="magic-badge magic-badge-shield" role="listitem">
+              <MagicItemIcon itemType="rose_shield" size="sm" /> ป้องกันอัตโนมัติได้อีก {magic.inventory.rose_shield.available} ครั้ง
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {!hasChosenStartingItem ? (
         <p className="mt-2 text-sm text-[#8b8377]">ทีมนี้ยังไม่ได้เลือกไอเทมเริ่มต้น</p>
@@ -235,17 +323,21 @@ export const MagicPanel = ({
           {/* Milestone 4: inventory is now a count per item type (starting choice + boss
               rewards can both add to the same type), not a list of one-off instances — every
               team member sees available vs. used counts here, not just the holder. */}
-          <ul className="mt-3 space-y-1 text-sm">
+          <div className="magic-inventory-row" role="list" aria-label="ไอเทมของทีม">
             {heldTypes.map((itemType) => {
               const entry = magic.inventory[itemType]
               return (
-                <li key={itemType} className="text-[#fff7df]">
-                  {MAGIC_ITEM_INFO[itemType].label} — พร้อมใช้ {entry.available} ชิ้น
-                  {entry.consumed > 0 ? <span className="text-[#8b8377]">{` · ใช้ไปแล้ว ${entry.consumed} ชิ้น`}</span> : null}
-                </li>
+                <div key={itemType} className="magic-inventory-chip" role="listitem">
+                  <MagicItemIcon itemType={itemType} />
+                  <span className="magic-inventory-chip-label">{MAGIC_ITEM_INFO[itemType].label}</span>
+                  <span className="magic-inventory-chip-count">
+                    ×{entry.available}
+                    {entry.consumed > 0 ? <small> (ใช้แล้ว {entry.consumed})</small> : null}
+                  </span>
+                </div>
               )
             })}
-          </ul>
+          </div>
           {/* Milestone 2.2: choosing a starting item never implies immediate use — this line
               makes that explicit to the whole team, not just the holder, for as long as the
               room hasn't started playing yet (once playing, the holder-only section below takes
@@ -256,48 +348,66 @@ export const MagicPanel = ({
         </>
       )}
 
-      {magic.queuedEffect ? (
-        <p className="mt-3 text-sm text-[#f2d58d]">
-          {magic.queuedEffect.itemType === 'power_surge'
-            ? `⚡ มนตร์ทวีพลังของทีมกำลังรอผลในคำถามข้อที่ ${magic.queuedEffect.affectedQuestionIndex + 1}`
-            : `🔒 มนตร์ผนึกคะแนนของทีมกำลังรอผลกับ ${teams.find((team) => team.id === magic.queuedEffect?.targetTeamId)?.name ?? 'ทีมเป้าหมาย'} ในคำถามข้อที่ ${magic.queuedEffect.affectedQuestionIndex + 1}`}
-        </p>
+      {(magic.queuedEffect || incomingSealSummaries.length > 0) ? (
+        <div className="mt-3 space-y-1.5 text-xs text-[#c0b7ab]">
+          {/* Grimoire follow-up: "จะมีผล...ข้อต่อไป" while queued vs "กำลังมีผลในข้อนี้" once the
+              target question is the one actually in progress — never "กำลังรอผล" (ambiguous
+              about which question) for both states like before. */}
+          {magic.queuedEffect ? (() => {
+            const phase = getMagicEffectPhase(magic.queuedEffect.affectedQuestionIndex, currentQuestionIndex)
+            const timing = phase === 'active'
+              ? `กำลังมีผลในคำถามข้อนี้ (ข้อ ${magic.queuedEffect.affectedQuestionIndex + 1})`
+              : `จะมีผลในคำถามข้อต่อไป (ข้อ ${magic.queuedEffect.affectedQuestionIndex + 1})`
+            return (
+              <p className="flex items-center gap-1.5">
+                <MagicItemIcon itemType={magic.queuedEffect.itemType} size="sm" />
+                {magic.queuedEffect.itemType === 'power_surge'
+                  ? `มนตร์ทวีพลังของทีม ${timing} — คะแนนที่ทำได้ในข้อนั้น ×2`
+                  : magic.queuedEffect.itemType === 'illusion'
+                    ? `มนตร์ลวงตา ${timing} — ตัดตัวเลือกผิด 1 ข้อให้ทั้งทีม`
+                    : `มนตร์ผนึกคะแนนของทีมกำลังส่งผลกับ ${teams.find((team) => team.id === magic.queuedEffect?.targetTeamId)?.name ?? 'ทีมเป้าหมาย'} — ${timing}`}
+              </p>
+            )
+          })() : null}
+          {incomingSealSummaries.map((summary) => {
+            const phase = getMagicEffectPhase(summary.questionIndex, currentQuestionIndex)
+            const timing = phase === 'active' ? `กำลังมีผลในข้อนี้ (ข้อ ${summary.questionIndex + 1})` : `จะมีผลในข้อต่อไป (ข้อ ${summary.questionIndex + 1})`
+            return (
+              <p key={summary.questionIndex} className="flex items-center gap-1.5 text-[#f3aaa7]">
+                <MagicItemIcon itemType="score_seal" size="sm" />
+                ถูกผนึกคะแนน {summary.count} ครั้ง — {timing} (คะแนนแข่งขันจะเหลือ {formatPercent(computeHostileMultiplier(summary.count))}%)
+              </p>
+            )
+          })}
+        </div>
       ) : null}
 
-      {incomingSealSummaries.length > 0 ? (
-        <ul className="mt-3 space-y-1 text-sm text-[#f3aaa7]">
-          {incomingSealSummaries.map((summary) => (
-            <li key={summary.questionIndex}>
-              ⚠️ ถูกผนึกคะแนน {summary.count} ครั้งในคำถามข้อที่ {summary.questionIndex + 1} (คะแนนแข่งขันจะเหลือ {formatPercent(computeHostileMultiplier(summary.count))}%)
-            </li>
-          ))}
-        </ul>
-      ) : null}
-
-      <p className="mt-3 text-sm text-[#c0b7ab]">
-        🛡️ เกราะกุหลาบ: พร้อมใช้ {magic.inventory.rose_shield.available} ชิ้น
-        {magic.inventory.rose_shield.consumed > 0 ? ` · ใช้ไปแล้ว ${magic.inventory.rose_shield.consumed} ชิ้น` : ''}
-      </p>
-
-      {isHolder && !hasChosenStartingItem ? (
+      {/* Milestone: the picker stays available (not just before the first pick) for as long as
+          roomStatus === 'waiting' — this is what lets the captain change their mind any number
+          of times before the mission starts, and what makes it disappear the moment roomStatus
+          becomes 'playing' (this section simply doesn't render then), locking the choice in
+          permanently. The current pick (if any) is pre-selected via effectiveStartingItem. */}
+      {isHolder && roomStatus === 'waiting' ? (
         <div className="mt-4 space-y-3">
-          <p className="text-sm text-[#d8d1c5]">เลือกไอเทมเริ่มต้นของทีม (เลือกได้ครั้งเดียว)</p>
+          <p className="text-sm text-[#d8d1c5]">
+            {hasChosenStartingItem ? 'ไอเทมเริ่มต้นของทีม (เปลี่ยนได้จนกว่าจะเริ่มภารกิจ)' : 'เลือกไอเทมเริ่มต้นของทีม'}
+          </p>
           <div className="grid gap-2">
             {MAGIC_ITEM_TYPES.map((itemType) => (
               <button
                 key={itemType}
                 type="button"
-                className={`choice-button ${selectedStartingItem === itemType ? 'choice-selected' : ''}`}
+                className={`choice-button ${effectiveStartingItem === itemType ? 'choice-selected' : ''}`}
                 onClick={() => setSelectedStartingItem(itemType)}
                 disabled={busy}
               >
-                <span aria-hidden="true">✦</span>
+                <MagicItemIcon itemType={itemType} />
                 <strong>{MAGIC_ITEM_INFO[itemType].label}<small className="block text-xs font-normal text-[#c0b7ab]">{MAGIC_ITEM_INFO[itemType].description}</small></strong>
               </button>
             ))}
           </div>
-          <button className="primary-button w-full" type="button" onClick={() => void submitChoice()} disabled={!selectedStartingItem || busy}>
-            {busy ? 'กำลังยืนยัน...' : 'ยืนยันไอเทมเริ่มต้น'}
+          <button className="primary-button w-full" type="button" onClick={() => void submitChoice()} disabled={!effectiveStartingItem || busy}>
+            {busy ? 'กำลังยืนยัน...' : hasChosenStartingItem ? 'ยืนยันการเปลี่ยนไอเทม' : 'ยืนยันไอเทมเริ่มต้น'}
           </button>
         </div>
       ) : null}
@@ -315,7 +425,7 @@ export const MagicPanel = ({
                     onClick={() => setSelectedActivationItem(itemType)}
                     disabled={busy}
                   >
-                    <span aria-hidden="true">✦</span>
+                    <MagicItemIcon itemType={itemType} />
                     <strong>{MAGIC_ITEM_INFO[itemType].label} ({magic.inventory[itemType].available})</strong>
                   </button>
                 ))}
@@ -342,12 +452,14 @@ export const MagicPanel = ({
           // question once playing (no timer gate) — the only way canActivateNow is false while
           // playing is that no eligible future question is left (currently on, or one away
           // from, the final question), which is permanent for the rest of this round.
-          <p className="mt-3 text-sm text-[#8b8377]">ไม่สามารถใช้ไอเทมได้แล้ว เนื่องจากไม่มีคำถามข้อถัดไปที่ไอเทมมีผลได้ในภารกิจนี้</p>
+          <p className="mt-3 text-sm text-[#8b8377]">ไม่สามารถใช้ไอเทมได้แล้ว เนื่องจากไม่มีคำถามข้อต่อไปที่ไอเทมมีผลได้ในภารกิจนี้</p>
         ) : null
       ) : null}
 
       {error ? <p className="error-message mt-3" role="alert">{error}</p> : null}
       {notice && !error ? <p className="success-message mt-3" role="status">{notice}</p> : null}
+
+      <GrimoireModal open={grimoireOpen} onClose={() => setGrimoireOpen(false)} />
     </section>
   )
 }

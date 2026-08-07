@@ -1,13 +1,76 @@
 import { shuffle } from './game'
-import type { MagicEvent, MagicInventory, MagicItemType, Player, Room, TeamMagicBreakdown, TeamMeta } from '../types/game'
+import type { MagicEvent, MagicInventory, MagicItemType, Player, Question, Room, TeamMagicBreakdown, TeamMeta } from '../types/game'
 
-export const MAGIC_ITEM_INFO: Record<MagicItemType, { label: string; description: string }> = {
-  power_surge: { label: 'มนตร์ทวีพลัง', description: 'ทีมของคุณได้รับคะแนนแข่งขัน 2 เท่าในคำถามข้อถัดไปที่ใช้ได้' },
-  score_seal: { label: 'มนตร์ผนึกคะแนน', description: 'ทีมเป้าหมายได้รับคะแนนแข่งขันเพียงครึ่งหนึ่งในคำถามข้อถัดไปที่ใช้ได้ (ผนึกซ้อนกันได้จากหลายทีม)' },
-  rose_shield: { label: 'เกราะกุหลาบ', description: 'ปิดกั้นไอเทมฝ่ายตรงข้ามที่เข้ามาหนึ่งครั้งต่อเกราะหนึ่งชิ้น แล้วถูกใช้ไปทันที' },
+// Milestone: icon is the single source every render site looks up for a per-item glyph —
+// previously the correct emoji existed but only as scattered hardcoded literals wired to a few
+// one-off spots (toasts, a GamePage-local boss-reward map), so most generic list-rendering sites
+// (inventory lists, choice buttons, teacher's per-team panel) had nothing to render and fell back
+// to a decorative generic glyph or nothing at all. See MagicItemIcon.tsx, the shared component
+// every render site should use instead of reading `.icon` directly.
+// Grimoire follow-up: "ข้อต่อไป" (not "ข้อถัดไป" — synonymous, but the grimoire's exact quoted
+// copy uses "ข้อต่อไป" throughout, so these short descriptions now match it verbatim instead of
+// a near-synonym, per the "terminology consistent with the grimoire" requirement.
+export const MAGIC_ITEM_INFO: Record<MagicItemType, { label: string; description: string; icon: string }> = {
+  power_surge: { label: 'มนตร์ทวีพลัง', description: 'ทีมของคุณได้รับคะแนนแข่งขัน 2 เท่าในคำถามข้อต่อไปที่ใช้ได้', icon: '⚡' },
+  score_seal: { label: 'มนตร์ผนึกคะแนน', description: 'ทีมเป้าหมายได้รับคะแนนแข่งขันเพียงครึ่งหนึ่งในคำถามข้อต่อไปที่ใช้ได้ (ผนึกซ้อนกันได้จากหลายทีม)', icon: '🔒' },
+  rose_shield: { label: 'เกราะกุหลาบ', description: 'ปิดกั้นไอเทมฝ่ายตรงข้ามที่เข้ามาหนึ่งครั้งต่อเกราะหนึ่งชิ้น แล้วถูกใช้ไปทันที', icon: '🛡️' },
+  illusion: { label: 'มนตร์ลวงตา', description: 'ตัดตัวเลือกที่ผิดออก 1 ตัวเลือกให้ทุกคนในทีมในคำถามข้อต่อไปที่ใช้ได้ (ไม่มีผลต่อคะแนน)', icon: '🔮' },
 }
 
-export const MAGIC_ITEM_TYPES: MagicItemType[] = ['power_surge', 'score_seal', 'rose_shield']
+export const MAGIC_ITEM_TYPES: MagicItemType[] = ['power_surge', 'score_seal', 'rose_shield', 'illusion']
+
+// Grimoire ("คัมภีร์มนตรา"): the detailed, structured explanation shown in the reference modal —
+// deliberately a separate table from MAGIC_ITEM_INFO.description (which stays the short,
+// single-line summary used in choice buttons/inventory), keyed by the same MagicItemType so both
+// tables can never drift into naming a 5th item or disagreeing on which types exist. Every line
+// here is exact copy, not paraphrased, so the wording audited into badges/popups elsewhere in the
+// app can be checked against this as the canonical source. rose_shield's `activation`/`timing`/
+// `effect` slots are populated with the same meaning as the other three (who/how it triggers,
+// when/how long, what it does) even though its mechanic reads in a different order than the
+// three next-question items — never described as "next question only" (it persists until it
+// blocks a Score Seal, then is consumed).
+export interface MagicGrimoireEntry {
+  activation: string
+  timing: string
+  effect: string
+  note?: string
+}
+
+export const MAGIC_GRIMOIRE: Record<MagicItemType, MagicGrimoireEntry> = {
+  power_surge: {
+    activation: 'หัวหน้าทีมกดใช้',
+    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
+    effect: 'คะแนนที่ทีมทำได้ในข้อนั้น ×2',
+  },
+  score_seal: {
+    activation: 'หัวหน้าทีมเลือกทีมเป้าหมายแล้วกดใช้',
+    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
+    effect: 'คะแนนของทีมเป้าหมายในข้อนั้นเหลือ 50%',
+    note: 'หากมีเกราะกุหลาบ การโจมตีจะถูกป้องกัน',
+  },
+  rose_shield: {
+    activation: 'ไม่ต้องกดใช้',
+    timing: 'เกราะจะคงอยู่จนกว่าจะป้องกันการโจมตีสำเร็จ แล้วหายไป 1 ชิ้น',
+    effect: 'ระบบป้องกันมนตร์ผนึกคะแนนให้อัตโนมัติ 1 ครั้ง',
+  },
+  illusion: {
+    activation: 'หัวหน้าทีมกดใช้',
+    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
+    effect: 'ระบบตัดตัวเลือกที่ผิดออก 1 ตัวให้สมาชิกทั้งทีม',
+  },
+}
+
+// Item-copy consistency (grimoire follow-up): a single source of truth for "is this queued
+// effect upcoming, or already the question in progress" — badges/popups across MagicPanel and
+// TeacherPage both need this same queued-vs-active distinction so they can never disagree on
+// wording. affectedQuestionIndex is only ever >= currentQuestionIndex while the effect is live
+// (resolution clears queuedEffect to null the moment the target question closes), so `<=` is a
+// safe/simple "active" test — never <, which would mean an already-resolved (and thus already
+// cleared) effect.
+export type MagicEffectPhase = 'queued' | 'active'
+
+export const getMagicEffectPhase = (affectedQuestionIndex: number, currentQuestionIndex: number): MagicEffectPhase =>
+  affectedQuestionIndex <= currentQuestionIndex ? 'active' : 'queued'
 
 // True once a team has ever received ANY starting item (available or already consumed) — used
 // to gate "choose exactly one starting item" (must be false beforehand) without caring about
@@ -19,19 +82,40 @@ export const hasAnyMagicItem = (inventory: MagicInventory): boolean =>
 export const totalAvailableMagicItems = (inventory: MagicInventory): number =>
   MAGIC_ITEM_TYPES.reduce((sum, itemType) => sum + inventory[itemType].available, 0)
 
-// One random member of each team becomes the magic holder. Teams with no members are skipped
-// (shouldn't happen once teams are locked, since randomizeTeams already rejects teamCount >
-// player count, but this keeps the function total rather than throwing on bad input).
-export const pickHolders = (
-  teamMemberIdsByTeam: Record<string, string[]>,
+// Milestone 4.1: replaces the old random-holder pickHolders — the magic holder is now the
+// team's ELECTED captain. Highest vote count wins; a tie among the top candidates is broken by
+// a uniform random draw (never array/insertion order), matching lib/boss.ts's tie-pool draw for
+// boss ranking. If no votes were cast at all, every member tallies 0 and is therefore tied for
+// "highest" — the same draw then picks uniformly among the WHOLE roster, so a team can never get
+// permanently stuck with no captain (this is what backs the teacher's early-finalize button).
+// Votes for a target no longer on the roster (e.g. a stale vote from before a re-randomize) are
+// silently ignored rather than crashing.
+export const pickElectedCaptain = (
+  memberIds: string[],
+  votesByVoter: Record<string, string>,
   random: () => number = Math.random,
-): Record<string, string> => {
-  const holders: Record<string, string> = {}
-  for (const [teamId, memberIds] of Object.entries(teamMemberIdsByTeam)) {
-    if (memberIds.length === 0) continue
-    holders[teamId] = shuffle(memberIds, random)[0]
-  }
-  return holders
+): string | null => {
+  if (memberIds.length === 0) return null
+  const tally = new Map<string, number>(memberIds.map((id) => [id, 0]))
+  Object.values(votesByVoter).forEach((targetId) => {
+    if (!tally.has(targetId)) return
+    tally.set(targetId, (tally.get(targetId) ?? 0) + 1)
+  })
+  const highest = Math.max(...tally.values())
+  const topCandidates = memberIds.filter((id) => tally.get(id) === highest)
+  return shuffle(topCandidates, random)[0] ?? null
+}
+
+// Milestone 4.1: chosen exactly ONCE, at activation time, and stored on the QueuedMagicEffect
+// (see hiddenChoiceId's doc comment in types/game.ts) — callers must never call this again for
+// an already-queued illusion effect; that discipline is what makes "retry/refresh never rerolls
+// the hidden choice" true by construction, since nothing ever recomputes it on read.
+export const pickIllusionHiddenChoice = (
+  question: Pick<Question, 'choices' | 'correctChoiceId'>,
+  random: () => number = Math.random,
+): string => {
+  const incorrectChoices = question.choices.filter((choice) => choice.id !== question.correctChoiceId)
+  return shuffle(incorrectChoices, random)[0].id
 }
 
 // Question 1 (index 0) and the final question (index length-1, "question 10" in a 10-question
@@ -121,6 +205,79 @@ const computeAppliedMagicMultipliers = (events: MagicEvent[], currentRound: numb
 // recorded with status 'blocked', never 'applied', so it's already excluded upstream in
 // computeAppliedMagicMultipliers and never contributes to sealCount here.
 export const computeHostileMultiplier = (appliedSealCount: number): number => 0.5 ** appliedSealCount
+
+export const formatHostilePercent = (multiplier: number): string => {
+  const percent = multiplier * 100
+  return Number.isInteger(percent) ? `${percent}` : percent.toFixed(1)
+}
+
+// Item 7: dramatic-popup presentation copy, shared by the student toast (MagicPanel) and the
+// teacher spell-event overlay (TeacherPage) so both audiences narrate the same event with the
+// same tone/wording, just at a different scale. `tone` drives the CSS variant (magic-toast-seal
+// etc. — kept as the existing short aliases, not full MagicItemType values, matching the CSS
+// classes already in styles.css).
+export interface MagicEventCopy {
+  tone: 'surge' | 'seal' | 'shield' | 'illusion'
+  headline: string
+  body: string
+}
+
+// Item 4 (follow-up): every "next eligible question" body explicitly says คำถามข้อต่อไป — never
+// "ข้อนี้"/"this question" — since activation always targets the NEXT eligible question, never
+// the one currently being answered. The specific number is kept alongside for precision, but the
+// wording itself must never suggest an immediate/current-question effect.
+export const buildIncomingSealCopy = (count: number, questionNumber: number): MagicEventCopy => ({
+  tone: 'seal',
+  headline: 'ทีมของคุณถูกสาปผนึกคะแนน!',
+  body: count >= 2
+    ? `ถูกผนึกคะแนน ${count} ครั้ง — คำถามข้อต่อไป (ข้อ ${questionNumber}) คะแนนของทีมคุณจะเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`
+    : `คำถามข้อต่อไป (ข้อ ${questionNumber}) คะแนนของทีมคุณจะเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`,
+})
+
+export const buildPowerSurgeCopy = (questionNumber: number): MagicEventCopy => ({
+  tone: 'surge',
+  headline: 'ทีมของคุณร่ายมนตร์ทวีพลัง!',
+  body: `คำถามข้อต่อไป (ข้อ ${questionNumber}) ทีมของคุณจะได้รับคะแนน x2`,
+})
+
+export const buildIllusionCopy = (questionNumber: number): MagicEventCopy => ({
+  tone: 'illusion',
+  headline: 'ทีมของคุณใช้มายาลวงตา!',
+  body: `คำถามข้อต่อไป (ข้อ ${questionNumber}) ตัวเลือกที่ผิด 1 ตัวจะถูกซ่อนให้ทุกคนในทีม — คำตอบยังต้องเลือกเองตามปกติ`,
+})
+
+export const buildShieldBlockCopy = (): MagicEventCopy => ({
+  tone: 'shield',
+  headline: 'เกราะกุหลาบป้องกันสำเร็จ!',
+  body: 'การโจมตีถูกสะท้อน/ป้องกันแล้ว ทีมของคุณไม่ถูกลดคะแนน และเกราะถูกใช้ไปหนึ่งชิ้น',
+})
+
+// Teacher-side variant of the same events — headline names the acting/target TEAM (guardian name
+// once item 6 sets one, "ทีม N" fallback otherwise), since the teacher screen shows every team
+// at once rather than a single team's own first-person view.
+export const buildTeacherSpellEventCopy = (
+  event: { itemType: MagicItemType; status: MagicEvent['status'] },
+  sourceTeamName: string,
+  targetTeamName: string | null,
+): MagicEventCopy => {
+  if (event.status === 'blocked') {
+    return {
+      tone: 'shield',
+      headline: `เกราะกุหลาบของทีม${targetTeamName ?? '-'}ป้องกันมนตร์โจมตี!`,
+      body: 'การโจมตีถูกสะท้อน/ป้องกันแล้ว',
+    }
+  }
+  if (event.itemType === 'power_surge') {
+    return { tone: 'surge', headline: `ทีม${sourceTeamName}ร่ายมนตร์ทวีพลัง!`, body: `คำถามข้อต่อไป ทีม${sourceTeamName}จะได้รับคะแนน x2` }
+  }
+  if (event.itemType === 'score_seal') {
+    return { tone: 'seal', headline: `ทีม${sourceTeamName}สาปผนึกคะแนนใส่ทีม${targetTeamName ?? '-'}!`, body: `คำถามข้อต่อไป คะแนนของทีม${targetTeamName ?? '-'}จะเหลือลดลง` }
+  }
+  if (event.itemType === 'illusion') {
+    return { tone: 'illusion', headline: `ทีม${sourceTeamName}ใช้มายาลวงตา!`, body: `คำถามข้อต่อไป ตัวเลือกที่ผิด 1 ตัวจะถูกซ่อนให้ทีม${sourceTeamName}` }
+  }
+  return { tone: 'shield', headline: `ทีม${sourceTeamName}ใช้เกราะกุหลาบ!`, body: 'พร้อมป้องกันมนตร์โจมตีครั้งถัดไป' }
+}
 
 // Milestone 4: team knowledge score, per question, is now
 // (correct locked-roster members / total locked-roster members) * 10 — fair regardless of team

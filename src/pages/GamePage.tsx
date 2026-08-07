@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import { BossResultDetails } from '../components/BossResultDetails'
 import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
+import { MagicItemIcon } from '../components/MagicItemIcon'
 import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
-import { useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
+import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
 import { areAnswersLocked, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
 import { getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
 import { friendlyError } from '../services'
@@ -16,12 +18,6 @@ const formatCountdown = (milliseconds: number): string => {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
-}
-
-const BOSS_REWARD_ICONS: Record<BossWinner['rewardItemType'], string> = {
-  power_surge: '⚡',
-  score_seal: '🔒',
-  rose_shield: '🛡️',
 }
 
 const formatMultiplier = (multiplier: number): string => {
@@ -42,6 +38,7 @@ export const GamePage = () => {
   const progressState = useTeamAnswerProgress(normalizedCode, teamId)
   const magicState = useTeamMagic(normalizedCode, teamId)
   const magicEventsState = useMagicEvents(normalizedCode)
+  const guardianNamesState = useAllTeamGuardianNames(normalizedCode)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [pendingChoiceId, setPendingChoiceId] = useState('')
@@ -50,6 +47,12 @@ export const GamePage = () => {
   const room = roomState.data
   const player = playerState.data
   const assignedTeam = room?.teams.find((team) => team.id === player?.teamId)
+  // Item 6: guardian name (once set) replaces the generic "ทีม N" label everywhere on this
+  // screen — displayTeams is what's passed to MagicPanel so its target-team select and queued-
+  // effect text pick up guardian names automatically, without changing MagicPanel itself.
+  const guardianNameById = useMemo(() => new Map(guardianNamesState.data.map((entry) => [entry.teamId, entry.name])), [guardianNamesState.data])
+  const displayTeams = useMemo(() => (room?.teams ?? []).map((team) => ({ ...team, name: guardianNameById.get(team.id) ?? team.name })), [room?.teams, guardianNameById])
+  const assignedTeamDisplayName = assignedTeam ? guardianNameById.get(assignedTeam.id) ?? assignedTeam.name : 'ยังไม่ได้จัดทีม'
   const isBossPhase = room?.phase === 'boss'
   const questionIndex = room?.currentQuestionIndex ?? 0
   const questionId = room?.questionIds[questionIndex]
@@ -103,6 +106,18 @@ export const GamePage = () => {
   // themselves). Shown only while it actually matches the question that just closed.
   const breakdown = magicState.data?.lastResolvedBreakdown
   const showBreakdown = Boolean(!isBossPhase && breakdown && breakdown.questionIndex === questionIndex && timeExpired)
+
+  // Milestone 4.1: illusion hides exactly one incorrect choice for every member of the
+  // holder's team on the question it targets — never boss questions (illusion's queuedEffect
+  // can only ever target a main questionIds index in the first place). The hidden choice was
+  // chosen once, server-side, at activation time (see hiddenChoiceId's doc comment in
+  // types/game.ts) — this only ever READS it, never recomputes it, so a refresh can't reroll it.
+  const illusionEffect = magicState.data?.queuedEffect
+  const illusionHiddenChoiceId = !isBossPhase && illusionEffect?.itemType === 'illusion' && illusionEffect.affectedQuestionIndex === questionIndex
+    ? illusionEffect.hiddenChoiceId ?? null
+    : null
+  const visibleChoices = question ? question.choices.filter((choice) => choice.id !== illusionHiddenChoiceId) : []
+  const isCaptain = Boolean(player && magicState.data?.magicHolderPlayerId === player.id)
 
   useEffect(() => {
     if (room?.status !== 'playing') return
@@ -191,10 +206,16 @@ export const GamePage = () => {
       {bossWinnerBanner ? (
         <div className="magic-toast-stack" aria-live="assertive">
           <div className="magic-toast magic-toast-winner">
-            <span className="magic-toast-icon" aria-hidden="true">🏆</span>
-            <p>
-              {`🏆 ผู้พิชิตด่านชิงมนตรา\n${bossWinnerBanner.displayName} จากทีม${bossWinnerBanner.teamName ?? ''}\nตอบถูก ${bossWinnerBanner.correctCount}/3 ใช้เวลา ${(bossWinnerBanner.totalTimeMs / 1_000).toFixed(2)} วินาที\nทีมได้รับ ${BOSS_REWARD_ICONS[bossWinnerBanner.rewardItemType]} ${MAGIC_ITEM_INFO[bossWinnerBanner.rewardItemType].label}เพิ่ม 1 ครั้ง`}
-            </p>
+            <span className="magic-toast-icon-wrap" aria-hidden="true">
+              <span className="magic-toast-glow" />
+              <MagicItemIcon itemType={bossWinnerBanner.rewardItemType} size="lg" />
+            </span>
+            <div className="magic-toast-copy">
+              <strong className="magic-toast-headline">🏆 ผู้พิชิตด่านชิงมนตรา</strong>
+              <p>
+                {`${bossWinnerBanner.displayName} จากทีม${bossWinnerBanner.teamId ? guardianNameById.get(bossWinnerBanner.teamId) ?? bossWinnerBanner.teamName ?? '' : bossWinnerBanner.teamName ?? ''}\nตอบถูก ${bossWinnerBanner.correctCount}/3 ใช้เวลา ${(bossWinnerBanner.totalTimeMs / 1_000).toFixed(2)} วินาที\nทีมได้รับ ${MAGIC_ITEM_INFO[bossWinnerBanner.rewardItemType].label}เพิ่ม 1 ครั้ง`}
+              </p>
+            </div>
           </div>
         </div>
       ) : null}
@@ -208,12 +229,42 @@ export const GamePage = () => {
         ) : room.status === 'completed' ? (
           <LoadingPanel text="กำลังสรุปคะแนน..." />
         ) : isBossPhase ? (
-          !bossQuestion ? (
+          // Item 5: once the 3rd boss question resolves, phase deliberately stays 'boss' until
+          // the teacher presses "เล่นต่อ" (continueAfterBoss) — this branch is what stops every
+          // client from entering the next question early, replacing the by-then-expired boss
+          // question form with an explicit waiting state instead of a stale/frozen one.
+          // Item 6 follow-up: the popup modal is gone — this same waiting screen now IS the
+          // result screen (winner/team/stats/reward via the shared BossResultDetails, same
+          // content the teacher sees), not just a "please wait" placeholder. A refresh/reconnect
+          // lands right back here for free, since it's driven by the normal realtime room
+          // subscription like everything else on this page — no separate modal-open state to
+          // restore. Falls back to the plain waiting message on the rare tie/no-winner case
+          // (room.bossWinner null) where there is nothing to show yet.
+          room.bossAwaitingContinue ? (
+            <div className="boss-awaiting-continue" aria-live="polite">
+              {room.bossWinner ? (
+                <>
+                  <p className="eyebrow">🏆 ผู้พิชิตด่านชิงมนตรา</p>
+                  <h1 className="mt-2 text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h1>
+                  <BossResultDetails
+                    winner={room.bossWinner}
+                    guardianTeamName={room.bossWinner.teamId ? guardianNameById.get(room.bossWinner.teamId) ?? room.bossWinner.teamName ?? '-' : room.bossWinner.teamName ?? '-'}
+                  />
+                </>
+              ) : (
+                <>
+                  <div className="waiting-rings mx-auto" aria-hidden="true"><span /><i>ม</i></div>
+                  <h1 className="mt-6 text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h1>
+                </>
+              )}
+              <p className="mx-auto mt-3 max-w-md text-center text-[#d8d1c5]">รอครูประกาศผลและกด &quot;เล่นต่อ&quot; เพื่อดำเนินภารกิจต่อ</p>
+            </div>
+          ) : !bossQuestion ? (
             <LoadingPanel text="กำลังเรียกด่านชิงมนตรา..." />
           ) : (
             <>
               <header className="game-header">
-                <div className="min-w-0"><p className="text-xs text-[#aaa298]">ผู้เล่น</p><strong className="block truncate text-[#fff7df]">{player.displayName}</strong><small className="block truncate text-[#c0b7ab]">{assignedTeam?.name ?? 'ยังไม่ได้จัดทีม'}</small></div>
+                <div className="min-w-0"><p className="text-xs text-[#aaa298]">ผู้เล่น</p><strong className="block truncate text-[#fff7df]">{player.displayName}</strong><small className="block truncate text-[#c0b7ab]">{assignedTeamDisplayName}</small></div>
                 <div className="text-right"><p className="text-xs text-[#aaa298]">ศึกด่านชิงมนตรา</p><strong className={`question-timer ${bossRemainingMs <= 3_000 ? 'question-timer-urgent' : ''}`}>{bossTimeExpired ? 'หมดเวลา' : formatCountdown(bossRemainingMs)}</strong></div>
               </header>
 
@@ -263,7 +314,14 @@ export const GamePage = () => {
         ) : (
           <>
             <header className="game-header">
-              <div className="min-w-0"><p className="text-xs text-[#aaa298]">ผู้เล่น</p><strong className="block truncate text-[#fff7df]">{player.displayName}</strong><small className="block truncate text-[#c0b7ab]">{assignedTeam?.name ?? 'ยังไม่ได้จัดทีม'}</small></div>
+              <div className="min-w-0">
+                <p className="text-xs text-[#aaa298]">ผู้เล่น</p>
+                <strong className="block truncate text-[#fff7df]">
+                  {player.displayName}
+                  {isCaptain ? <span className="ml-2 text-xs font-semibold text-[#f2d58d]" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
+                </strong>
+                <small className="block truncate text-[#c0b7ab]">{assignedTeamDisplayName}</small>
+              </div>
               <div className="text-right"><p className="text-xs text-[#aaa298]">รอบที่ {room.currentRound}</p><strong className={`question-timer ${remainingMs <= 5_000 ? 'question-timer-urgent' : ''}`}>{timeExpired ? 'หมดเวลา' : formatCountdown(remainingMs)}</strong></div>
             </header>
 
@@ -275,8 +333,11 @@ export const GamePage = () => {
             <section className={`question-card mt-5 ${hasAnswered ? 'answer-saved' : ''}`}>
               <div className="flex items-center justify-between gap-3"><span className="category-chip">{categoryLabel}</span><span className="text-sm text-[#aaa298]">เปลี่ยนคำตอบได้จนหมดเวลา</span></div>
               <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{question.question}</h1>
+              {illusionHiddenChoiceId ? (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-[#c9a5f0]"><MagicItemIcon itemType="illusion" size="sm" /> มนตร์ลวงตากำลังมีผลในข้อนี้ — ตัดตัวเลือกที่ผิดออกแล้ว 1 ตัว</p>
+              ) : null}
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                {question.choices.map((choice, index) => (
+                {visibleChoices.map((choice, index) => (
                   <button
                     key={choice.id}
                     className={`choice-button ${selectedChoiceId === choice.id ? 'choice-selected' : ''} ${timeExpired && selectedChoiceId === choice.id ? answerWasCorrect ? 'choice-result-correct' : 'choice-result-wrong' : ''}`}
@@ -330,11 +391,12 @@ export const GamePage = () => {
               <MagicPanel
                 magic={magicState.data}
                 magicLoading={magicState.loading}
-                teams={room.teams}
+                teams={displayTeams}
                 isHolder={magicState.data?.magicHolderPlayerId === player.id}
                 roomStatus={room.status}
                 roomCode={normalizedCode}
                 currentRound={room.currentRound}
+                currentQuestionIndex={room.currentQuestionIndex}
                 events={magicEventsState.data}
                 canActivateNow={canActivateMagicNow}
                 affectedQuestionIndex={activationWindow.valid ? activationWindow.affectedQuestionIndex : null}

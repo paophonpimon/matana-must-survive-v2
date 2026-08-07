@@ -23,29 +23,59 @@ service cloud.firestore {
     }
 
     // Milestone 4: inventory is now a fixed-shape count map ({power_surge, score_seal,
-    // rose_shield} -> {available, consumed}), not an array of item instances — this rules
-    // language has no way to search an arbitrary-length array for a predicate match, only
+    // rose_shield, illusion} -> {available, consumed}), not an array of item instances — this
+    // rules language has no way to search an arbitrary-length array for a predicate match, only
     // compare fixed field paths, which is exactly why the app-level type was redesigned this
-    // way (see types/game.ts's MagicInventory).
+    // way (see types/game.ts's MagicInventory). Milestone 4.1 adds illusion as a 4th entry.
     function hasAnyMagicItem(inventory) {
       return inventory.power_surge.available > 0 || inventory.power_surge.consumed > 0
         || inventory.score_seal.available > 0 || inventory.score_seal.consumed > 0
-        || inventory.rose_shield.available > 0 || inventory.rose_shield.consumed > 0;
+        || inventory.rose_shield.available > 0 || inventory.rose_shield.consumed > 0
+        || inventory.illusion.available > 0 || inventory.illusion.consumed > 0;
     }
 
-    // "Choosing exactly one starting item": exactly one of the three entries gains +1
-    // available (consumed unchanged), and the other two entries are completely untouched.
-    function choseExactlyOneItem(before, after) {
+    // True when exactly one of the four inventory entries holds the single starting item
+    // (available == 1, consumed == 0) and the other three are completely untouched (available
+    // == 0, consumed == 0) — the only shape the inventory may ever be in before the mission
+    // starts, whether this is the team's first pick or the Nth time the captain changed it.
+    function isSingleStartingItemInventory(inventory) {
       return (
-        after.power_surge.available == before.power_surge.available + 1 && after.power_surge.consumed == before.power_surge.consumed
-        && after.score_seal == before.score_seal && after.rose_shield == before.rose_shield
+        inventory.power_surge.available == 1 && inventory.power_surge.consumed == 0
+        && inventory.score_seal.available == 0 && inventory.score_seal.consumed == 0
+        && inventory.rose_shield.available == 0 && inventory.rose_shield.consumed == 0
+        && inventory.illusion.available == 0 && inventory.illusion.consumed == 0
       ) || (
-        after.score_seal.available == before.score_seal.available + 1 && after.score_seal.consumed == before.score_seal.consumed
-        && after.power_surge == before.power_surge && after.rose_shield == before.rose_shield
+        inventory.score_seal.available == 1 && inventory.score_seal.consumed == 0
+        && inventory.power_surge.available == 0 && inventory.power_surge.consumed == 0
+        && inventory.rose_shield.available == 0 && inventory.rose_shield.consumed == 0
+        && inventory.illusion.available == 0 && inventory.illusion.consumed == 0
       ) || (
-        after.rose_shield.available == before.rose_shield.available + 1 && after.rose_shield.consumed == before.rose_shield.consumed
-        && after.power_surge == before.power_surge && after.score_seal == before.score_seal
+        inventory.rose_shield.available == 1 && inventory.rose_shield.consumed == 0
+        && inventory.power_surge.available == 0 && inventory.power_surge.consumed == 0
+        && inventory.score_seal.available == 0 && inventory.score_seal.consumed == 0
+        && inventory.illusion.available == 0 && inventory.illusion.consumed == 0
+      ) || (
+        inventory.illusion.available == 1 && inventory.illusion.consumed == 0
+        && inventory.power_surge.available == 0 && inventory.power_surge.consumed == 0
+        && inventory.score_seal.available == 0 && inventory.score_seal.consumed == 0
+        && inventory.rose_shield.available == 0 && inventory.rose_shield.consumed == 0
       );
+    }
+
+    // "Choosing (or changing) the one starting item": before must be either untouched
+    // (hasAnyMagicItem false — the very first pick) or already a single legal starting-item
+    // pick (a change), after must be a single legal starting-item pick of any type, and no
+    // entry's `consumed` may ever move (it can't, pre-start — activation/boss rewards are both
+    // 'playing'-only — but this is checked directly rather than assumed). This is what makes "A
+    // -> B leaves only B, never A+B" true at the rules layer, not just the app layer, for
+    // both the first choice AND every subsequent change.
+    function choseExactlyOneItem(before, after) {
+      return (!hasAnyMagicItem(before) || isSingleStartingItemInventory(before))
+        && isSingleStartingItemInventory(after)
+        && after.power_surge.consumed == before.power_surge.consumed
+        && after.score_seal.consumed == before.score_seal.consumed
+        && after.rose_shield.consumed == before.rose_shield.consumed
+        && after.illusion.consumed == before.illusion.consumed;
     }
 
     // Mirrors lib/magic.ts's isEligibleQuestionIndex / getMagicActivationWindow so a holder's
@@ -170,6 +200,17 @@ service cloud.firestore {
       // Milestone 2: team magic items. Score/scoring-affecting fields are computed client
       // and server side purely from players + magicEvents (never stored) — these documents
       // only ever hold item/queue/holder bookkeeping.
+      //
+      // Milestone 4.1: magicHolderPlayerId is now the team's ELECTED CAPTAIN (see
+      // captainVotes/captainVoteProgress below), never randomly assigned. It is written ONLY by
+      // the teacher-unconditional branch below — neither holder-writable sub-branch below
+      // touches it (the starting-item branch pins it equal to its previous value; the
+      // activation branch's hasOnly(['queuedEffect']) structurally excludes it). Finalization is
+      // deliberately teacher-only rather than student-triggered-on-last-vote, because a
+      // student-triggered write could never be validated here as actually reflecting the
+      // correct vote tally (this rules language cannot aggregate/count across a collection) —
+      // see gameService.ts's doc comment on castCaptainVote for the full rationale. This makes
+      // "only teacher may reopen/reset/finalize manually" true by construction, not just policy.
       match /magic/{teamId} {
         // Opponents can currently see every team's holder/inventory/queuedEffect/shield state
         // via this broad signedIn() read — tracked as a known remaining gameplay-privacy gap,
@@ -177,19 +218,21 @@ service cloud.firestore {
         // what a holder is allowed to *write*.
         allow read: if signedIn();
         allow create: if isTeacher(roomCode);
-        // The holder may only perform two narrow, self-contained transitions: choosing their
-        // one starting item (inventory empty -> exactly one entry) or activating it
-        // (queuedEffect null -> non-null). Anything else (resolution, expiry, holder
-        // reselection, inventory reset) is teacher-only, riding inside already-teacher-gated
-        // operations (lockTeams/advanceQuestion/prepareNextRound/stopRound/closeRoom).
+        // The holder may only perform two narrow, self-contained transitions: choosing (or,
+        // while still 'waiting', changing) their one starting item — always exactly one entry,
+        // never more than one type at a time — or activating it (queuedEffect null -> non-null).
+        // Anything else (resolution, expiry, captain election/reset, inventory reset) is
+        // teacher-only, riding inside already-teacher-gated operations (lockTeams/advanceQuestion/
+        // prepareNextRound/stopRound/closeRoom/finalizeCaptainElection/resetCaptainElection).
         allow update: if isTeacher(roomCode) || (
           signedIn() && isPlayerOwner(roomCode, resource.data.magicHolderPlayerId) && (
             (
-              // Starting-item choice: team has never received any item yet (available or
-              // consumed, of any type), exactly one type gains exactly +1 available, only
-              // while waiting+locked, holder/team identity untouched.
-              !hasAnyMagicItem(resource.data.inventory)
-              && choseExactlyOneItem(resource.data.inventory, request.resource.data.inventory)
+              // Starting-item choice: the team's first pick (inventory untouched -> exactly one
+              // entry) OR a captain changing an already-chosen pick to a different one (exactly
+              // one entry -> exactly one entry, of any type combination) — choseExactlyOneItem
+              // covers both shapes. Only while waiting+locked (which also makes this permanently
+              // unreachable once the mission actually starts), holder/team identity untouched.
+              choseExactlyOneItem(resource.data.inventory, request.resource.data.inventory)
               && request.resource.data.magicHolderPlayerId == resource.data.magicHolderPlayerId
               && request.resource.data.teamId == resource.data.teamId
               && room(roomCode).status == 'waiting'
@@ -208,14 +251,23 @@ service cloud.firestore {
               // Milestone 4: multiple teams may queue a score_seal at the same target — there is
               // no "already targeted" restriction here anymore, matching the app-level stacking
               // change (seals resolve multiplicatively, see computeHostileMultiplier).
+              // Milestone 4.1: illusion joins power_surge as a valid, self-only-targetable
+              // activation type; its hiddenChoiceId cannot be validated here at all (the
+              // question bank isn't Firestore data — it's a static client bundle, exactly like
+              // correctChoiceId is never rules-validated for saveAnswer either), so it's simply
+              // an allowed optional key, trusted from the app layer like the rest of the
+              // question-bank-dependent logic in this codebase.
               resource.data.queuedEffect == null
               && request.resource.data.queuedEffect != null
-              && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt'])
-              && request.resource.data.queuedEffect.itemType in ['power_surge', 'score_seal']
+              && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt', 'hiddenChoiceId'])
+              && request.resource.data.queuedEffect.itemType in ['power_surge', 'score_seal', 'illusion']
               && resource.data.inventory[request.resource.data.queuedEffect.itemType].available > 0
               && request.resource.data.queuedEffect.sourceTeamId == teamId
               && (
-                (request.resource.data.queuedEffect.itemType == 'power_surge' && request.resource.data.queuedEffect.targetTeamId == teamId)
+                (
+                  (request.resource.data.queuedEffect.itemType == 'power_surge' || request.resource.data.queuedEffect.itemType == 'illusion')
+                  && request.resource.data.queuedEffect.targetTeamId == teamId
+                )
                 || (
                   request.resource.data.queuedEffect.itemType == 'score_seal'
                   && request.resource.data.queuedEffect.targetTeamId != teamId
@@ -252,7 +304,7 @@ service cloud.firestore {
         allow create: if isTeacher(roomCode) || (
           signedIn()
           && request.resource.data.keys().hasOnly(['itemType', 'actorPlayerId', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'status', 'round', 'createdAt', 'resolvedAt'])
-          && request.resource.data.itemType in ['power_surge', 'score_seal', 'rose_shield']
+          && request.resource.data.itemType in ['power_surge', 'score_seal', 'rose_shield', 'illusion']
           // Milestone 2.1: the event's round must be the room's CURRENT round — otherwise a
           // stale/forged write could carry a multiplier into a round it wasn't created in.
           // Competition scoring filters on this too (lib/magic.ts), so this is defense in depth.
@@ -313,6 +365,86 @@ service cloud.firestore {
           && request.resource.data.currentRound == room(roomCode).currentRound
         );
         allow delete: if false;
+      }
+
+      // Milestone 4.1: team captain election. PRIVATE per-voter record of who they actually
+      // voted for — readable only by the teacher and the voter themselves, never broadly
+      // readable. This is what makes "students see only โหวตแล้ว X/Y คน, not live candidate
+      // totals" enforceable at the rules layer: no classmate's client has a rules-legal way to
+      // read this collection at all. See captainVoteProgress below for the broadly-readable
+      // counterpart that powers the X/Y count.
+      match /captainVotes/{playerId} {
+        allow get: if isTeacher(roomCode) || isPlayerOwner(roomCode, playerId);
+        allow list: if isTeacher(roomCode);
+        // Self-voting is allowed — targetPlayerId == playerId simply satisfies the same
+        // team-match checks as voting for anyone else. "Students may change their vote until
+        // finalized" is what makes this a plain overwrite-by-id write, exactly like
+        // answerProgress/{playerId} above. electionAttempt must match the team's CURRENT
+        // attempt (read fresh from magic/{teamId}) — this is what makes a teacher's
+        // reopen/reset actually take effect: a vote cast under a superseded attempt can never
+        // be re-submitted to count toward the new one by replaying an old write. Blocked
+        // entirely once magicHolderPlayerId is already set ("prevent voting after
+        // finalization").
+        allow write: if isTeacher(roomCode) || (
+          signedIn()
+          && isPlayerOwner(roomCode, playerId)
+          && request.resource.data.keys().hasOnly(['teamId', 'targetPlayerId', 'electionAttempt', 'votedAt'])
+          && room(roomCode).status == 'waiting'
+          && room(roomCode).teamsLocked == true
+          && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
+          && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(request.resource.data.targetPlayerId)).data.teamId
+          && request.resource.data.electionAttempt == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.captainElectionAttempt
+          && get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.magicHolderPlayerId == null
+        );
+        allow delete: if false;
+      }
+
+      // Milestone 4.1: the broadly-readable counterpart to captainVotes above — same two-tier
+      // split already established by players (private) vs answerProgress (safe/broad).
+      // Deliberately carries no targetPlayerId, only "this player has voted this attempt" —
+      // this is the entire X/Y voted-count signal, and nothing else.
+      match /captainVoteProgress/{playerId} {
+        allow read: if signedIn();
+        allow write: if isTeacher(roomCode) || (
+          signedIn()
+          && isPlayerOwner(roomCode, playerId)
+          && request.resource.data.keys().hasOnly(['teamId', 'electionAttempt', 'votedAt'])
+          && room(roomCode).status == 'waiting'
+          && room(roomCode).teamsLocked == true
+          && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
+          && request.resource.data.electionAttempt == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.captainElectionAttempt
+          && get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.magicHolderPlayerId == null
+        );
+        allow delete: if false;
+      }
+
+      // Team guardian name: captain-editable, teacher-resettable/overridable display name for a
+      // locked team, replacing the generic "ทีม N" label everywhere once set. A new, isolated
+      // collection — not layered onto rooms/rosters, both of which stay exactly as
+      // teacher-only as before — so this is the only rule in the file this feature changes;
+      // nothing existing is broadened. Only create/update are captain-reachable; delete is
+      // teacher-only ("teacher may reset"), split out explicitly rather than folded into a
+      // blanket allow write. Full charset/uniqueness validation lives in the application-layer
+      // transaction (firebaseService.ts/demoService.ts both read every sibling team's current
+      // name inside the same transaction before writing — that read-set is what actually
+      // prevents two captains racing to the same name via Firestore's transaction-retry
+      // semantics; rules have no loop/aggregate primitive to scan sibling docs for a duplicate).
+      // Length is checked here too as a cheap backstop; the full character-set allowlist is left
+      // to the app layer since it doesn't change the authorization boundary.
+      match /teamNames/{teamId} {
+        allow read: if signedIn();
+        allow create, update: if isTeacher(roomCode) || (
+          signedIn()
+          && room(roomCode).status == 'waiting'
+          && room(roomCode).teamsLocked == true
+          && isPlayerOwner(roomCode, get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(teamId)).data.magicHolderPlayerId)
+          && request.resource.data.keys().hasOnly(['teamId', 'name', 'updatedAt', 'updatedByPlayerId'])
+          && request.resource.data.teamId == teamId
+          && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 20
+          && request.resource.data.updatedByPlayerId == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(teamId)).data.magicHolderPlayerId
+          && request.resource.data.updatedAt == request.time
+        );
+        allow delete: if isTeacher(roomCode);
       }
     }
   }
