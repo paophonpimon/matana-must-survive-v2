@@ -1,4 +1,5 @@
 import type { Difficulty, Question, QuestionCategory } from '../types/game'
+import { bossQuestions } from './bossQuestions'
 
 // TODO: คลังนี้เป็นข้อสอบตัวอย่างสำหรับตรวจระบบ ครูควรทบทวนและแทนที่ด้วยข้อสอบจริงก่อนใช้ประเมินผล
 const makeQuestion = (
@@ -51,4 +52,4 @@ export const questions: Question[] = [
   makeQuestion('theme-05', 'theme', 'ข้อใดสรุปแก่นเรื่องมัทนะพาธาได้เหมาะสมที่สุด', ['รักแท้ต้องได้ครอบครอง', 'ความรักควรเกิดจากความสมัครใจและเคารพกัน', 'อำนาจแก้ปัญหาได้ทุกอย่าง', 'การลงโทษทำให้เกิดความรัก'], 1, 'เรื่องชี้ให้เห็นว่าความรักไม่อาจเกิดจากการบังคับ', 'hard'),
 ]
 
-export const questionsById = new Map(questions.map((question) => [question.id, question]))
+export const questionsById = new Map([...questions, ...bossQuestions].map((question) => [question.id, question]))

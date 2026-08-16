@@ -1,4 +1,3 @@
-import { shuffle } from './game'
 import { MAGIC_ITEM_TYPES } from './magic'
 import { BOSS_QUESTION_COUNT } from '../types/game'
 import type { BossAnswerRecord, MagicItemType, Player, Question } from '../types/game'
@@ -7,20 +6,21 @@ import type { BossAnswerRecord, MagicItemType, Player, Question } from '../types
 // within the same correct-count group form a "near tie" pool — the winner is drawn uniformly at
 // random from that pool, not just handed to whoever happened to be a few milliseconds faster.
 export const BOSS_TIE_POOL_THRESHOLD_MS = 500
+// Rapid Boss deliberately skips the main game's 4s answer reveal; correctness stays hidden
+// between challenges, so only a short beat is needed before the teacher advances the room.
+export const BOSS_REVEAL_MILLISECONDS = 1_200
 
-// Picks exactly BOSS_QUESTION_COUNT distinct questions, excluding whatever the main round
-// already used this round (so the boss stage never repeats a question the student just saw).
-// The bank has 25 questions and a round only uses 10, so the excluded pool is never exhausted
-// in practice; if it somehow were, this simply returns fewer than BOSS_QUESTION_COUNT ids rather
-// than throwing — callers should treat a short result as a data problem, not crash mid-round.
+// Picks the curated Rapid Boss sequence. The mini-game bank is separate from the main 10-question
+// bank, so the three interactions can stay intentionally ordered: binary -> rune -> swipe.
+// The exclusion guard remains for safety if a custom bank ever reuses an id.
 export const selectBossQuestions = (
   bank: Question[],
-  excludeQuestionIds: string[],
-  random: () => number = Math.random,
+  excludeQuestionIds: string[] = [],
 ): string[] => {
   const excluded = new Set(excludeQuestionIds)
-  const pool = bank.filter((question) => !excluded.has(question.id))
-  return shuffle(pool, random).slice(0, BOSS_QUESTION_COUNT).map((question) => question.id)
+  // Rapid Boss uses a curated fixed sequence (binary -> rune -> swipe), not three random main
+  // questions. Keeping the exclusion guard makes this helper safe for legacy/custom banks too.
+  return bank.filter((question) => !excluded.has(question.id)).slice(0, BOSS_QUESTION_COUNT).map((question) => question.id)
 }
 
 export const pickRandomMagicItem = (random: () => number = Math.random): MagicItemType =>

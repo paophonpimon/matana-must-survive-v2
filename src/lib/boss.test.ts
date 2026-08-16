@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { BOSS_TIE_POOL_THRESHOLD_MS, computeBossRanking, pickRandomMagicItem, selectBossQuestions } from './boss'
+import { BOSS_REVEAL_MILLISECONDS, BOSS_TIE_POOL_THRESHOLD_MS, computeBossRanking, pickRandomMagicItem, selectBossQuestions } from './boss'
+import { bossQuestions } from '../data/bossQuestions'
 import { BOSS_QUESTION_COUNT } from '../types/game'
 import type { BossAnswerRecord, Question } from '../types/game'
 
@@ -43,19 +44,21 @@ const makePlayerWithTotalTime = (id: string, teamId: string, totalTimeMs: number
 })
 
 describe('selectBossQuestions', () => {
-  it('selects exactly BOSS_QUESTION_COUNT distinct questions, excluding ones already used this round', () => {
-    const bank = Array.from({ length: 25 }, (_, index) => makeQuestion(`q${index}`))
-    const excluded = bank.slice(0, 10).map((question) => question.id)
-    const selected = selectBossQuestions(bank, excluded)
+  it('uses the curated rapid-boss sequence in a stable binary -> rune -> swipe order', () => {
+    const selected = selectBossQuestions(bossQuestions, [])
     expect(selected).toHaveLength(BOSS_QUESTION_COUNT)
-    expect(new Set(selected).size).toBe(BOSS_QUESTION_COUNT)
-    selected.forEach((id) => expect(excluded).not.toContain(id))
+    expect(selected).toEqual(['boss-rapid-01', 'boss-rapid-02', 'boss-rapid-03'])
+    expect(bossQuestions.map((question) => question.bossInteraction?.kind)).toEqual(['binary', 'rune', 'swipe'])
   })
 
-  it('returns fewer than BOSS_QUESTION_COUNT (never throws) if the excluded set exhausts the pool', () => {
+  it('still honors exclusions and returns fewer than BOSS_QUESTION_COUNT instead of throwing', () => {
     const bank = [makeQuestion('q0'), makeQuestion('q1')]
-    const selected = selectBossQuestions(bank, [])
-    expect(selected.length).toBeLessThanOrEqual(bank.length)
+    const selected = selectBossQuestions(bank, ['q0'])
+    expect(selected).toEqual(['q1'])
+  })
+
+  it('uses a short boss-only reveal beat so the whole mini-game stays brief', () => {
+    expect(BOSS_REVEAL_MILLISECONDS).toBeLessThan(2_000)
   })
 })
 

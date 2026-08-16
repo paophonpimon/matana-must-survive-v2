@@ -6,6 +6,17 @@ export interface QuestionChoice {
   text: string
 }
 
+export type BossInteractionKind = 'binary' | 'rune' | 'swipe'
+
+export interface BossInteraction {
+  kind: BossInteractionKind
+  title: string
+  instruction: string
+  choiceIcons?: Record<string, string>
+  swipeLeftChoiceId?: string
+  swipeRightChoiceId?: string
+}
+
 export interface Question {
   id: string
   category: QuestionCategory
@@ -14,6 +25,10 @@ export interface Question {
   correctChoiceId: string
   explanation: string
   difficulty: Difficulty
+  // Optional rapid-boss presentation metadata. Main questions intentionally omit this field.
+  // The answer contract stays the same (selectedChoiceId -> correct/incorrect), so Firebase,
+  // ranking, and reward logic do not need a second answer model for the mini-game UI.
+  bossInteraction?: BossInteraction
 }
 
 export type RoomStatus = 'waiting' | 'playing' | 'completed' | 'closed'
@@ -82,7 +97,7 @@ export interface TeamMeta {
 export type GamePhase = 'main' | 'boss'
 
 export const BOSS_QUESTION_COUNT = 3
-export const DEFAULT_BOSS_QUESTION_DURATION_SECONDS = 10
+export const DEFAULT_BOSS_QUESTION_DURATION_SECONDS = 8
 // Boss is inserted after finishing this main question index (0-based) — "before main question
 // 6" means after question 5 (index 4).
 export const BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX = 4

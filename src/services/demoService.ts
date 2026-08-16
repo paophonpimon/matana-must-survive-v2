@@ -1,4 +1,5 @@
 import { questions, questionsById } from '../data/questions'
+import { bossQuestions } from '../data/bossQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
@@ -602,7 +603,7 @@ export class DemoGameService implements GameService {
       // currentQuestionIndex stays at 4 for the duration; advanceBossQuestion is what eventually
       // moves it to 5 once the 3rd boss question resolves.
       roomState.room.phase = 'boss'
-      roomState.room.bossQuestionIds = selectBossQuestions(questions, roomState.room.questionIds)
+      roomState.room.bossQuestionIds = selectBossQuestions(bossQuestions, roomState.room.questionIds)
       roomState.room.bossQuestionIndex = 0
       roomState.room.bossQuestionStartedAt = now
       await writeState(state)
@@ -659,6 +660,8 @@ export class DemoGameService implements GameService {
     if (roomState.room.bossQuestionIds[answer.expectedBossIndex] !== answer.questionId) {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
     }
+    // Rapid Boss is first-answer-locked, matching the Firebase service and UI.
+    if (player.bossAnswers.some((item) => item.questionId === answer.questionId)) return
     const question = questionsById.get(answer.questionId)
     const evaluated = evaluateChoice(question, answer.selectedChoiceId)
     if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')

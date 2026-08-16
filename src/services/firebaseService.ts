@@ -19,6 +19,7 @@ import {
   type Timestamp,
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
+import { bossQuestions } from '../data/bossQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
@@ -810,7 +811,7 @@ export class FirebaseGameService implements GameService {
       if (expectedQuestionIndex === BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX && !room.bossCompleted) {
         transaction.update(roomRef, {
           phase: 'boss',
-          bossQuestionIds: selectBossQuestions(questions, room.questionIds),
+          bossQuestionIds: selectBossQuestions(bossQuestions, room.questionIds),
           bossQuestionIndex: 0,
           bossQuestionStartedAt: serverTimestamp(),
         })
@@ -888,6 +889,11 @@ export class FirebaseGameService implements GameService {
       if (room.bossQuestionIds[answer.expectedBossIndex] !== answer.questionId) {
         throw new Error('ผู้ใช้:ลำดับคำถามไม่ตรงกับรอบปัจจุบัน กรุณาโหลดหน้าใหม่')
       }
+      // Rapid Boss is first-answer-locked. The old array/rules shape still permits a
+      // same-size overwrite for backward compatibility, but the service itself now treats an
+      // already-recorded answer for this boss question as immutable so speed ranking cannot be
+      // gamed by changing the answer after seeing the interaction.
+      if (player.bossAnswers.some((item) => item.questionId === answer.questionId)) return
       const question = questionsById.get(answer.questionId)
       const evaluated = evaluateChoice(question, answer.selectedChoiceId)
       if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')

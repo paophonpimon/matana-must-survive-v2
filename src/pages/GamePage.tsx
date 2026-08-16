@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { BossResultDetails } from '../components/BossResultDetails'
 import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
@@ -7,7 +7,8 @@ import { MagicPanel } from '../components/MagicPanel'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
-import { areAnswersLocked, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
 import { friendlyError } from '../services'
 import { getPlayerSession, hasShownBossWinnerBanner, markBossWinnerBannerShown } from '../services/sessionStorage'
@@ -42,6 +43,8 @@ export const GamePage = () => {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [pendingChoiceId, setPendingChoiceId] = useState('')
+  const [bossSwipeOffset, setBossSwipeOffset] = useState(0)
+  const bossSwipeStartX = useRef<number | null>(null)
   const [now, setNow] = useState(Date.now())
 
   const room = roomState.data
@@ -72,14 +75,16 @@ export const GamePage = () => {
   // object — boss has no early-close, so questionClosedAt is always null here.
   const bossTiming = room ? { questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null } : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
-  const bossRevealRemainingMs = bossTiming ? getRevealRemainingMilliseconds(bossTiming, now) : 0
+  const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
+  const bossRevealRemainingMs = bossDeadline != null && now >= bossDeadline
+    ? Math.max(0, bossDeadline + BOSS_REVEAL_MILLISECONDS - now)
+    : 0
   const bossTimeExpired = bossRemainingMs <= 0
   const bossQuestionId = room?.bossQuestionIds[room.bossQuestionIndex]
   const bossQuestion = bossQuestionId ? questionsById.get(bossQuestionId) : undefined
   const bossSavedAnswer = player?.bossAnswers.find((answer) => answer.questionId === bossQuestionId)
   const bossSelectedChoiceId = pendingChoiceId || bossSavedAnswer?.selectedChoiceId || ''
   const bossHasAnswered = Boolean(bossSavedAnswer || pendingChoiceId)
-  const bossAnswerWasCorrect = Boolean(bossSelectedChoiceId && bossSelectedChoiceId === bossQuestion?.correctChoiceId)
 
   // Y is the full locked roster (disconnected members included, since it's membership-based
   // not connection-based); X counts progress entries for the room's *current* questionId AND
@@ -128,6 +133,8 @@ export const GamePage = () => {
 
   useEffect(() => {
     setPendingChoiceId('')
+    setBossSwipeOffset(0)
+    bossSwipeStartX.current = null
     setError('')
     setSaving(false)
   }, [questionId, bossQuestionId])
@@ -183,7 +190,10 @@ export const GamePage = () => {
   }
 
   const answerBossQuestion = async (choiceId: string): Promise<void> => {
-    if (!room || !player || !bossQuestion || areAnswersLocked(saving, bossTimeExpired) || bossSelectedChoiceId === choiceId) return
+    // Rapid Boss is first-action-locked: speed is part of the ranking, so unlike main questions
+    // there is no answer-changing window. pendingChoiceId makes the lock immediate on tap/swipe,
+    // before the Firestore write even returns.
+    if (!room || !player || !bossQuestion || areAnswersLocked(saving, bossTimeExpired) || bossHasAnswered) return
     setSaving(true)
     setError('')
     setPendingChoiceId(choiceId)
@@ -199,6 +209,30 @@ export const GamePage = () => {
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleBossSwipeStart = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (areAnswersLocked(saving, bossTimeExpired) || bossHasAnswered) return
+    bossSwipeStartX.current = event.clientX
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setBossSwipeOffset(0)
+  }
+
+  const handleBossSwipeMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (bossSwipeStartX.current == null || bossHasAnswered) return
+    setBossSwipeOffset(Math.max(-110, Math.min(110, event.clientX - bossSwipeStartX.current)))
+  }
+
+  const handleBossSwipeEnd = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (bossSwipeStartX.current == null || !bossQuestion?.bossInteraction || bossHasAnswered) return
+    const deltaX = event.clientX - bossSwipeStartX.current
+    bossSwipeStartX.current = null
+    setBossSwipeOffset(0)
+    if (Math.abs(deltaX) < 48) return
+    const choiceId = deltaX < 0
+      ? bossQuestion.bossInteraction.swipeLeftChoiceId
+      : bossQuestion.bossInteraction.swipeRightChoiceId
+    if (choiceId) void answerBossQuestion(choiceId)
   }
 
   return (
@@ -273,40 +307,77 @@ export const GamePage = () => {
                 <div className="progress-track"><div className="progress-fill" style={{ width: `${((room.bossQuestionIndex + 1) / 3) * 100}%` }} /></div>
               </section>
 
-              <section className={`question-card mt-5 ${bossHasAnswered ? 'answer-saved' : ''}`}>
-                <div className="flex items-center justify-between gap-3"><span className="category-chip">{bossCategoryLabel}</span><span className="text-sm text-[#aaa298]">ตอบได้ครั้งเดียวจนกว่าจะหมดเวลา</span></div>
-                <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{bossQuestion.question}</h1>
-                <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                  {bossQuestion.choices.map((choice, index) => (
-                    <button
-                      key={choice.id}
-                      className={`choice-button ${bossSelectedChoiceId === choice.id ? 'choice-selected' : ''} ${bossTimeExpired && bossSelectedChoiceId === choice.id ? bossAnswerWasCorrect ? 'choice-result-correct' : 'choice-result-wrong' : ''}`}
-                      type="button"
-                      onClick={() => void answerBossQuestion(choice.id)}
-                      disabled={areAnswersLocked(saving, bossTimeExpired)}
-                    >
-                      <span>{['ก', 'ข', 'ค', 'ง'][index]}</span><strong>{choice.text}</strong>
-                    </button>
-                  ))}
-                </div>
+              <section className={`question-card boss-rapid-card mt-5 ${bossHasAnswered ? 'answer-saved' : ''}`}>
+                <div className="flex items-center justify-between gap-3"><span className="category-chip">{bossCategoryLabel}</span><span className="text-sm text-[#aaa298]">ตอบครั้งเดียว • เน้นความไว</span></div>
+                <p className="boss-rapid-step">{bossQuestion.bossInteraction?.title ?? `จังหวะที่ ${room.bossQuestionIndex + 1}`}</p>
+                <blockquote className="boss-source-quote">{bossQuestion.question}</blockquote>
+                <p className="boss-rapid-instruction">{bossQuestion.bossInteraction?.instruction ?? 'เลือกคำตอบ'}</p>
+
+                {bossQuestion.bossInteraction?.kind === 'swipe' ? (() => {
+                  const leftChoice = bossQuestion.choices.find((choice) => choice.id === bossQuestion.bossInteraction?.swipeLeftChoiceId)
+                  const rightChoice = bossQuestion.choices.find((choice) => choice.id === bossQuestion.bossInteraction?.swipeRightChoiceId)
+                  return (
+                    <div className="boss-swipe-zone">
+                      <div
+                        className={`boss-swipe-card ${bossHasAnswered ? 'boss-swipe-card-locked' : ''}`}
+                        role="button"
+                        tabIndex={bossHasAnswered || bossTimeExpired ? -1 : 0}
+                        aria-label="ปัดซ้ายหรือขวาเพื่อตอบ"
+                        onPointerDown={handleBossSwipeStart}
+                        onPointerMove={handleBossSwipeMove}
+                        onPointerUp={handleBossSwipeEnd}
+                        onPointerCancel={() => { bossSwipeStartX.current = null; setBossSwipeOffset(0) }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'ArrowLeft' && leftChoice) void answerBossQuestion(leftChoice.id)
+                          if (event.key === 'ArrowRight' && rightChoice) void answerBossQuestion(rightChoice.id)
+                        }}
+                        style={{ transform: `translateX(${bossSwipeOffset}px) rotate(${bossSwipeOffset / 18}deg)` }}
+                      >
+                        <span className="boss-swipe-glyph" aria-hidden="true">↔</span>
+                        <strong>{bossHasAnswered ? 'ล็อกคำตอบแล้ว' : 'ปัดเพื่อตัดสิน'}</strong>
+                        <small>ซ้าย ← หรือ → ขวา</small>
+                      </div>
+                      <div className="boss-swipe-actions">
+                        {leftChoice ? <button type="button" onClick={() => void answerBossQuestion(leftChoice.id)} disabled={areAnswersLocked(saving, bossTimeExpired) || bossHasAnswered}>← {leftChoice.text}</button> : null}
+                        {rightChoice ? <button type="button" onClick={() => void answerBossQuestion(rightChoice.id)} disabled={areAnswersLocked(saving, bossTimeExpired) || bossHasAnswered}>{rightChoice.text} →</button> : null}
+                      </div>
+                    </div>
+                  )
+                })() : (
+                  <div className={`boss-rapid-choices boss-rapid-choices-${bossQuestion.bossInteraction?.kind ?? 'legacy'}`}>
+                    {bossQuestion.choices.map((choice, index) => (
+                      <button
+                        key={choice.id}
+                        className={`boss-rapid-choice ${bossSelectedChoiceId === choice.id ? 'boss-rapid-choice-selected' : ''}`}
+                        type="button"
+                        onClick={() => void answerBossQuestion(choice.id)}
+                        disabled={areAnswersLocked(saving, bossTimeExpired) || bossHasAnswered}
+                      >
+                        <span className="boss-rapid-choice-icon" aria-hidden="true">{bossQuestion.bossInteraction?.choiceIcons?.[choice.id] ?? ['ก', 'ข', 'ค', 'ง'][index]}</span>
+                        <strong>{choice.text}</strong>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <div className="feedback-region mt-5" aria-live="assertive">
                   {error ? <p className="error-message">{error}</p> : bossTimeExpired ? bossSelectedChoiceId ? (
-                    <div className={bossAnswerWasCorrect ? 'answer-result-correct' : 'answer-result-wrong'}>
-                      <strong>{bossAnswerWasCorrect ? '✓ ตอบถูก' : '✕ ตอบผิด'}</strong>
+                    <div className="boss-rapid-locked">
+                      <strong>✦ ผนึกคำตอบแล้ว</strong>
                       <span>เวลาที่ใช้ {((bossSavedAnswer?.responseTimeMs ?? 0) / 1_000).toFixed(2)} วินาที</span>
-                      <small>{bossRevealRemainingMs > 0 ? `ไปข้อถัดไปใน ${Math.ceil(bossRevealRemainingMs / 1_000)} วินาที` : 'กำลังไปข้อถัดไป'}</small>
+                      <small>{bossRevealRemainingMs > 0 ? 'เตรียมจังหวะถัดไป…' : 'กำลังไปจังหวะถัดไป'}</small>
                     </div>
                   ) : (
-                    <div className="answer-result-missed"><strong>ไม่ได้ตอบภายในเวลา</strong></div>
+                    <div className="answer-result-missed"><strong>หมดเวลา — ข้อนี้นับเป็นไม่ตอบ</strong></div>
                   ) : saving ? (
-                    <p>กำลังบันทึกคำตอบ...</p>
+                    <p>กำลังผนึกคำตอบ...</p>
                   ) : bossHasAnswered ? (
-                    <p className="answer-waiting"><span aria-hidden="true">✓</span> บันทึกแล้ว</p>
+                    <p className="answer-waiting"><span aria-hidden="true">✓</span> ล็อกแล้ว — รอจังหวะถัดไป</p>
                   ) : null}
                 </div>
               </section>
 
-              <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">ผลของด่านชิงมนตราจะไม่ถูกเปิดเผยจนกว่าจะจบทั้ง 3 ข้อ อันดับระหว่างทางจะไม่แสดงให้เห็น</p>
+              <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">3 จังหวะสั้น ๆ • ไม่เฉลยระหว่างทาง • วัดความแม่นก่อน แล้วจึงวัดเวลารวมเพื่อชิงมนตรา</p>
             </>
           )
         ) : !question ? (

@@ -6,6 +6,7 @@ import { MagicItemIcon } from '../components/MagicItemIcon'
 import { useGame } from '../context/GameContext'
 import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
+import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
@@ -121,7 +122,10 @@ export const TeacherPage = () => {
   const isBossPhase = roomState.data?.phase === 'boss'
   const bossTiming = roomState.data ? { questionStartedAt: roomState.data.bossQuestionStartedAt, questionDurationSeconds: roomState.data.bossQuestionDurationSeconds, questionClosedAt: null } : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
-  const bossRevealRemainingMs = bossTiming ? getRevealRemainingMilliseconds(bossTiming, now) : 0
+  const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
+  const bossRevealRemainingMs = bossDeadline != null && now >= bossDeadline
+    ? Math.max(0, bossDeadline + BOSS_REVEAL_MILLISECONDS - now)
+    : 0
   const currentBossQuestionId = roomState.data?.bossQuestionIds[roomState.data.bossQuestionIndex]
   const bossAnsweredCount = currentBossQuestionId
     ? playersState.data.filter((player) => player.bossAnswers.some((answer) => answer.questionId === currentBossQuestionId)).length
@@ -287,7 +291,7 @@ export const TeacherPage = () => {
       setNow(currentTime)
       const deadline = getQuestionDeadline({ questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null })
       const recentlyAttempted = advancingBossQuestion.current.key === bossKey && currentTime - advancingBossQuestion.current.attemptedAt < 3_000
-      if (deadline == null || currentTime < deadline + ANSWER_REVEAL_MILLISECONDS || recentlyAttempted) return
+      if (deadline == null || currentTime < deadline + BOSS_REVEAL_MILLISECONDS || recentlyAttempted) return
       advancingBossQuestion.current = { key: bossKey, attemptedAt: currentTime }
       void service.advanceBossQuestion(roomCode, teacherSessionId, room.bossQuestionIndex).catch((reason) => {
         advancingBossQuestion.current = { key: '', attemptedAt: 0 }
