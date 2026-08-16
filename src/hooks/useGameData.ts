@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGame } from '../context/GameContext'
-import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, RoundHistoryEntry, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
 
 interface Loadable<T> {
   data: T
@@ -242,6 +242,28 @@ export const useAllCaptainVoteProgress = (roomCode: string): Loadable<CaptainVot
 // Team guardian names — every team's current name in one subscription, mirroring
 // useAllTeamMagic. Used by the teacher dashboard (every team at once) and by LobbyPage/GamePage
 // (to resolve "ทีม N" fallback vs a chosen guardian name for display).
+// Teacher-only: immutable per-round learning snapshots. Survives round resets and room close,
+// unlike the live `players` docs this history is derived from.
+export const useRoundHistory = (roomCode: string): Loadable<RoundHistoryEntry[]> => {
+  const { service } = useGame()
+  const [state, setState] = useState<Loadable<RoundHistoryEntry[]>>({ data: [], loading: true, error: '' })
+
+  useEffect(() => {
+    if (!roomCode) {
+      setState({ data: [], loading: false, error: '' })
+      return
+    }
+    setState({ data: [], loading: true, error: '' })
+    return service.subscribeRoundHistory(
+      roomCode,
+      (entries) => setState({ data: entries, loading: false, error: '' }),
+      (error) => setState((current) => ({ ...current, loading: false, error })),
+    )
+  }, [roomCode, service])
+
+  return state
+}
+
 export const useAllTeamGuardianNames = (roomCode: string): Loadable<TeamGuardianName[]> => {
   const { service } = useGame()
   const [state, setState] = useState<Loadable<TeamGuardianName[]>>({ data: [], loading: true, error: '' })

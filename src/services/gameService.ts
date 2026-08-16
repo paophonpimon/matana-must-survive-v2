@@ -1,4 +1,4 @@
-import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, RoundHistoryEntry, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
 
 export interface AnswerInput {
   questionId: string
@@ -41,7 +41,9 @@ export interface GameService {
   subscribeRoom(roomCode: string, listener: (room: Room | null) => void, onError: (message: string) => void): Unsubscribe
   subscribePlayers(roomCode: string, listener: (players: Player[]) => void, onError: (message: string) => void): Unsubscribe
   subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void, onError: (message: string) => void): Unsubscribe
-  startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void>
+  // bossQuestionDurationSeconds is optional so existing callers keep working; when omitted the
+  // room's current boss duration is left as-is.
+  startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number, bossQuestionDurationSeconds?: number): Promise<void>
   // Learning Layer: startRoom now begins each round in phase 'recall' (individual, no timer) —
   // this is the only method that ever moves it to 'main' (currentQuestionIndex 0, timer started),
   // and only ever fired by the teacher's "เริ่ม Main" button, mirroring continueAfterBoss's
@@ -49,7 +51,9 @@ export interface GameService {
   // Pre-game stage transitions. lobby -> recall -> teamSetup, both teacher-only and both
   // no-ops when the room is already past that stage (so a stale/duplicate click never restarts
   // Recall or rewinds team setup). startRoom then takes teamSetup -> main.
-  startRecall(roomCode: string, teacherSessionId: string): Promise<void>
+  // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
+  // room keeps its current (default) Recall duration.
+  startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void>
   startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
   saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
@@ -95,6 +99,9 @@ export interface GameService {
   // comment in firebaseService.ts. setTeamGuardianName is the captain-authored path (rules
   // verify playerId is the team's finalized captain); reset/override are teacher-only.
   subscribeAllTeamGuardianNames(roomCode: string, listener: (names: TeamGuardianName[]) => void, onError: (message: string) => void): Unsubscribe
+  // Teacher-only: immutable per-round learning snapshots for this room, written by the
+  // round-ending operations before player data is reset.
+  subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void, onError: (message: string) => void): Unsubscribe
   setTeamGuardianName(roomCode: string, teamId: string, playerId: string, name: string): Promise<void>
   resetTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string): Promise<void>
   overrideTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string, name: string): Promise<void>

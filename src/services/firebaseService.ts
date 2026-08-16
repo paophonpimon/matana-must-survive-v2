@@ -16,6 +16,7 @@ import {
   writeBatch,
   type DocumentData,
   type QueryDocumentSnapshot,
+  type QuerySnapshot,
   type Timestamp,
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
@@ -25,12 +26,18 @@ import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/g
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
 import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService, type RecallAnswerInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  MAX_BOSS_SECONDS_PER_QUESTION,
+  MAX_RECALL_SECONDS_PER_ITEM,
+  MIN_BOSS_SECONDS_PER_QUESTION,
+  MIN_RECALL_SECONDS_PER_ITEM,
+  RECALL_SECONDS_PER_ITEM,
   RECALL_TIMEOUT_CHOICE_ID,
   createEmptyMagicInventory,
 } from '../types/game'
@@ -52,6 +59,7 @@ import type {
   QueuedMagicEffect,
   RecallAnswerRecord,
   Room,
+  RoundHistoryEntry,
   TeamGuardianName,
   TeamMagicBreakdown,
   TeamMagicState,
@@ -157,6 +165,7 @@ const mapRoom = (data: DocumentData): Room => ({
   phase: (['lobby', 'recall', 'teamSetup', 'main', 'boss'].includes(String(data.phase))
     ? data.phase
     : data.status === 'playing' ? 'main' : 'lobby') as GamePhase,
+  recallQuestionDurationSeconds: Number(data.recallQuestionDurationSeconds ?? RECALL_SECONDS_PER_ITEM),
   bossQuestionIds: Array.isArray(data.bossQuestionIds) ? data.bossQuestionIds.map(String) : [],
   bossQuestionIndex: Number(data.bossQuestionIndex ?? 0),
   bossQuestionStartedAt: toMillis(data.bossQuestionStartedAt),
@@ -327,6 +336,74 @@ const mapTeamRoster = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: str
         }))
       : [],
   }
+}
+
+// Teacher-configured durations are clamped service-side, not just in the form, so a
+// hand-crafted request can't set a 0-second or absurdly long timer.
+const clampRecallDuration = (seconds: number): number =>
+  Math.max(MIN_RECALL_SECONDS_PER_ITEM, Math.min(MAX_RECALL_SECONDS_PER_ITEM, Math.round(seconds)))
+const clampBossDuration = (seconds: number): number =>
+  Math.max(MIN_BOSS_SECONDS_PER_QUESTION, Math.min(MAX_BOSS_SECONDS_PER_QUESTION, Math.round(seconds)))
+
+const mapRoundHistoryEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): RoundHistoryEntry => {
+  const data = snapshot.data()
+  const asStringArray = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : [])
+  return {
+    id: snapshot.id,
+    round: Number(data.round ?? 0),
+    playerId: String(data.playerId ?? ''),
+    displayName: String(data.displayName ?? ''),
+    studentNumber: String(data.studentNumber ?? ''),
+    teamId: data.teamId == null ? null : String(data.teamId),
+    teamName: String(data.teamName ?? ''),
+    beforeCorrectCount: Number(data.beforeCorrectCount ?? 0),
+    afterCorrectCount: Number(data.afterCorrectCount ?? 0),
+    improvedCount: Number(data.improvedCount ?? 0),
+    reviewCount: Number(data.reviewCount ?? 0),
+    improvedConceptIds: asStringArray(data.improvedConceptIds),
+    reviewConceptIds: asStringArray(data.reviewConceptIds),
+    conceptResults: Array.isArray(data.conceptResults)
+      ? data.conceptResults.map((entry: DocumentData) => ({
+        conceptId: String(entry.conceptId ?? ''),
+        beforeCorrect: Boolean(entry.beforeCorrect),
+        afterCorrect: Boolean(entry.afterCorrect),
+      }))
+      : [],
+    knowledgeScore: Number(data.knowledgeScore ?? 0),
+    knowledgeScore100: Number(data.knowledgeScore100 ?? 0),
+    mainAnswers: Array.isArray(data.mainAnswers)
+      ? data.mainAnswers.map((entry: DocumentData) => ({ questionId: String(entry.questionId ?? ''), isCorrect: Boolean(entry.isCorrect) }))
+      : [],
+    completedAt: Number(data.completedAt ?? 0),
+  }
+}
+
+// Queues this round's learning snapshot into an existing batch, for every player that doesn't
+// already have one. Deliberately reads the existing history ids first so a re-run (or a second
+// round-ending operation on the same round) is skipped rather than overwriting a finished
+// record — the same idempotency the demo service gets from its keyed map.
+const queueRoundHistorySnapshot = async (
+  batch: ReturnType<typeof writeBatch>,
+  roomCode: string,
+  room: Room,
+  playerSnapshots: QuerySnapshot<DocumentData>,
+): Promise<void> => {
+  const [existing, guardianNames] = await Promise.all([
+    getDocs(collection(db, 'rooms', roomCode, 'roundHistory')),
+    getDocs(collection(db, 'rooms', roomCode, 'teamNames')),
+  ])
+  const existingIds = new Set(existing.docs.map((entry) => entry.id))
+  const guardianNameByTeamId = new Map(guardianNames.docs.map((entry) => [entry.id, mapTeamGuardianName(entry).name]))
+  const completedAt = Date.now()
+  playerSnapshots.docs.forEach((playerDocument) => {
+    const player = mapPlayer(playerDocument)
+    const id = roundHistoryEntryId(room.currentRound, player.id)
+    if (existingIds.has(id)) return
+    const teamName = player.teamId
+      ? guardianNameByTeamId.get(player.teamId)?.trim() || room.teams.find((team) => team.id === player.teamId)?.name || ''
+      : ''
+    batch.set(doc(db, 'rooms', roomCode, 'roundHistory', id), buildRoundHistoryEntry(player, room.currentRound, teamName, completedAt))
+  })
 }
 
 const mapTeamGuardianName = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): TeamGuardianName => {
@@ -568,6 +645,7 @@ export class FirebaseGameService implements GameService {
         questionDurationSeconds: 30,
         questionStartedAt: null,
         questionClosedAt: null,
+    recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
         ...createFreshBossFields(),
         questionIds: selectRoundQuestions(questions),
         previousQuestionIds: [],
@@ -731,7 +809,7 @@ export class FirebaseGameService implements GameService {
     )
   }
 
-  async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void> {
+  async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number, bossQuestionDurationSeconds?: number): Promise<void> {
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     // Each holder must choose a starting item before the game can start. Checked outside the
@@ -780,6 +858,7 @@ export class FirebaseGameService implements GameService {
         phase: 'main',
         currentQuestionIndex: 0,
         questionDurationSeconds: Math.max(5, Math.min(600, Math.round(questionDurationSeconds))),
+        ...(bossQuestionDurationSeconds == null ? {} : { bossQuestionDurationSeconds: clampBossDuration(bossQuestionDurationSeconds) }),
         questionStartedAt: serverTimestamp(),
         questionClosedAt: null,
         winner: null,
@@ -795,7 +874,7 @@ export class FirebaseGameService implements GameService {
   // Story Recall is a pre-team individual learning phase, so the only precondition is that at
   // least one student is present. Idempotent by stage check: a stale/duplicate call once already
   // past 'lobby' is a safe no-op rather than a restart that would wipe progress.
-  async startRecall(roomCode: string, teacherSessionId: string): Promise<void> {
+  async startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void> {
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มกู้ความทรงจำไม่ได้')
     const roomRef = doc(db, 'rooms', roomCode)
@@ -806,7 +885,10 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มกู้ความทรงจำได้เฉพาะช่วงห้องรอ')
       if (room.phase !== 'lobby') return
-      transaction.update(roomRef, { phase: 'recall' })
+      transaction.update(roomRef, {
+        phase: 'recall',
+        ...(recallQuestionDurationSeconds == null ? {} : { recallQuestionDurationSeconds: clampRecallDuration(recallQuestionDurationSeconds) }),
+      })
     })
   }
 
@@ -1183,6 +1265,9 @@ export class FirebaseGameService implements GameService {
     const questionIds = selectRoundQuestions(questions, room.questionIds)
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
+    // Record this round BEFORE the player resets queued below land — once answers/recallAnswers
+    // are wiped the results are unrecoverable. Idempotent per round.
+    await queueRoundHistorySnapshot(batch, roomCode, room, playerSnapshots)
     batch.update(roomRef, {
       status: 'waiting',
       currentRound,
@@ -1225,6 +1310,9 @@ export class FirebaseGameService implements GameService {
     const questionIds = selectRoundQuestions(questions, room.questionIds)
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
+    // Record this round BEFORE the player resets queued below land — once answers/recallAnswers
+    // are wiped the results are unrecoverable. Idempotent per round.
+    await queueRoundHistorySnapshot(batch, roomCode, room, playerSnapshots)
     batch.update(roomRef, {
       status: 'waiting',
       currentRound,
@@ -1257,17 +1345,24 @@ export class FirebaseGameService implements GameService {
   }
 
   async closeRoom(roomCode: string, teacherSessionId: string): Promise<void> {
+    // Captured out of the transaction so the history snapshot below can read the round/team
+    // labels this room is being closed on.
+    let closingRoom: Room | null = null
     await runTransaction(db, async (transaction) => {
       const roomRef = doc(db, 'rooms', roomCode)
       const snapshot = await transaction.get(roomRef)
       if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      closingRoom = room
       transaction.update(roomRef, { status: 'closed' })
     })
     await expireQueuedMagicEffects(roomCode)
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     const batch = writeBatch(db)
+    // Closing ends the round too, so record it first — this is what keeps a finished round's
+    // history available after the room is closed.
+    if (closingRoom) await queueRoundHistorySnapshot(batch, roomCode, closingRoom, playerSnapshots)
     playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, { status: 'stopped' }))
     await batch.commit()
   }
@@ -1742,6 +1837,18 @@ export class FirebaseGameService implements GameService {
       collection(db, 'rooms', roomCode.toUpperCase(), 'teamNames'),
       (snapshot) => listener(snapshot.docs.map(mapTeamGuardianName)),
       () => onError('ไม่สามารถโหลดชื่อทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
+    )
+  }
+
+  subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void, onError: (message: string) => void): Unsubscribe {
+    return onSnapshot(
+      collection(db, 'rooms', roomCode.toUpperCase(), 'roundHistory'),
+      (snapshot) => listener(
+        snapshot.docs
+          .map(mapRoundHistoryEntry)
+          .sort((a, b) => a.round - b.round || a.studentNumber.localeCompare(b.studentNumber)),
+      ),
+      () => onError('ไม่สามารถโหลดประวัติผลการเรียนได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
     )
   }
 

@@ -5,7 +5,7 @@ import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainin
 import { resolveStudentRoute } from '../lib/game'
 import { computeStudentLearningEvidence } from '../lib/learning'
 import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
-import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, RECALL_TIMEOUT_CHOICE_ID } from '../types/game'
+import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, MIN_RECALL_SECONDS_PER_ITEM, RECALL_TIMEOUT_CHOICE_ID } from '../types/game'
 import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
 import { DEMO_STORAGE_KEY, DemoGameService } from './demoService'
 
@@ -2193,6 +2193,101 @@ describe('Demo timed classroom flow', () => {
 
       stopRoom()
       stopPlayers()
+    })
+
+    it('the teacher may end Recall early — partial answers are kept, unanswered concepts count as not correct, and late writes are refused', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 2)
+      await service.startRecall(room.roomCode, 'teacher-1')
+
+      // Student 1 finishes; student 2 answers only the first 2 of 5 and is still working.
+      await answerAllRecall(service, room.roomCode, players[0].id)
+      for (let index = 0; index < 2; index += 1) {
+        await service.saveRecallAnswer(room.roomCode, players[1].id, {
+          conceptId: RECALL_QUESTIONS[index].id,
+          selectedChoiceId: RECALL_QUESTIONS[index].correctChoiceId,
+          expectedRecallIndex: index,
+        })
+      }
+
+      // The teacher moves on WITHOUT everyone being finished.
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      const livePlayers: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
+      await vi.waitFor(() => expect(livePlayers.value).toHaveLength(2))
+
+      // Everything already submitted survives the transition, at its real value.
+      const finished = livePlayers.value.find((player) => player.id === players[0].id)
+      const unfinished = livePlayers.value.find((player) => player.id === players[1].id)
+      expect(finished?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length)
+      expect(unfinished?.recallAnswers).toHaveLength(2)
+
+      // No answers are invented for the 3 concepts the second student never reached — they are
+      // simply absent, and therefore count as not-correct for the before-play evidence.
+      const evidence = computeStudentLearningEvidence(unfinished as Player)
+      expect(evidence.recallCorrectCount).toBe(2)
+      expect(unfinished?.recallAnswers.map((entry) => entry.conceptId))
+        .toEqual([RECALL_QUESTIONS[0].id, RECALL_QUESTIONS[1].id])
+
+      // A late write from the still-working student is refused now that Recall is over.
+      await expect(service.saveRecallAnswer(room.roomCode, players[1].id, {
+        conceptId: RECALL_QUESTIONS[2].id,
+        selectedChoiceId: RECALL_QUESTIONS[2].correctChoiceId,
+        expectedRecallIndex: 2,
+      })).rejects.toThrow('ไม่ได้อยู่ในช่วงกู้ความทรงจำ')
+      expect(unfinished?.recallAnswers).toHaveLength(2)
+
+      // ...and that student is routed out of Recall into the team-setup lobby.
+      expect(resolveStudentRoute(liveRoom.value as Room, unfinished as Player)).toBe(`/lobby/${room.roomCode}`)
+
+      stopRoom()
+      stopPlayers()
+    })
+
+    it('persists the teacher-chosen Recall and Boss durations on the room', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 2)
+
+      await service.startRecall(room.roomCode, 'teacher-1', 25)
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      expect(liveRoom.value?.recallQuestionDurationSeconds).toBe(25)
+
+      for (const player of players) await answerAllRecall(service, room.roomCode, player.id)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 30, 12)
+
+      await vi.waitFor(() => expect(liveRoom.value?.status).toBe('playing'))
+      expect(liveRoom.value?.questionDurationSeconds).toBe(30)
+      expect(liveRoom.value?.bossQuestionDurationSeconds).toBe(12)
+      // The Recall duration is not clobbered by starting Main.
+      expect(liveRoom.value?.recallQuestionDurationSeconds).toBe(25)
+
+      stopRoom()
+    })
+
+    it('clamps out-of-range durations service-side rather than trusting the caller', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await joinAll(service, room.roomCode, 1)
+
+      await service.startRecall(room.roomCode, 'teacher-1', 0)
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      expect(liveRoom.value?.recallQuestionDurationSeconds).toBe(MIN_RECALL_SECONDS_PER_ITEM)
+
+      stopRoom()
     })
 
     it('6. the teacher transitions Recall -> teamSetup, and a duplicate call is a safe no-op', async () => {

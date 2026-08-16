@@ -3,18 +3,30 @@ import { BossResultDetails } from '../components/BossResultDetails'
 import { GrimoireModal } from '../components/GrimoireModal'
 import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
+import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
-import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers } from '../hooks/useGameData'
+import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers, useRoundHistory } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
-import { computeClassLearningSummary } from '../lib/learning'
+import { computeClassLearningSummary, computeStudentLearningEvidence } from '../lib/learning'
+import { downloadLearningWorkbook } from '../lib/learningExport'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, hasShownMagicPopup, markMagicPopupShown, saveTeacherSession } from '../services/sessionStorage'
 import { recallQuestionsById } from '../data/recallQuestions'
-import { createEmptyMagicInventory, RECALL_QUESTION_COUNT, type Player } from '../types/game'
+import {
+  createEmptyMagicInventory,
+  DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  MAX_BOSS_SECONDS_PER_QUESTION,
+  MAX_RECALL_SECONDS_PER_ITEM,
+  MIN_BOSS_SECONDS_PER_QUESTION,
+  MIN_RECALL_SECONDS_PER_ITEM,
+  RECALL_QUESTION_COUNT,
+  RECALL_SECONDS_PER_ITEM,
+  type Player,
+} from '../types/game'
 
 type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | null
 
@@ -101,6 +113,10 @@ export const TeacherPage = () => {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null)
   const [durationValue, setDurationValue] = useState('30')
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes'>('seconds')
+  // Teacher-configurable timers, both in plain seconds and both defaulted to the values the game
+  // used before they were configurable.
+  const [recallDurationValue, setRecallDurationValue] = useState(String(RECALL_SECONDS_PER_ITEM))
+  const [bossDurationValue, setBossDurationValue] = useState(String(DEFAULT_BOSS_QUESTION_DURATION_SECONDS))
   const [teamCountValue, setTeamCountValue] = useState('2')
   const [resultsTab, setResultsTab] = useState<'team' | 'individual'>('team')
   const [now, setNow] = useState(Date.now())
@@ -112,6 +128,12 @@ export const TeacherPage = () => {
   const parsedDuration = Number(durationValue)
   const questionDurationSeconds = Math.round(parsedDuration * (durationUnit === 'minutes' ? 60 : 1))
   const durationValid = Number.isFinite(questionDurationSeconds) && questionDurationSeconds >= 5 && questionDurationSeconds <= 600
+  const recallDurationSeconds = Math.round(Number(recallDurationValue))
+  const recallDurationValid = Number.isFinite(recallDurationSeconds)
+    && recallDurationSeconds >= MIN_RECALL_SECONDS_PER_ITEM && recallDurationSeconds <= MAX_RECALL_SECONDS_PER_ITEM
+  const bossDurationSeconds = Math.round(Number(bossDurationValue))
+  const bossDurationValid = Number.isFinite(bossDurationSeconds)
+    && bossDurationSeconds >= MIN_BOSS_SECONDS_PER_QUESTION && bossDurationSeconds <= MAX_BOSS_SECONDS_PER_QUESTION
   const parsedTeamCount = Math.round(Number(teamCountValue))
   const teamCountValid = Number.isFinite(parsedTeamCount) && parsedTeamCount >= 1 && parsedTeamCount <= 20
   const remainingMs = roomState.data ? getRemainingMilliseconds(roomState.data, now) : 0
@@ -134,6 +156,10 @@ export const TeacherPage = () => {
   // precedence resolveStudentRoute already applies for students (closed/winner/completed are all
   // checked before phase === 'recall').
   const isPreGameStage = roomState.data?.status === 'waiting'
+  // The room-control header + room bar exist to run the pre-game stages (lobby, recall,
+  // teamSetup). They are hidden for main/boss and for the result/podium/learning-summary views,
+  // which is exactly the same set of stages status === 'waiting' already identifies.
+  const showRoomControls = isPreGameStage
   const isLobbyPhase = isPreGameStage && roomState.data?.phase === 'lobby'
   const isRecallPhase = isPreGameStage && roomState.data?.phase === 'recall'
   const recallCompletedCount = playersState.data.filter((player) => player.recallAnswers.length >= RECALL_QUESTION_COUNT).length
@@ -161,6 +187,11 @@ export const TeacherPage = () => {
   const magicEventsState = useMagicEvents(roomCode)
   const captainVoteProgressState = useAllCaptainVoteProgress(roomCode)
   const guardianNamesState = useAllTeamGuardianNames(roomCode)
+  // Immutable per-round learning snapshots. Survives round resets and room close, unlike the
+  // live player docs the current-round summary reads.
+  const roundHistoryState = useRoundHistory(roomCode)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const historyRounds = useMemo(() => [...new Set(roundHistoryState.data.map((entry) => entry.round))], [roundHistoryState.data])
 
   // teamStats stays raw (memberCount/submittedCount/correctCount/full-game completion) — the
   // magic-item system must never touch it. competitionStats is the magic-adjusted score shown
@@ -186,6 +217,16 @@ export const TeacherPage = () => {
   // computeClassLearningSummary only ever reads player.recallAnswers/answers isCorrect, per the
   // spec's explicit "raw individual knowledge correctness only" requirement.
   const classLearningSummary = useMemo(() => computeClassLearningSummary(playersState.data), [playersState.data])
+  // Plain class-level counts for the teacher summary, derived from the same per-student raw
+  // correctness the students' own summaries use — no percentages, no team/magic/boss inputs.
+  const classEvidence = useMemo(() => playersState.data.map((player) => computeStudentLearningEvidence(player)), [playersState.data])
+  const classBeforeAverage = classEvidence.length > 0
+    ? classEvidence.reduce((total, entry) => total + entry.recallCorrectCount, 0) / classEvidence.length
+    : 0
+  const classAfterAverage = classEvidence.length > 0
+    ? classEvidence.reduce((total, entry) => total + entry.mainEvidenceCorrectCount, 0) / classEvidence.length
+    : 0
+  const classImprovedStudentCount = classEvidence.filter((entry) => entry.mainEvidenceCorrectCount > entry.recallCorrectCount).length
   const currentQuestionStats = useMemo(
     () => computeCurrentQuestionStats(playersState.data, currentQuestionId),
     [playersState.data, currentQuestionId],
@@ -432,7 +473,7 @@ export const TeacherPage = () => {
       .catch((reason) => setError(friendlyError(reason)))
       .finally(() => { advancingStageRef.current = false; setAdvancingStageBusy(false) })
   }
-  const handleStartRecall = (): void => runStageTransition(() => service.startRecall(roomCode, teacherSessionId))
+  const handleStartRecall = (): void => runStageTransition(() => service.startRecall(roomCode, teacherSessionId, recallDurationSeconds))
   const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
 
   // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
@@ -646,7 +687,8 @@ export const TeacherPage = () => {
       if (action === 'stop') await service.stopRound(roomCode, teacherSessionId)
       if (action === 'start') {
         if (!durationValid) throw new Error('ผู้ใช้:กำหนดเวลาต่อข้อระหว่าง 5 วินาทีถึง 10 นาที')
-        await service.startRoom(roomCode, teacherSessionId, questionDurationSeconds)
+        if (!bossDurationValid) throw new Error(`ผู้ใช้:กำหนดเวลาต่อข้อของด่านชิงมนตราระหว่าง ${MIN_BOSS_SECONDS_PER_QUESTION} ถึง ${MAX_BOSS_SECONDS_PER_QUESTION} วินาที`)
+        await service.startRoom(roomCode, teacherSessionId, questionDurationSeconds, bossDurationSeconds)
       }
       if (action === 'close') await service.closeRoom(roomCode, teacherSessionId)
       setNotice(
@@ -723,7 +765,11 @@ export const TeacherPage = () => {
         {/* Compact top branding for the dedicated single-viewport Recall screen: the full hero
             header (big heading + descriptive subtitle) collapses to one line, so branding + room
             bar + Recall view all fit one viewport together with no scrolling. */}
-        {isRecallPhase ? (
+        {/* The room-control header only serves the pre-game stages (share the code, watch people
+            arrive, set up teams). Once Main starts it is dead weight on a screen the class is
+            watching, so it — and the room bar below — are dropped entirely for main/boss/result,
+            letting the live content start at the top of the page instead. */}
+        {!showRoomControls ? null : isRecallPhase ? (
           <div className="teacher-intro-compact mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="eyebrow m-0">ศูนย์บัญชาการครู · ควบคุมภารกิจ</p>
             {service.isDemo ? <span className="demo-mode-pill"><i />โหมดสาธิต</span> : <span className="live-mode-pill"><i />Firebase realtime</span>}
@@ -763,6 +809,7 @@ export const TeacherPage = () => {
           />
         ) : (
           <>
+            {showRoomControls ? (
             <section className="teacher-room-bar">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#b6ab9e]">รหัสห้อง</p>
@@ -775,7 +822,7 @@ export const TeacherPage = () => {
                 <div><small>สถานะ</small><StatusPill status={roomState.data.status} /></div>
                 <div><small>รอบที่</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.currentRound}</strong></div>
                 {isRecallPhase ? (
-                  <div><small>ระยะ</small><strong className="block text-2xl text-[#f2d58d]">กู้ความทรงจำ ({recallCompletedCount}/{sortedPlayers.length})</strong></div>
+                  <div><small>ระยะ</small><strong className="block text-2xl text-[#f2d58d]">ทบทวนเรื่องราว ({recallCompletedCount}/{sortedPlayers.length})</strong></div>
                 ) : roomState.data.status === 'playing' && isBossPhase ? (
                   <>
                     <div><small>ศึกด่านชิงมนตรา</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.bossQuestionIndex + 1}/3</strong></div>
@@ -791,6 +838,7 @@ export const TeacherPage = () => {
                 <div><small>ทีมทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{roomState.data.teams.length}</strong></div>
               </div>
             </section>
+            ) : null}
 
             {(error || (notice && !broadcastMode && !finalMode)) ? <div className={error ? 'error-message mt-4' : 'success-message mt-4'} role="status">{error || notice}</div> : null}
 
@@ -818,13 +866,31 @@ export const TeacherPage = () => {
                     ))}
                   </ul>
                 ) : null}
+                {/* Recall timer, chosen before the activity starts and applied to all 5 items.
+                    Same shape as the Main question timer control, just seconds-only. */}
+                <div className="stage-duration-field mt-5">
+                  <label htmlFor="recall-duration">เวลาต่อข้อ (ทบทวนเรื่องราว)</label>
+                  <div className="stage-duration-input">
+                    <input
+                      id="recall-duration"
+                      type="number"
+                      min={MIN_RECALL_SECONDS_PER_ITEM}
+                      max={MAX_RECALL_SECONDS_PER_ITEM}
+                      step="1"
+                      value={recallDurationValue}
+                      onChange={(event) => setRecallDurationValue(event.target.value)}
+                    />
+                    <span>วินาที</span>
+                  </div>
+                  <small>{MIN_RECALL_SECONDS_PER_ITEM}-{MAX_RECALL_SECONDS_PER_ITEM} วินาที · ใช้กับทั้ง 5 ข้อ</small>
+                </div>
                 <button
                   type="button"
-                  className="primary-button recall-start-main-button mt-6"
+                  className="primary-button recall-start-main-button mt-5"
                   onClick={handleStartRecall}
-                  disabled={advancingStageBusy || sortedPlayers.length === 0}
+                  disabled={advancingStageBusy || sortedPlayers.length === 0 || !recallDurationValid}
                 >
-                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มกู้ความทรงจำ'}
+                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มทบทวนเรื่องราว'}
                 </button>
                 {sortedPlayers.length === 0 ? (
                   <p className="recall-command-hint">ต้องมีอย่างน้อย 1 คนจึงจะเริ่มได้</p>
@@ -838,7 +904,7 @@ export const TeacherPage = () => {
             {isRecallPhase ? (
               <section className="recall-command-view" aria-live="polite">
                 <p className="eyebrow">ขั้นที่ 2 · กิจกรรมรายบุคคล</p>
-                <h2 className="recall-command-title">กู้ความทรงจำมัทนา</h2>
+                <h2 className="recall-command-title">ทบทวนเรื่องราวมัทนา</h2>
                 {recallCompletedCount < sortedPlayers.length ? (
                   <>
                     <p className="recall-command-status">กำลังรื้อฟื้นเรื่องราว</p>
@@ -849,12 +915,12 @@ export const TeacherPage = () => {
                   </>
                 ) : (
                   <>
-                    <p className="recall-command-status recall-command-status-done">ทุกคนกู้ความทรงจำเรียบร้อยแล้ว</p>
+                    <p className="recall-command-status recall-command-status-done">ทุกคนทบทวนเรื่องราวเรียบร้อยแล้ว</p>
                     <p className="recall-command-count">{recallCompletedCount} / {sortedPlayers.length} คน</p>
                     <div className="recall-command-progress-bar recall-command-progress-bar-full">
                       <i style={{ width: '100%' }} />
                     </div>
-                    <p className="recall-command-baseline">Baseline ของห้อง: <strong>{classLearningSummary.baselinePercent.toFixed(0)}%</strong></p>
+                    <p className="recall-command-baseline">ก่อนเล่น: <strong>{classLearningSummary.baselinePercent.toFixed(0)}%</strong></p>
                   </>
                 )}
                 {/* Compact per-player progress — the "this is still an individual phase" signal,
@@ -870,14 +936,23 @@ export const TeacherPage = () => {
                     )
                   })}
                 </ul>
+                {/* The teacher is never blocked on stragglers: a class always has someone slow,
+                    and holding the whole room hostage to them is worse than moving on. Unfinished
+                    students are surfaced as a warning, not a lock — their submitted answers are
+                    kept and their unanswered concepts simply count as not-yet-correct. */}
                 <button
                   type="button"
                   className="primary-button recall-start-main-button mt-6"
                   onClick={handleStartTeamSetup}
-                  disabled={advancingStageBusy || !(sortedPlayers.length > 0 && recallCompletedCount === sortedPlayers.length)}
+                  disabled={advancingStageBusy || sortedPlayers.length === 0}
                 >
                   {advancingStageBusy ? 'กำลังดำเนินการ...' : 'จัดทีมและเตรียมเกม'}
                 </button>
+                {recallCompletedCount < sortedPlayers.length ? (
+                  <p className="recall-command-hint">
+                    ยังมี {sortedPlayers.length - recallCompletedCount} คนทำไม่เสร็จ — กดต่อได้เลย ระบบจะเก็บคำตอบที่ทำไว้แล้ว
+                  </p>
+                ) : null}
                 <StageRoomControls />
               </section>
             ) : null}
@@ -912,8 +987,15 @@ export const TeacherPage = () => {
                 </button>
               </section>
             ) : roomState.data.bossCompleted && roomState.data.bossWinner ? (
+              // This is a teacher-facing, team-oriented screen, so the persistent identity pill
+              // names the winning TEAM, never the individual who happened to win the boss round.
+              // guardianDisplayName already prefers the team's chosen guardian name and falls back
+              // to the generic "ทีม N" label; bossWinner.teamName is the last resort for the rare
+              // case where the winner carried no teamId. The podium below still lists members.
               <p className="boss-winner-pill mt-4" aria-live="polite">
-                🏆 {roomState.data.bossWinner.displayName} ({roomState.data.bossWinner.teamId ? guardianDisplayName(roomState.data.bossWinner.teamId) : '-'})
+                🏆 ทีม {roomState.data.bossWinner.teamId
+                  ? guardianDisplayName(roomState.data.bossWinner.teamId)
+                  : roomState.data.bossWinner.teamName ?? '-'}
               </p>
             ) : null}
 
@@ -964,31 +1046,29 @@ export const TeacherPage = () => {
                 result — this is additional, appended below it, never replacing it. */}
             {finalMode ? (
               <section className="learning-summary-panel glass-panel mt-6 p-5" aria-label="สรุปการเรียนรู้ของห้อง">
-                <p className="eyebrow">สรุปการเรียนรู้ (Learning Summary)</p>
-                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">กู้ความทรงจำ vs เข้าใจระหว่างภารกิจ</h2>
+                <p className="eyebrow">สรุปการเรียนรู้</p>
+                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">ก่อนเล่น เทียบกับ หลังเล่น</h2>
+                {/* Same plain counts the students see: average correct-out-of-5 per student
+                    before and after playing, plus how many students improved. No percentage
+                    "gain" figure — it reads as a grade and confuses more than it explains. */}
                 <dl className="learning-summary-grid mt-4">
-                  <div><dt>Baseline ของห้อง</dt><dd>{classLearningSummary.baselinePercent.toFixed(0)}%</dd></div>
-                  <div><dt>In-game Evidence ของห้อง</dt><dd>{classLearningSummary.inGameEvidencePercent.toFixed(0)}%</dd></div>
-                  <div>
-                    <dt>Learning Gain</dt>
-                    <dd className={classLearningSummary.learningGainPercent >= 0 ? 'learning-gain-positive' : 'learning-gain-negative'}>
-                      {classLearningSummary.learningGainPercent >= 0 ? '+' : ''}{classLearningSummary.learningGainPercent.toFixed(0)}%
-                    </dd>
-                  </div>
+                  <div><dt>ก่อนเล่น (เฉลี่ย)</dt><dd>{classBeforeAverage.toFixed(1)}/5</dd></div>
+                  <div><dt>หลังเล่น (เฉลี่ย)</dt><dd>{classAfterAverage.toFixed(1)}/5</dd></div>
+                  <div><dt>เข้าใจเพิ่มขึ้น</dt><dd>{classImprovedStudentCount} คน</dd></div>
                 </dl>
                 <div className="learning-summary-concepts mt-4">
                   {classLearningSummary.concepts.map((concept) => (
                     <div key={concept.conceptId} className="learning-summary-concept-row">
                       <span className="learning-summary-concept-label">{recallQuestionsById.get(concept.conceptId)?.label ?? concept.conceptId}</span>
-                      <span className="learning-summary-concept-stat">กู้ความทรงจำ {concept.recallCorrectCount}/{concept.totalStudents}</span>
-                      <span className="learning-summary-concept-stat">Main {concept.mainCorrectCount}/{concept.totalStudents}</span>
+                      <span className="learning-summary-concept-stat">ก่อนเล่น {concept.recallCorrectCount}/{concept.totalStudents}</span>
+                      <span className="learning-summary-concept-stat">หลังเล่น {concept.mainCorrectCount}/{concept.totalStudents}</span>
                     </div>
                   ))}
                 </div>
                 <p className="mt-3 text-sm text-[#d8d1c5]">
-                  แนวคิดที่เข้าใจดีที่สุด: <strong>{classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? classLearningSummary.strongestConceptId : '-'}</strong>
+                  เรื่องที่เข้าใจดีที่สุด: <strong>{classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? classLearningSummary.strongestConceptId : '-'}</strong>
                   {' · '}
-                  แนวคิดที่ควรทบทวนเพิ่ม: <strong>{classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? classLearningSummary.weakestConceptId : '-'}</strong>
+                  เรื่องที่ควรทบทวน: <strong>{classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? classLearningSummary.weakestConceptId : '-'}</strong>
                 </p>
               </section>
             ) : null}
@@ -1095,9 +1175,30 @@ export const TeacherPage = () => {
                         <li key={team.id} className={`scoreboard-row ${isLeader ? 'scoreboard-row-leading' : ''}`}>
                           <RankEmblem rank={index + 1} leading={isLeader} />
                           <div className="scoreboard-team">
-                            <span className="flex flex-wrap items-baseline gap-x-2">
+                            {/* Item strip sits inline right after the team name so the teacher
+                                reads "who they are + what they hold" as one unit. Playing-only:
+                                items are irrelevant during team setup (nothing can be used yet)
+                                and on the result screen (the round is over). Reads the existing
+                                inventory/queuedEffect and the same incoming-seal data the badges
+                                below already use — no new magic state. */}
+                            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                               <strong>{guardianDisplayName(team.id)}</strong>
                               {guardianNameById.get(team.id) ? <small className="text-[#8b8377]">{team.name}</small> : null}
+                              {roomState.data?.status === 'playing' ? (() => {
+                                const magic = magicByTeamId.get(team.id)
+                                const incomingSeal = incomingSealCountByTeam.get(team.id)
+                                // "กำลังได้รับผล" means the opponent's effect is landing on the
+                                // question in play right now, not merely queued for the next one.
+                                const incomingIsActive = incomingSeal
+                                  && getMagicEffectPhase(incomingSeal.questionIndex, roomState.data?.currentQuestionIndex ?? 0) === 'active'
+                                return (
+                                  <TeamItemStatus
+                                    inventory={magic?.inventory}
+                                    activeItemType={magic?.queuedEffect?.itemType ?? null}
+                                    incomingEffect={incomingIsActive ? { itemType: 'score_seal', count: incomingSeal.count } : null}
+                                  />
+                                )
+                              })() : null}
                             </span>
                             <small>
                               {team.memberCount} คน
@@ -1222,10 +1323,29 @@ export const TeacherPage = () => {
                           </div>
                           <small>กำหนดได้ตั้งแต่ 5 วินาทีถึง 10 นาที ทุกคนใช้เวลาเท่ากัน</small>
                         </div>
+                        {/* Boss timing sits beside the Main timing control, since both are set in
+                            the same "before Main starts" moment. One value applies to all 3 boss
+                            questions; boss scoring/ranking/first-answer-lock are untouched. */}
+                        <div className="timer-setting">
+                          <label htmlFor="boss-duration">เวลาต่อข้อ (ด่านชิงมนตรา)</label>
+                          <div>
+                            <input
+                              id="boss-duration"
+                              type="number"
+                              min={MIN_BOSS_SECONDS_PER_QUESTION}
+                              max={MAX_BOSS_SECONDS_PER_QUESTION}
+                              step="1"
+                              value={bossDurationValue}
+                              onChange={(event) => setBossDurationValue(event.target.value)}
+                            />
+                            <span className="timer-setting-unit">วินาที</span>
+                          </div>
+                          <small>{MIN_BOSS_SECONDS_PER_QUESTION}-{MAX_BOSS_SECONDS_PER_QUESTION} วินาที · ใช้กับทั้ง 3 ข้อของด่านชิงมนตรา</small>
+                        </div>
                         <button
                           className="primary-button w-full"
                           onClick={requestStart}
-                          disabled={busy || sortedPlayers.length === 0 || !durationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
+                          disabled={busy || sortedPlayers.length === 0 || !durationValid || !bossDurationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
                         >
                           {roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
                         </button>
@@ -1333,6 +1453,68 @@ export const TeacherPage = () => {
                     )
                   })}
                 </ul>
+              </section>
+            ) : null}
+
+            {/* Learning history: every round already recorded for this room, newest data kept
+                immutable by the service layer. Collapsed by default so it never competes with the
+                live dashboard, and available even after the room is closed. */}
+            {roundHistoryState.data.length > 0 ? (
+              <section className="glass-panel mt-6 p-5" aria-label="ประวัติผลการเรียน">
+                <div className="learning-history-heading">
+                  <div>
+                    <p className="eyebrow">ประวัติผลการเรียน</p>
+                    <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">
+                      {historyRounds.length} รอบ · {roundHistoryState.data.length} รายการ
+                    </h2>
+                  </div>
+                  <div className="learning-history-actions">
+                    <button type="button" className="copy-button" onClick={() => setHistoryOpen((open) => !open)}>
+                      {historyOpen ? 'ซ่อนรายละเอียด' : 'ดูรายละเอียด'}
+                    </button>
+                    <button type="button" className="copy-button" onClick={() => downloadLearningWorkbook(roundHistoryState.data, roomCode)}>
+                      ⬇ ดาวน์โหลด Excel
+                    </button>
+                  </div>
+                </div>
+                {historyOpen ? (
+                  <div className="learning-history-scroll mt-4">
+                    <table className="learning-history-table">
+                      <thead>
+                        <tr>
+                          <th>ชื่อ</th>
+                          <th>เลขที่</th>
+                          <th>รอบ</th>
+                          <th>ทีม</th>
+                          <th>ก่อนเล่น</th>
+                          <th>หลังเล่น</th>
+                          <th>ผลการเรียนรู้</th>
+                          <th>คะแนนความรู้</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {roundHistoryState.data.map((entry) => (
+                          <tr key={entry.id}>
+                            <td className="text-[#fff7df]">{entry.displayName}</td>
+                            <td>{entry.studentNumber}</td>
+                            <td>{entry.round}</td>
+                            <td>{entry.teamName || '-'}</td>
+                            <td>{entry.beforeCorrectCount}/{RECALL_QUESTION_COUNT}</td>
+                            <td>{entry.afterCorrectCount}/{RECALL_QUESTION_COUNT}</td>
+                            <td>
+                              {entry.afterCorrectCount > entry.beforeCorrectCount
+                                ? <span className="learning-summary-verdict-up">เข้าใจเพิ่มขึ้น {entry.afterCorrectCount - entry.beforeCorrectCount} เรื่อง</span>
+                                : entry.afterCorrectCount < entry.beforeCorrectCount
+                                  ? <span className="learning-summary-verdict-down">ควรทบทวน {entry.beforeCorrectCount - entry.afterCorrectCount} เรื่อง</span>
+                                  : 'คงเดิม'}
+                            </td>
+                            <td>{entry.knowledgeScore100}/100</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
               </section>
             ) : null}
 

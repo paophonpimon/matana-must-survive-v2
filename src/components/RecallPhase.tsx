@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { friendlyError } from '../services'
+import { clearRecallTimerMark, readRecallTimerMark, writeRecallTimerMark } from '../services/sessionStorage'
 import type { RecallAnswerInput } from '../services/gameService'
-import { RECALL_SECONDS_PER_ITEM, RECALL_TIMEOUT_CHOICE_ID, type Player } from '../types/game'
+import { RECALL_TIMEOUT_CHOICE_ID, type Player } from '../types/game'
 
 interface RecallPhaseProps {
   player: Player
+  // Scopes the persisted countdown anchor so timing from one room never leaks into another.
+  roomCode: string
+  // Teacher-configured seconds per item, read from the room so every student counts down from
+  // the same value — no hardcoded duration lives in this component anymore.
+  secondsPerItem: number
   onAnswer: (input: RecallAnswerInput) => Promise<void>
 }
 
@@ -26,7 +32,7 @@ interface RecallPhaseProps {
 // is a pacing device only — it can never touch competitive scoring, since Recall writes only ever
 // reach player.recallAnswers. A refresh restarts the current item's countdown, which is
 // acceptable precisely because nothing competitive rides on it.
-export const RecallPhase = ({ player, onAnswer }: RecallPhaseProps) => {
+export const RecallPhase = ({ player, roomCode, secondsPerItem, onAnswer }: RecallPhaseProps) => {
   const [viewedIndex, setViewedIndex] = useState(0)
   const initialized = useRef(false)
   useEffect(() => {
@@ -37,7 +43,7 @@ export const RecallPhase = ({ player, onAnswer }: RecallPhaseProps) => {
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [secondsLeft, setSecondsLeft] = useState(RECALL_SECONDS_PER_ITEM)
+  const [secondsLeft, setSecondsLeft] = useState(secondsPerItem)
 
   const totalCount = RECALL_QUESTIONS.length
   const currentQuestion = RECALL_QUESTIONS[viewedIndex]
@@ -64,36 +70,63 @@ export const RecallPhase = ({ player, onAnswer }: RecallPhaseProps) => {
     void submit(choiceId)
   }
 
-  // One countdown per item: resets when the student moves to a new question, freezes once the
-  // item is answered, and on expiry persists the item as unanswered (RECALL_TIMEOUT_CHOICE_ID ->
-  // isCorrect false) so Baseline counts it, then reveals the correct answer like any other item.
+  // One countdown per item: freezes once the item is answered, and on expiry persists the item as
+  // unanswered (RECALL_TIMEOUT_CHOICE_ID -> isCorrect false) so the before-play evidence counts it,
+  // then reveals the correct answer like any other item.
+  //
+  // The countdown is anchored to a persisted start time rather than to mount time, so a refresh
+  // resumes the remaining seconds instead of granting a fresh full duration. A genuinely new
+  // question (or round) doesn't match the stored mark and therefore gets a fresh anchor; a question
+  // whose time already ran out while the page was away resolves to 0 remaining on the first pass
+  // and is submitted as a timeout immediately, so expired stays expired.
   const expiredRef = useRef('')
   useEffect(() => {
     if (!currentQuestion) return
     if (answeredRecord) return
-    setSecondsLeft(RECALL_SECONDS_PER_ITEM)
-    const startedAt = Date.now()
-    const intervalId = window.setInterval(() => {
-      const remaining = Math.max(0, RECALL_SECONDS_PER_ITEM - Math.floor((Date.now() - startedAt) / 1_000))
-      setSecondsLeft(remaining)
-      if (remaining > 0) return
-      window.clearInterval(intervalId)
+
+    const storedMark = readRecallTimerMark(roomCode, player.id)
+    const resumes = storedMark?.round === player.currentRound && storedMark.conceptId === currentQuestion.id
+    const startedAt = resumes ? storedMark.startedAt : Date.now()
+    if (!resumes) {
+      writeRecallTimerMark(roomCode, player.id, { round: player.currentRound, conceptId: currentQuestion.id, startedAt })
+    }
+
+    const remainingAt = (): number => Math.max(0, secondsPerItem - Math.floor((Date.now() - startedAt) / 1_000))
+    const expire = (): void => {
       // Guard against a double-submit if this effect re-runs while the write is still in flight.
       if (expiredRef.current === currentQuestion.id) return
       expiredRef.current = currentQuestion.id
       void submit(RECALL_TIMEOUT_CHOICE_ID)
+    }
+
+    const initialRemaining = remainingAt()
+    setSecondsLeft(initialRemaining)
+    if (initialRemaining <= 0) {
+      expire()
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      const remaining = remainingAt()
+      setSecondsLeft(remaining)
+      if (remaining > 0) return
+      window.clearInterval(intervalId)
+      expire()
     }, 250)
     return () => window.clearInterval(intervalId)
-  }, [currentQuestion, answeredRecord, submit])
+  }, [currentQuestion, answeredRecord, submit, secondsPerItem, roomCode, player.id, player.currentRound])
 
   if (!currentQuestion) {
+    // All five items are done, so the anchor has nothing left to resume — drop it rather than
+    // leaving a stale mark sitting in this tab's storage.
+    clearRecallTimerMark(roomCode, player.id)
     // Dedicated waiting screen — deliberately distinct from LobbyPage's own waiting copy, since
     // this student has already finished Recall and is waiting on classmates, not on the room to
     // open. The student is never auto-advanced into team setup: the teacher drives that.
     return (
       <div className="recall-phase recall-phase-complete" aria-live="polite">
         <div className="waiting-rings mx-auto" aria-hidden="true"><span /><i>ม</i></div>
-        <h1 className="mt-6 text-center text-2xl font-semibold sm:text-3xl">กู้ความทรงจำครบแล้ว</h1>
+        <h1 className="mt-6 text-center text-2xl font-semibold sm:text-3xl">ทบทวนเรื่องราวครบแล้ว</h1>
         <p className="recall-phase-complete-status">รอเพื่อนร่วมภารกิจ</p>
         <p className="mx-auto mt-3 max-w-md text-center text-[#d8d1c5]">เมื่อทุกคนทำครบ ครูจะพาไปจัดทีมและเตรียมเข้าสู่เกม</p>
       </div>
@@ -105,7 +138,7 @@ export const RecallPhase = ({ player, onAnswer }: RecallPhaseProps) => {
   return (
     <div className="recall-phase">
       <header className="recall-phase-header">
-        <p className="eyebrow">กู้ความทรงจำมัทนา</p>
+        <p className="eyebrow">ทบทวนเรื่องราวมัทนา</p>
         <p className="recall-phase-note">รายบุคคล • ไม่มีผลต่อคะแนนการแข่งขัน</p>
       </header>
 
@@ -173,7 +206,7 @@ export const RecallPhase = ({ player, onAnswer }: RecallPhaseProps) => {
         ) : null}
       </section>
 
-      <p className="recall-phase-footnote">ตอบได้เพียงครั้งเดียวต่อข้อ • ข้อละ {RECALL_SECONDS_PER_ITEM} วินาที • ไม่มีผลต่อคะแนนทีมหรือมนตรา</p>
+      <p className="recall-phase-footnote">ตอบได้เพียงครั้งเดียวต่อข้อ • ข้อละ {secondsPerItem} วินาที • ไม่มีผลต่อคะแนนทีมหรือมนตรา</p>
     </div>
   )
 }

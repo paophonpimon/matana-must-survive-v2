@@ -5,11 +5,17 @@ import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/g
 import { getRemainingMilliseconds } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, RecallAnswerInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  MAX_BOSS_SECONDS_PER_QUESTION,
+  MAX_RECALL_SECONDS_PER_ITEM,
+  MIN_BOSS_SECONDS_PER_QUESTION,
+  MIN_RECALL_SECONDS_PER_ITEM,
+  RECALL_SECONDS_PER_ITEM,
   RECALL_TIMEOUT_CHOICE_ID,
   createEmptyMagicInventory,
 } from '../types/game'
@@ -26,6 +32,7 @@ import type {
   QueuedMagicEffect,
   RecallAnswerRecord,
   Room,
+  RoundHistoryEntry,
   TeamGuardianName,
   TeamMagicState,
   TeamRosterSummary,
@@ -45,10 +52,39 @@ interface DemoRoomState {
   captainVoteProgress: Record<string, CaptainVoteProgress>
   // Team guardian names — keyed by teamId, mirroring magic/captainVotes' shape.
   teamNames: Record<string, TeamGuardianName>
+  // Immutable per-round learning snapshots, keyed by `${round}-${playerId}`. Deliberately kept
+  // OUTSIDE `players` so a round reset (which wipes answers/score) can never erase it.
+  roundHistory: Record<string, RoundHistoryEntry>
 }
 
 interface DemoState {
   rooms: Record<string, DemoRoomState>
+}
+
+// Teacher-configured durations are clamped service-side, not just in the form, so a hand-crafted
+// request can't set a 0-second or absurdly long timer.
+const clampRecallDuration = (seconds: number): number =>
+  Math.max(MIN_RECALL_SECONDS_PER_ITEM, Math.min(MAX_RECALL_SECONDS_PER_ITEM, Math.round(seconds)))
+const clampBossDuration = (seconds: number): number =>
+  Math.max(MIN_BOSS_SECONDS_PER_QUESTION, Math.min(MAX_BOSS_SECONDS_PER_QUESTION, Math.round(seconds)))
+
+// Round history: immutable per-round, per-student learning snapshots, keyed by the deterministic
+// `${round}-${playerId}` id. Written by the teacher-only operations that end a round, BEFORE
+// player data is reset — see recordRoundHistory below.
+const snapshotRoundHistory = (roomState: DemoRoomState): void => {
+  const { room } = roomState
+  roomState.roundHistory ??= {}
+  const completedAt = Date.now()
+  Object.values(roomState.players).forEach((player) => {
+    const id = roundHistoryEntryId(room.currentRound, player.id)
+    // Idempotent: a round already recorded is never rewritten, so a second reset/close (or a
+    // retried call) can't duplicate or mutate a finished round's record.
+    if (roomState.roundHistory[id]) return
+    const teamName = player.teamId
+      ? roomState.teamNames[player.teamId]?.name?.trim() || room.teams.find((team) => team.id === player.teamId)?.name || ''
+      : ''
+    roomState.roundHistory[id] = buildRoundHistoryEntry(player, room.currentRound, teamName, completedAt)
+  })
 }
 
 // Milestone 4: bumped from v5 — the magic inventory shape changed from an array of individual
@@ -132,6 +168,7 @@ const createSeedState = (): DemoState => {
     questionDurationSeconds: 30,
     questionStartedAt: null,
     questionClosedAt: null,
+    recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
     ...createFreshBossFields(),
     questionIds: selectRoundQuestions(questions),
     previousQuestionIds: [],
@@ -154,7 +191,7 @@ const createSeedState = (): DemoState => {
     const id = stablePlayerId(studentNumber)
     players[id] = createPlayer(id, displayName, studentNumber, `demo-student-${index + 1}`)
   })
-  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {} } } }
+  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {}, roundHistory: {} } } }
 }
 
 const normalizeState = (state: DemoState): DemoState => {
@@ -172,6 +209,7 @@ const normalizeState = (state: DemoState): DemoState => {
     // being added (STORAGE_KEY was already bumped for the inventory shape change, but this
     // costs nothing and matches the established pattern for every prior field addition here).
     room.phase ??= room.status === 'playing' ? 'main' : 'lobby'
+    room.recallQuestionDurationSeconds ??= RECALL_SECONDS_PER_ITEM
     room.bossQuestionIds ??= []
     room.bossQuestionIndex ??= 0
     room.bossQuestionStartedAt ??= null
@@ -191,6 +229,7 @@ const normalizeState = (state: DemoState): DemoState => {
     roomState.captainVoteProgress ??= {}
     // Team guardian names — older saved demo state predates this entirely.
     roomState.teamNames ??= {}
+    roomState.roundHistory ??= {}
     Object.values(roomState.magic).forEach((magic) => { magic.captainElectionAttempt ??= 1 })
     // Milestone 2.1: events/progress saved before round-tracking existed won't have these
     // fields — default them to round 1 (the only round that could have existed back then)
@@ -441,6 +480,7 @@ export class DemoGameService implements GameService {
       questionDurationSeconds: 30,
       questionStartedAt: null,
       questionClosedAt: null,
+    recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
       ...createFreshBossFields(),
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
@@ -450,7 +490,7 @@ export class DemoGameService implements GameService {
       teamsLocked: false,
       teams: [],
     }
-    state.rooms[roomCode] = { room, players: {}, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {} }
+    state.rooms[roomCode] = { room, players: {}, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {}, roundHistory: {} }
     await writeState(state)
     return room
   }
@@ -543,7 +583,7 @@ export class DemoGameService implements GameService {
     return listen(() => { void emit() })
   }
 
-  async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void> {
+  async startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number, bossQuestionDurationSeconds?: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
@@ -571,6 +611,9 @@ export class DemoGameService implements GameService {
     roomState.room.phase = 'main'
     roomState.room.currentQuestionIndex = 0
     roomState.room.questionDurationSeconds = Math.max(5, Math.min(600, Math.round(questionDurationSeconds)))
+    if (bossQuestionDurationSeconds != null) {
+      roomState.room.bossQuestionDurationSeconds = clampBossDuration(bossQuestionDurationSeconds)
+    }
     roomState.room.questionStartedAt = roomState.room.startedAt
     roomState.room.questionClosedAt = null
     Object.values(roomState.players).forEach((player) => {
@@ -584,7 +627,7 @@ export class DemoGameService implements GameService {
   // Story Recall is a pre-team individual learning phase, so the only precondition is that at
   // least one student is present to do it. Idempotent by stage check: a stale/duplicate call
   // once already past 'lobby' is a safe no-op rather than a restart that would wipe progress.
-  async startRecall(roomCode: string, teacherSessionId: string): Promise<void> {
+  async startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
@@ -593,6 +636,9 @@ export class DemoGameService implements GameService {
     if (roomState.room.phase !== 'lobby') return
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มกู้ความทรงจำไม่ได้')
     roomState.room.phase = 'recall'
+    if (recallQuestionDurationSeconds != null) {
+      roomState.room.recallQuestionDurationSeconds = clampRecallDuration(recallQuestionDurationSeconds)
+    }
     await writeState(state)
   }
 
@@ -884,6 +930,9 @@ export class DemoGameService implements GameService {
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
     if (roomState.room.status === 'playing') throw new Error('ผู้ใช้:ยุติรอบปัจจุบันให้เรียบร้อยก่อนเตรียมรอบใหม่')
+    // Record this round BEFORE any player data is reset below — once answers/recallAnswers are
+    // wiped the results are unrecoverable. Idempotent per round.
+    snapshotRoundHistory(roomState)
     const previousQuestionIds = roomState.room.questionIds
     const currentRound = roomState.room.currentRound + 1
     roomState.room = {
@@ -938,6 +987,9 @@ export class DemoGameService implements GameService {
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
     if (roomState.room.status !== 'playing') throw new Error('ผู้ใช้:ภารกิจไม่ได้กำลังดำเนินอยู่')
+    // Record this round BEFORE any player data is reset below — once answers/recallAnswers are
+    // wiped the results are unrecoverable. Idempotent per round.
+    snapshotRoundHistory(roomState)
     const previousQuestionIds = roomState.room.questionIds
     const currentRound = roomState.room.currentRound + 1
     roomState.room = {
@@ -987,6 +1039,9 @@ export class DemoGameService implements GameService {
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
+    // Closing ends the round too, so record it first — this is what keeps a finished round's
+    // history available after the room is closed.
+    snapshotRoundHistory(roomState)
     roomState.room.status = 'closed'
     Object.values(roomState.players).forEach((player) => {
       player.status = 'stopped'
@@ -1394,6 +1449,15 @@ export class DemoGameService implements GameService {
     const emit = async (): Promise<void> => {
       const names = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.teamNames ?? {})
       listener(names)
+    }
+    void emit()
+    return listen(() => { void emit() })
+  }
+
+  subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void): Unsubscribe {
+    const emit = async (): Promise<void> => {
+      const entries = Object.values((await readState()).rooms[roomCode.toUpperCase()]?.roundHistory ?? {})
+      listener([...entries].sort((a, b) => a.round - b.round || a.studentNumber.localeCompare(b.studentNumber)))
     }
     void emit()
     return listen(() => { void emit() })

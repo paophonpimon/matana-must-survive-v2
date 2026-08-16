@@ -138,6 +138,12 @@ export const RECALL_QUESTION_COUNT = 5
 // unanswered/incorrect for Baseline, and it can never influence competitive scoring (Recall
 // writes only ever touch player.recallAnswers — see RecallAnswerRecord).
 export const RECALL_SECONDS_PER_ITEM = 15
+// Bounds for the teacher-configurable Recall timer, mirroring the Main question timer's own
+// 5s floor. Capped lower than Main's because Recall items are two-choice recall prompts.
+export const MIN_RECALL_SECONDS_PER_ITEM = 5
+export const MAX_RECALL_SECONDS_PER_ITEM = 120
+export const MIN_BOSS_SECONDS_PER_QUESTION = 3
+export const MAX_BOSS_SECONDS_PER_QUESTION = 60
 // Sentinel selectedChoiceId persisted when a Recall item's countdown expires with no answer.
 // Deliberately not a real choice id, so Baseline counts it as incorrect while staying
 // distinguishable from a genuine wrong pick in the stored record.
@@ -177,6 +183,10 @@ export interface Room {
   // idempotency guard for ranking+reward resolution — set exactly once, on the transaction that
   // resolves the 3rd boss question, and reset to false on every new round.
   phase: GamePhase
+  // Teacher-configured seconds per Story Recall item, chosen on the lobby screen before Recall
+  // starts and applied to all 5 items. Persisted on the room so every student's client counts
+  // down from the same value instead of a hardcoded constant.
+  recallQuestionDurationSeconds: number
   bossQuestionIds: string[]
   bossQuestionIndex: number
   bossQuestionStartedAt: number | null
@@ -403,6 +413,52 @@ export interface TeamGuardianName {
   name: string
   updatedAt: number
   updatedByPlayerId: string
+}
+
+// Immutable per-round, per-student snapshot of learning results, written by the teacher-only
+// round-reset/close operations BEFORE player.answers/recallAnswers are wiped for the next round.
+// This is deliberately a separate collection from the mutable `players` docs: a round's results
+// have to outlive the round they came from (prepareNextRound resets every player), and they must
+// never be recomputed afterward — the stored numbers are the record.
+//
+// Everything here is derived exclusively from raw individual correctness (player.recallAnswers vs
+// the mapped main answers, plus player.score) — never team score, magic, boss, speed, ranking, or
+// competition score, matching lib/learning.ts's own constraint.
+//
+// The doc id is deterministic (`${round}-${playerId}`), which is what makes snapshotting
+// idempotent: re-running the same round's snapshot targets the same id and is skipped rather than
+// duplicated.
+export interface RoundHistoryConceptResult {
+  conceptId: string
+  // Correct in the pre-play review phase.
+  beforeCorrect: boolean
+  // Correct on the mapped main question during play.
+  afterCorrect: boolean
+}
+
+export interface RoundHistoryEntry {
+  id: string
+  round: number
+  playerId: string
+  displayName: string
+  studentNumber: string
+  teamId: string | null
+  // The guardian name if the team set one, otherwise the generic "ทีม N" label — resolved at
+  // snapshot time so history stays readable even after teams are re-randomized or renamed.
+  teamName: string
+  beforeCorrectCount: number
+  afterCorrectCount: number
+  improvedCount: number
+  reviewCount: number
+  improvedConceptIds: string[]
+  reviewConceptIds: string[]
+  conceptResults: RoundHistoryConceptResult[]
+  // Raw main-question knowledge score, stored both as the canonical /10 count and the /100
+  // display figure, so exports never have to re-derive (and can't drift from) the shown value.
+  knowledgeScore: number
+  knowledgeScore100: number
+  mainAnswers: Array<{ questionId: string; isCorrect: boolean }>
+  completedAt: number
 }
 
 export interface AnswerProgressEntry {

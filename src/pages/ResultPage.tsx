@@ -5,7 +5,7 @@ import { recallQuestionsById } from '../data/recallQuestions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamMagic } from '../hooks/useGameData'
 import { computeStudentLearningEvidence } from '../lib/learning'
 import { getPlayerSession } from '../services/sessionStorage'
-import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS } from '../types/game'
+import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS, RECALL_SECONDS_PER_ITEM } from '../types/game'
 import type { Player, Room } from '../types/game'
 
 const previewRoom: Room = {
@@ -27,6 +27,7 @@ const previewRoom: Room = {
   teamsLocked: true,
   teams: [{ id: 'team-1', name: 'ทีม 1' }],
   phase: 'main',
+  recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
   bossQuestionIds: [],
   bossQuestionIndex: 0,
   bossQuestionStartedAt: null,
@@ -105,11 +106,20 @@ export const ResultPage = () => {
           <section className={resultPanelClass}>
             <div className={successful ? 'result-hero result-hero-success' : 'result-hero'}>
               <div className="result-hero-copy">
-                <p className="eyebrow">
-                  คะแนนของคุณ · {assignedTeamDisplayName} · รอบที่ {room.currentRound}
-                  {isCaptain ? <span className="ml-2 text-[#f2d58d]" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
-                </p>
-                <h1 className="result-title mt-2">{title}</h1>
+                {/* Identity: the STUDENT's own name leads, on its own line and at display size.
+                    Team and captain are secondary badges beneath it, and the round is small
+                    trailing metadata — so the team name can never be mistaken for the student's
+                    name the way it was when all three shared one dense line. Items are
+                    deliberately absent here: they matter during Main/Boss, not on the result. */}
+                <div className="result-identity">
+                  <strong className="result-identity-name">{player.displayName}</strong>
+                  <span className="result-identity-badges">
+                    {assignedTeamDisplayName ? <span className="result-identity-team">ทีม {assignedTeamDisplayName}</span> : null}
+                    {isCaptain ? <span className="result-identity-captain" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
+                    <span className="result-identity-round">รอบที่ {room.currentRound}</span>
+                  </span>
+                </div>
+                <h1 className="result-title mt-4">{title}</h1>
                 {failed ? (
                   <p className="result-description mt-4"><span>คุณตอบคำถามผิดมากเกินไป</span><span>การตัดสินใจของคุณทำให้มัทนาถูกสาป</span><span>เป็นดอกกุหลาบไปตลอดกาล</span><span>หนทางกลับคืนสู่ร่างมนุษย์ของนางได้ปิดลงแล้ว...</span></p>
                 ) : successful ? (
@@ -144,24 +154,29 @@ export const ResultPage = () => {
             {!isPreview && learningEvidence ? (
               <section className="learning-summary mt-6" aria-label="สรุปการเรียนรู้ของคุณ">
                 <p className="eyebrow">สรุปการเรียนรู้</p>
+                {/* Plain before/after counts out of 5. The old "+40% / -40%" figure was a
+                    percentage-point difference between two 5-item scores, which reads as a grade
+                    and confuses more than it explains — the counts plus a sentence say the same
+                    thing in classroom language. */}
                 <dl className="learning-summary-grid mt-2">
-                  <div><dt>กู้ความทรงจำ</dt><dd>{learningEvidence.recallCorrectCount}/5</dd></div>
-                  <div><dt>เข้าใจระหว่างภารกิจ</dt><dd>{learningEvidence.mainEvidenceCorrectCount}/5</dd></div>
-                  <div>
-                    <dt>พัฒนาการ</dt>
-                    <dd className={learningEvidence.learningGainPercent >= 0 ? 'learning-gain-positive' : 'learning-gain-negative'}>
-                      {learningEvidence.learningGainPercent >= 0 ? '+' : ''}{Math.round(learningEvidence.learningGainPercent)}%
-                    </dd>
-                  </div>
+                  <div><dt>ก่อนเล่น</dt><dd>{learningEvidence.recallCorrectCount}/5</dd></div>
+                  <div><dt>หลังเล่น</dt><dd>{learningEvidence.mainEvidenceCorrectCount}/5</dd></div>
                 </dl>
+                <p className={`learning-summary-verdict ${learningEvidence.mainEvidenceCorrectCount > learningEvidence.recallCorrectCount ? 'learning-summary-verdict-up' : learningEvidence.mainEvidenceCorrectCount < learningEvidence.recallCorrectCount ? 'learning-summary-verdict-down' : ''}`}>
+                  {learningEvidence.mainEvidenceCorrectCount > learningEvidence.recallCorrectCount
+                    ? `เข้าใจเพิ่มขึ้น ${learningEvidence.mainEvidenceCorrectCount - learningEvidence.recallCorrectCount} เรื่อง`
+                    : learningEvidence.mainEvidenceCorrectCount < learningEvidence.recallCorrectCount
+                      ? `ควรทบทวนเพิ่ม ${learningEvidence.recallCorrectCount - learningEvidence.mainEvidenceCorrectCount} เรื่อง`
+                      : 'ผลการเรียนรู้คงเดิม'}
+                </p>
                 {learningEvidence.improvedConceptIds.length > 0 ? (
                   <p className="learning-summary-note learning-summary-note-positive">
-                    พัฒนาขึ้น: {learningEvidence.improvedConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
+                    เข้าใจเพิ่มขึ้น: {learningEvidence.improvedConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
                   </p>
                 ) : null}
                 {learningEvidence.stillIncorrectConceptIds.length > 0 ? (
                   <p className="learning-summary-note">
-                    ยังต้องทบทวน: {learningEvidence.stillIncorrectConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
+                    ควรทบทวน: {learningEvidence.stillIncorrectConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
                   </p>
                 ) : null}
               </section>

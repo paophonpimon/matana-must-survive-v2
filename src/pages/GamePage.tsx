@@ -4,6 +4,7 @@ import { BossResultDetails } from '../components/BossResultDetails'
 import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { MagicPanel } from '../components/MagicPanel'
+import { TeamItemStatus } from '../components/TeamItemStatus'
 import { RecallPhase } from '../components/RecallPhase'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
@@ -269,7 +270,12 @@ export const GamePage = () => {
         ) : room.phase === 'recall' ? (
           // Learning Layer: mandatory individual "กู้ความทรงจำมัทนา" phase, before Main's timer
           // ever starts — fully self-contained (own progress model, no team/magic UI at all).
-          <RecallPhase player={player} onAnswer={(input) => service.saveRecallAnswer(normalizedCode, player.id, input)} />
+          <RecallPhase
+            player={player}
+            roomCode={normalizedCode}
+            secondsPerItem={room.recallQuestionDurationSeconds}
+            onAnswer={(input) => service.saveRecallAnswer(normalizedCode, player.id, input)}
+          />
         ) : isBossPhase ? (
           // Item 5: once the 3rd boss question resolves, phase deliberately stays 'boss' until
           // the teacher presses "เล่นต่อ" (continueAfterBoss) — this branch is what stops every
@@ -306,7 +312,12 @@ export const GamePage = () => {
           ) : (
             <>
               <header className="game-header">
-                <div className="min-w-0"><p className="text-xs text-[#aaa298]">ผู้เล่น</p><strong className="block truncate text-[#fff7df]">{player.displayName}</strong><small className="block truncate text-[#c0b7ab]">{assignedTeamDisplayName}</small></div>
+                <div className="min-w-0">
+                  <p className="text-xs text-[#aaa298]">ผู้เล่น</p>
+                  <strong className="block truncate text-[#fff7df]">{player.displayName}</strong>
+                  <small className="block truncate text-[#c0b7ab]">{assignedTeamDisplayName}</small>
+                  <TeamItemStatus inventory={magicState.data?.inventory} className="mt-1" />
+                </div>
                 <div className="text-right"><p className="text-xs text-[#aaa298]">ศึกด่านชิงมนตรา</p><strong className={`question-timer ${bossRemainingMs <= 3_000 ? 'question-timer-urgent' : ''}`}>{bossTimeExpired ? 'หมดเวลา' : formatCountdown(bossRemainingMs)}</strong></div>
               </header>
 
@@ -403,6 +414,7 @@ export const GamePage = () => {
                   {isCaptain ? <span className="ml-2 text-xs font-semibold text-[#f2d58d]" title="หัวหน้าทีม">👑 หัวหน้าทีม</span> : null}
                 </strong>
                 <small className="block truncate text-[#c0b7ab]">{assignedTeamDisplayName}</small>
+                <TeamItemStatus inventory={magicState.data?.inventory} className="mt-1" />
               </div>
               <div className="text-right"><p className="text-xs text-[#aaa298]">รอบที่ {room.currentRound}</p><strong className={`question-timer ${remainingMs <= 5_000 ? 'question-timer-urgent' : ''}`}>{timeExpired ? 'หมดเวลา' : formatCountdown(remainingMs)}</strong></div>
             </header>

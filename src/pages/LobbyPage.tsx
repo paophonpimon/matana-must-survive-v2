@@ -113,7 +113,7 @@ export const LobbyPage = () => {
                   must promise the Recall activity — not the mission/teams, which are still two
                   stages away. Stage 'teamSetup' keeps the original mission-facing copy. */}
               <h1 className="mt-7 text-3xl font-semibold sm:text-4xl">
-                {room.phase === 'lobby' ? 'รอเริ่มกู้ความทรงจำ' : 'รอครูเริ่มภารกิจ'}
+                {room.phase === 'lobby' ? 'รอเริ่มทบทวนเรื่องราว' : 'รอครูเริ่มภารกิจ'}
               </h1>
               <p className="mx-auto mt-3 max-w-md text-[#d8d1c5]">
                 {room.phase === 'lobby'

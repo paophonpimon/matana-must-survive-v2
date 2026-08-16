@@ -51,6 +51,23 @@ export const computeStudentLearningEvidence = (player: LearningPlayer): StudentL
   }
 }
 
+// Per-concept before/after pair for ONE student, using the exact same recall-vs-mapped-main
+// comparison computeStudentLearningEvidence already performs — exposed separately because the
+// round-history snapshot and the spreadsheet export need the per-concept detail, not just the
+// aggregate counts. Additive: computeStudentLearningEvidence is unchanged.
+export interface StudentConceptResult {
+  conceptId: string
+  beforeCorrect: boolean
+  afterCorrect: boolean
+}
+
+export const computeStudentConceptResults = (player: LearningPlayer): StudentConceptResult[] =>
+  RECALL_QUESTIONS.map((recallQuestion) => ({
+    conceptId: recallQuestion.id,
+    beforeCorrect: Boolean(player.recallAnswers.find((entry) => entry.conceptId === recallQuestion.id)?.isCorrect),
+    afterCorrect: Boolean(player.answers.find((entry) => entry.questionId === recallQuestion.mappedMainQuestionId)?.isCorrect),
+  }))
+
 export interface ConceptClassEvidence {
   conceptId: string
   mappedMainQuestionId: string

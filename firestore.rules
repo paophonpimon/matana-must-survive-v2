@@ -451,6 +451,18 @@ service cloud.firestore {
       // semantics; rules have no loop/aggregate primitive to scan sibling docs for a duplicate).
       // Length is checked here too as a cheap backstop; the full character-set allowlist is left
       // to the app layer since it doesn't change the authorization boundary.
+      // Immutable per-round learning snapshots, written by the teacher-only round-ending
+      // operations (prepareNextRound/stopRound/closeRoom) before player data is reset. Teacher-only
+      // in both directions: this is the teacher's gradebook, and students already see their own
+      // live result on their own result screen. Deletes are refused outright so a finished round's
+      // record can never be destroyed from a client — "immutable" is enforced here, not just by
+      // convention in the service layer.
+      match /roundHistory/{entryId} {
+        allow read: if isTeacher(roomCode);
+        allow create, update: if isTeacher(roomCode);
+        allow delete: if false;
+      }
+
       match /teamNames/{teamId} {
         allow read: if signedIn();
         allow create, update: if isTeacher(roomCode) || (
