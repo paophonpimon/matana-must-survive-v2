@@ -1227,6 +1227,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 /* ================= Teacher learning history ================= */
 /* Report download actions on the final Learning Summary — deliberately prominent, not tucked
    into the collapsed history section. */
+/* Placeholder shown in place of a current-question stat while answers are still open. */
+.teacher-hidden-until-reveal { color: #8b8377; font-size: 0.8rem; font-weight: 600; }
+
 .learning-report-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.1rem; }
 .learning-report-actions > button { flex: 0 1 auto; min-width: 12rem; }
 @media (max-width: 560px) {

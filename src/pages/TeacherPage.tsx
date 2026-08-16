@@ -9,7 +9,7 @@ import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
 import { useBackgroundMusic } from '../hooks/useBackgroundMusic'
 import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers, useRoundHistory } from '../hooks/useGameData'
-import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
 import { computeClassLearningSummary, computeStudentLearningEvidence } from '../lib/learning'
@@ -187,8 +187,19 @@ export const TeacherPage = () => {
   const visiblePlayers = useMemo(() => {
     const room = roomState.data
     if (!room || room.status !== 'playing') return playersState.data
-    return playersState.data.map((player) => ({ ...player, score: getTeacherVisibleScore(room, player, now) }))
+    // Withholds the current question's ANSWER RECORD, not just its score point. Team correct
+    // counts and competition scores are both derived from `answers`, so trimming only the score
+    // (as this used to) still let "ถูก N ข้อ" and the competition average tick upward the moment
+    // someone guessed right — turning the projected screen into an answer oracle.
+    return playersState.data.map((player) => getTeacherVisiblePlayer(room, player, now))
   }, [now, playersState.data, roomState.data])
+
+  // Whether the current question's correctness may be shown at all. Everything gated on this is
+  // hidden while the answer window is live and appears the moment the reveal begins.
+  const currentQuestionRevealed = roomState.data ? isCurrentQuestionRevealed(roomState.data, now) : true
+  // Join order, but reveal-safe — used anywhere a per-student view could otherwise expose the
+  // current question's ✓/✕ (the printable report in particular).
+  const visibleSortedPlayers = useMemo(() => [...visiblePlayers].sort((a, b) => a.joinedAt - b.joinedAt), [visiblePlayers])
 
   const magicState = useAllTeamMagic(roomCode)
   const magicEventsState = useMagicEvents(roomCode)
@@ -1213,7 +1224,17 @@ export const TeacherPage = () => {
                     <div><dt>คำถามปัจจุบัน</dt><dd>{roomState.data.currentQuestionIndex + 1}<span>/10</span></dd></div>
                     <div><dt>{revealRemainingMs > 0 ? 'ดูเฉลยอีก' : 'เวลาคงเหลือ'}</dt><dd>{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</dd></div>
                     <div><dt>ตอบแล้วข้อนี้</dt><dd>{currentQuestionStats.answeredCount}<span>/{sortedPlayers.length}</span></dd></div>
-                    <div><dt>ถูกข้อนี้</dt><dd>{currentQuestionStats.correctCount}<span>/{sortedPlayers.length}</span></dd></div>
+                    {/* Correct count for the CURRENT question appears only once answers are
+                        locked and the reveal has begun — while the timer runs, the teacher sees
+                        response progress only. */}
+                    <div>
+                      <dt>ถูกข้อนี้</dt>
+                      <dd>
+                        {currentQuestionRevealed
+                          ? <>{currentQuestionStats.correctCount}<span>/{sortedPlayers.length}</span></>
+                          : <span className="teacher-hidden-until-reveal">รอเฉลย</span>}
+                      </dd>
+                    </div>
                     <div><dt>คะแนนเฉลี่ยทีม</dt><dd>{overallAverage.toFixed(1)}</dd></div>
                   </dl>
                 ) : null}
@@ -1683,7 +1704,7 @@ export const TeacherPage = () => {
         <TeacherReportPrintView
           roomCode={roomCode}
           round={roomState.data.currentRound}
-          players={sortedPlayers}
+          players={visibleSortedPlayers}
           questionIds={roomState.data.questionIds}
           teamNameById={displayTeamNameById}
           beforeAverage={classBeforeAverage}

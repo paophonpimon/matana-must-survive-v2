@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ANSWER_REVEAL_MILLISECONDS, areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from './gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore, getTeacherVisiblePlayer, isCurrentQuestionRevealed } from './gameFlow'
 
 describe('timed game question flow', () => {
   it('uses one shared deadline for every team', () => {
@@ -80,5 +80,43 @@ describe('timed game question flow', () => {
     }
     const correctTeam = { score: 4, answers: [{ questionId: 'q1', selectedChoiceId: 'a', isCorrect: true, answeredAt: 12_000, responseTimeMs: 2_000 }] }
     expect(getTeacherVisibleScore(room, correctTeam, 15_001)).toBe(4) // would still be hidden (3) without the early close
+  })
+
+  // Regression: the projected teacher screen must not act as an answer oracle. Hiding only the
+  // score point was not enough — team correct counts and competition scores are derived from
+  // `answers`, so a correct guess still ticked those upward mid-question.
+  it('withholds the current question\'s answer record from the teacher until the reveal begins', () => {
+    const room = {
+      status: 'playing' as const,
+      questionIds: ['q1', 'q2'],
+      currentQuestionIndex: 1,
+      questionStartedAt: 10_000,
+      questionDurationSeconds: 30,
+      questionClosedAt: null,
+    }
+    const player = {
+      score: 2,
+      answers: [
+        { questionId: 'q1', selectedChoiceId: 'a', isCorrect: true, answeredAt: 5_000, responseTimeMs: 1_000 },
+        { questionId: 'q2', selectedChoiceId: 'b', isCorrect: true, answeredAt: 12_000, responseTimeMs: 2_000 },
+      ],
+    }
+
+    // Timer still live: the current question is invisible in every derived form.
+    expect(isCurrentQuestionRevealed(room, 20_000)).toBe(false)
+    const live = getTeacherVisiblePlayer(room, player, 20_000)
+    expect(live.score).toBe(1)
+    expect(live.answers.map((answer) => answer.questionId)).toEqual(['q1'])
+    // Any aggregate counting correct answers therefore sees only the resolved question.
+    expect(live.answers.filter((answer) => answer.isCorrect)).toHaveLength(1)
+
+    // After the deadline: fully visible, nothing withheld.
+    expect(isCurrentQuestionRevealed(room, 40_001)).toBe(true)
+    const revealed = getTeacherVisiblePlayer(room, player, 40_001)
+    expect(revealed.score).toBe(2)
+    expect(revealed.answers.map((answer) => answer.questionId)).toEqual(['q1', 'q2'])
+    expect(revealed.answers.filter((answer) => answer.isCorrect)).toHaveLength(2)
+    // The original record is never mutated.
+    expect(player.answers).toHaveLength(2)
   })
 })

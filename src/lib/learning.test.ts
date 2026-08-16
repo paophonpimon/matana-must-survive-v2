@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { questions } from '../data/questions'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { computeClassLearningSummary, computeStudentLearningEvidence } from './learning'
 import type { AnswerRecord, Player, RecallAnswerRecord } from '../types/game'
@@ -21,6 +22,30 @@ const makeMainAnswer = (questionId: string, isCorrect: boolean): AnswerRecord =>
 type LearningPlayer = Pick<Player, 'recallAnswers' | 'answers'>
 
 const makeLearningPlayer = (recallAnswers: RecallAnswerRecord[], answers: AnswerRecord[]): LearningPlayer => ({ recallAnswers, answers })
+
+// Data-integrity guard: every Recall item previously had its correct answer in position A, so
+// "tap ก. five times" scored 5/5 and the before-play evidence measured nothing. The positions must
+// stay mixed for Baseline to mean anything.
+describe('Story Recall answer positions', () => {
+  it('does not place every correct answer in the same choice position', () => {
+    const positions = RECALL_QUESTIONS.map((question) => question.choices.findIndex((choice) => choice.id === question.correctChoiceId))
+    // Every correct answer must actually exist among that question's choices.
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect(new Set(positions).size).toBeGreaterThan(1)
+  })
+
+  // Main is four-option, so "never C or D" would still let a student who only ever guesses among
+  // the first two options score ~50% instead of 25%. Every position must actually be used.
+  it('spreads Main correct answers across all four choice positions', () => {
+    const positions = questions.map((question) => question.choices.findIndex((choice) => choice.id === question.correctChoiceId))
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect(questions.every((question) => question.choices.length === 4)).toBe(true)
+    expect(new Set(positions).size).toBe(4)
+    // No single position may dominate the ten-question bank.
+    const maxUses = Math.max(...[0, 1, 2, 3].map((slot) => positions.filter((position) => position === slot).length))
+    expect(maxUses).toBeLessThanOrEqual(4)
+  })
+})
 
 describe('computeStudentLearningEvidence', () => {
   it('a student who got every Recall and every mapped Main question right has Baseline == In-game Evidence == 100%, Learning Gain 0', () => {
