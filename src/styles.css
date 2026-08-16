@@ -1063,7 +1063,176 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .team-item-chip-used b { color: #b6ab9e; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
+/* ================= Active item effect on the current question card =================
+   Visual state only. The card gets a glowing frame with a light sweep running around it plus a
+   corner badge, so an affected question is unmistakable at a glance. Everything sits in
+   pseudo-elements / absolutely-positioned layers behind the content, so text contrast is
+   untouched and nothing shifts the existing layout. */
+.question-card-effect { position: relative; border-color: var(--effect-edge) !important; animation: effect-glow 2.4s ease-in-out infinite; }
+/* Clipped to the card so the sheen can sweep across without escaping the rounded corners. The
+   card keeps its translucent glass background — nothing is painted over it opaquely. */
+.question-card-effect-frame { position: absolute; inset: 0; z-index: 0; overflow: hidden; border-radius: inherit; pointer-events: none; }
+/* A soft diagonal band of light travelling across the panel. Deliberately low opacity: it must
+   read as a moving highlight, never as a wash that hurts text contrast. */
+.question-card-effect-frame::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  bottom: -50%;
+  left: -60%;
+  width: 45%;
+  background: linear-gradient(100deg, transparent, var(--effect-sweep), transparent);
+  transform: rotate(12deg);
+  animation: effect-sweep 3.6s ease-in-out infinite;
+}
+@keyframes effect-sweep {
+  0% { left: -60%; opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: 115%; opacity: 0; }
+}
+@keyframes effect-glow {
+  0%, 100% { box-shadow: 0 1.5rem 5rem rgba(0,0,0,0.34), 0 0 0 1px var(--effect-edge), 0 0 1.6rem var(--effect-halo); }
+  50% { box-shadow: 0 1.5rem 5rem rgba(0,0,0,0.34), 0 0 0 1px var(--effect-edge), 0 0 3rem var(--effect-halo); }
+}
+/* Keep the card's own content above the sheen layer. */
+.question-card-effect > *:not(.question-card-effect-frame) { position: relative; z-index: 1; }
+
+.question-card-effect-surge { --effect-sweep: rgba(255,214,110,0.16); --effect-edge: rgba(242,213,141,0.62); --effect-halo: rgba(233,179,79,0.34); }
+.question-card-effect-illusion { --effect-sweep: rgba(201,165,240,0.16); --effect-edge: rgba(201,165,240,0.58); --effect-halo: rgba(158,92,196,0.32); }
+/* Hostile effects read crimson, so "being halved" never looks like a reward. */
+.question-card-effect-seal { --effect-sweep: rgba(240,140,140,0.15); --effect-edge: rgba(224,138,138,0.6); --effect-halo: rgba(190,60,80,0.3); }
+
+.question-card-effect-badge {
+  position: absolute;
+  top: -0.9rem;
+  right: 1rem;
+  z-index: 2;
+  display: grid;
+  justify-items: center;
+  gap: 0.05rem;
+  min-width: 4.2rem;
+  border-radius: 0.85rem;
+  padding: 0.4rem 0.7rem;
+  line-height: 1;
+  text-align: center;
+  animation: effect-badge-pulse 2s ease-in-out infinite;
+}
+.question-card-effect-badge b { font-size: 1.35rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.question-card-effect-badge small { font-size: 0.6rem; font-weight: 600; letter-spacing: 0.02em; opacity: 0.85; }
+.question-card-effect-badge-surge { border: 1px solid rgba(255,224,150,0.75); background: linear-gradient(150deg, #7a5216, #4a3010); color: #ffe9ae; box-shadow: 0 0.4rem 1.2rem rgba(233,179,79,0.4); }
+.question-card-effect-badge-illusion { border: 1px solid rgba(201,165,240,0.7); background: linear-gradient(150deg, #4a2f6e, #2c1a44); color: #e5d4ff; box-shadow: 0 0.4rem 1.2rem rgba(158,92,196,0.36); }
+.question-card-effect-badge-seal { border: 1px solid rgba(240,150,150,0.7); background: linear-gradient(150deg, #6e2233, #3f1420); color: #ffd0d0; box-shadow: 0 0.4rem 1.2rem rgba(190,60,80,0.36); }
+@keyframes effect-badge-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+/* Respect a reduced-motion preference: keep the colour cue, drop the animation. */
+@media (prefers-reduced-motion: reduce) {
+  .question-card-effect { animation: none; box-shadow: 0 1.5rem 5rem rgba(0,0,0,0.34), 0 0 0 1px var(--effect-edge), 0 0 2rem var(--effect-halo); }
+  .question-card-effect-frame::before { animation: none; opacity: 0; }
+  .question-card-effect-badge { animation: none; }
+}
+
+/* ================= Teacher printable report (PDF via browser print) =================
+   Hidden on screen; revealed only while printing. Thai shaping is left entirely to the browser's
+   text engine, which is what keeps vowels/tone marks correctly stacked — no font embedding. */
+.print-report { display: none; }
+
+@media print {
+  /* The report is portalled to <body>, so every OTHER top-level child (the app root, and any
+     portalled overlay) can be removed from layout outright. display:none is essential here:
+     visibility:hidden leaves the hidden boxes in flow, and since body and .scene-page both carry
+     min-height:100dvh — on a teacher final screen that is podium + summary + scoreboard +
+     individual table + history — those invisible boxes generated several blank A4 pages. */
+  body > *:not(.print-report) { display: none !important; }
+
+  /* Strip the viewport-height/overflow constraints the app sets, so the printed page box is
+     sized purely by the report's own content and can't be padded out to extra pages. */
+  html, body {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  .print-report {
+    display: block !important;
+    /* Static flow, not absolute: an absolutely-positioned root cannot paginate, which would
+       clip a large class instead of flowing onto page 2. */
+    position: static;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    padding: 0;
+    background: #fff;
+    color: #111;
+    /* Landscape gives plenty of width, so the type can be comfortably readable rather than tiny. */
+    font-size: 11pt;
+    line-height: 1.35;
+  }
+  /* Landscape so all 10 question columns fit without shrinking the text. */
+  @page { size: A4 landscape; margin: 10mm; }
+
+  .print-report-header { margin-bottom: 4mm; border-bottom: 1.5pt solid #222; padding-bottom: 3mm; }
+  .print-report-header h1 { margin: 0; font-size: 22pt; font-weight: 700; }
+  .print-report-subtitle { margin: 1.5mm 0 0; font-size: 14pt; font-weight: 600; }
+  .print-report-meta { margin: 1.5mm 0 0; font-size: 10pt; color: #444; }
+
+  .print-report-summary { display: flex; flex-wrap: wrap; gap: 3mm 10mm; margin: 0 0 4mm; padding: 3mm 4mm; border: 0.75pt solid #bbb; border-radius: 1.5mm; background: #f4f4f4; }
+  .print-report-summary div { display: flex; align-items: baseline; gap: 2.5mm; }
+  .print-report-summary dt { margin: 0; font-size: 10pt; color: #555; }
+  .print-report-summary dd { margin: 0; font-size: 12.5pt; font-weight: 700; }
+
+  .print-report-table { width: 100%; border-collapse: collapse; }
+  .print-report-table th,
+  .print-report-table td { border: 0.5pt solid #999; padding: 2mm 1.2mm; text-align: center; }
+  .print-report-table th { background: #ececec; font-size: 10pt; font-weight: 700; }
+  .print-report-table td { font-size: 11pt; }
+  .print-report-table .print-col-name,
+  .print-report-table .print-col-team { text-align: left; }
+  .print-report-table .print-col-name { min-width: 34mm; }
+  .print-report-table .print-col-team { min-width: 26mm; }
+  .print-report-table .print-col-q { width: 9mm; font-size: 13pt; }
+  .print-report-table .print-col-score { font-weight: 700; white-space: nowrap; }
+  /* Repeat the header on every printed page and never split a student across a page break.
+     Note: no page-break-before/after rules anywhere — those are what create stray blank pages. */
+  .print-report-table thead { display: table-header-group; }
+  .print-report-table tr { break-inside: avoid; page-break-inside: avoid; }
+  .print-mark-correct { color: #12703a; font-weight: 700; }
+  .print-mark-wrong { color: #a3121f; font-weight: 700; }
+  .print-mark-missing { color: #888; }
+
+  .print-report-empty { margin-top: 4mm; font-size: 12pt; text-align: center; }
+  /* margin-bottom 0 so the last element can't push a trailing empty page. */
+  .print-report-footnote { margin: 3mm 0 0; font-size: 9pt; color: #555; }
+}
+
+/* ================= Teacher background music control =================
+   Fixed pill so it stays reachable through every stage, including the screens where the room
+   control header is hidden. Bottom-left keeps it clear of the magic toasts (top) and the
+   scoreboard action row (bottom-right). */
+.bgm-controls { position: fixed; bottom: max(1rem, env(safe-area-inset-bottom)); left: 1rem; z-index: 40; display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid rgba(226,189,101,0.28); border-radius: 999px; padding: 0.3rem 0.45rem; background: rgba(14,9,30,0.82); box-shadow: 0 0.5rem 1.4rem rgba(0,0,0,0.4); backdrop-filter: blur(6px); }
+.bgm-button { display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; min-height: 2rem; border: 1px solid rgba(255,255,255,0.14); border-radius: 999px; background: rgba(255,255,255,0.05); color: #f2d58d; font-size: 0.95rem; line-height: 1; cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease; }
+.bgm-button:disabled { opacity: 0.4; cursor: not-allowed; }
+.bgm-level { min-width: 2.6rem; color: #d8d1c5; font-size: 0.72rem; font-variant-numeric: tabular-nums; text-align: center; }
+@media (hover: hover) {
+  .bgm-button:hover:not(:disabled) { border-color: rgba(242,213,141,0.6); color: #fff7df; }
+}
+
 /* ================= Teacher learning history ================= */
+/* Report download actions on the final Learning Summary — deliberately prominent, not tucked
+   into the collapsed history section. */
+.learning-report-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.1rem; }
+.learning-report-actions > button { flex: 0 1 auto; min-width: 12rem; }
+@media (max-width: 560px) {
+  .learning-report-actions > button { flex: 1 1 100%; }
+}
+
 .learning-history-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
 .learning-history-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .learning-history-scroll { max-height: 24rem; overflow: auto; border-top: 1px solid rgba(255,255,255,0.1); }

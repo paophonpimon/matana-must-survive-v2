@@ -153,4 +153,40 @@ describe('computeBossRanking', () => {
     expect(result.winner).toBeNull()
     expect(result.ranking).toEqual([])
   })
+
+  // Regression: the sort always puts SOMEONE first, so with nobody correct the fastest wrong
+  // answer (or just the lowest playerId) used to be crowned and handed a random item for
+  // achieving nothing. A reward now requires at least one correct boss answer.
+  it('has no winner and no tie pool when nobody answers a single boss question correctly', () => {
+    const allWrong = [
+      { id: 'p1', teamId: 'team-1', displayName: 'A', studentNumber: '1', bossAnswers: BOSS_QUESTION_IDS.map((id) => makeBossAnswer(id, false, 200)) },
+      { id: 'p2', teamId: 'team-2', displayName: 'B', studentNumber: '2', bossAnswers: BOSS_QUESTION_IDS.map((id) => makeBossAnswer(id, false, 5_000)) },
+    ]
+    const wrongResult = computeBossRanking(allWrong, BOSS_QUESTION_IDS, BOSS_DURATION_SECONDS)
+    expect(wrongResult.winner).toBeNull()
+    expect(wrongResult.tiePoolPlayerIds).toEqual([])
+    // The ranking itself is still produced so the round can complete and be displayed.
+    expect(wrongResult.ranking).toHaveLength(2)
+
+    // Same outcome when everyone simply leaves all three unanswered...
+    const allUnanswered = [
+      { id: 'p1', teamId: 'team-1', displayName: 'A', studentNumber: '1', bossAnswers: [] },
+      { id: 'p2', teamId: 'team-2', displayName: 'B', studentNumber: '2', bossAnswers: [] },
+    ]
+    expect(computeBossRanking(allUnanswered, BOSS_QUESTION_IDS, BOSS_DURATION_SECONDS).winner).toBeNull()
+
+    // ...and for a mixture of unanswered and wrong, where still nobody is correct.
+    const mixed = [
+      { id: 'p1', teamId: 'team-1', displayName: 'A', studentNumber: '1', bossAnswers: [makeBossAnswer(BOSS_QUESTION_IDS[0], false, 300)] },
+      { id: 'p2', teamId: 'team-2', displayName: 'B', studentNumber: '2', bossAnswers: [] },
+    ]
+    expect(computeBossRanking(mixed, BOSS_QUESTION_IDS, BOSS_DURATION_SECONDS).winner).toBeNull()
+
+    // A single correct answer anywhere restores the normal winner/reward path.
+    const oneCorrect = [
+      { id: 'p1', teamId: 'team-1', displayName: 'A', studentNumber: '1', bossAnswers: [makeBossAnswer(BOSS_QUESTION_IDS[0], false, 300)] },
+      { id: 'p2', teamId: 'team-2', displayName: 'B', studentNumber: '2', bossAnswers: [makeBossAnswer(BOSS_QUESTION_IDS[0], true, 300)] },
+    ]
+    expect(computeBossRanking(oneCorrect, BOSS_QUESTION_IDS, BOSS_DURATION_SECONDS).winner?.playerId).toBe('p2')
+  })
 })

@@ -187,6 +187,13 @@ export interface Room {
   // starts and applied to all 5 items. Persisted on the room so every student's client counts
   // down from the same value instead of a hardcoded constant.
   recallQuestionDurationSeconds: number
+  // Room-synchronized Recall timeline. Recall runs like Main: one shared question index and one
+  // shared start timestamp, so every student sees the same item at the same moment and advances
+  // together. These — never a player's own recallAnswers.length — are the source of truth for
+  // "which Recall question is live". recallQuestionIndex reaching RECALL_QUESTION_COUNT means the
+  // whole sequence has finished, which is the gate the teacher's "จัดทีมและเตรียมเกม" waits on.
+  recallQuestionIndex: number
+  recallQuestionStartedAt: number | null
   bossQuestionIds: string[]
   bossQuestionIndex: number
   bossQuestionStartedAt: number | null

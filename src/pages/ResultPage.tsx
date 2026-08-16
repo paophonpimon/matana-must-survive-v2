@@ -28,6 +28,8 @@ const previewRoom: Room = {
   teams: [{ id: 'team-1', name: 'ทีม 1' }],
   phase: 'main',
   recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
+  recallQuestionIndex: 0,
+  recallQuestionStartedAt: null,
   bossQuestionIds: [],
   bossQuestionIndex: 0,
   bossQuestionStartedAt: null,

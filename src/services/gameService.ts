@@ -54,6 +54,10 @@ export interface GameService {
   // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
   // room keeps its current (default) Recall duration.
   startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void>
+  // Room-synchronized Recall advance, mirroring advanceQuestion: expectedRecallIndex makes a
+  // duplicate timer callback a safe no-op instead of a skipped question.
+  advanceRecallQuestion(roomCode: string, teacherSessionId: string, expectedRecallIndex: number): Promise<void>
+  // Refused until the shared Recall sequence has run all 5 questions.
   startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
   saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>

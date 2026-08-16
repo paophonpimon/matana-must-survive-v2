@@ -149,6 +149,32 @@ describe('round history snapshots', () => {
     expect(classSheet).toContain('<v>3</v>')
   })
 
+  // The teacher can export the moment a round ends, before any snapshot has been written (those
+  // only happen on prepareNextRound/stopRound/closeRoom). TeacherPage derives the current round's
+  // entries in memory with this same builder and merges them under stored history, deduped by id.
+  it('exports the just-finished round from live players, without duplicating an already-stored round', () => {
+    const stored: Record<string, RoundHistoryEntry> = {}
+    snapshotInto(stored, [makeLearner('01', 6)], 1) // round 1 is already persisted
+    const livePlayers = [makeLearner('01', 8), makeLearner('02', 4)] // round 2 is still live
+
+    // Same merge TeacherPage performs: stored entries win, unseen current-round entries are added.
+    const storedIds = new Set(Object.values(stored).map((entry) => entry.id))
+    const currentRound = livePlayers
+      .map((player) => buildRoundHistoryEntry(player, 2, 'ทีมทดสอบ', 2_000))
+      .filter((entry) => !storedIds.has(entry.id))
+    const exportEntries = [...Object.values(stored), ...currentRound]
+
+    const workbook = buildLearningWorkbook(exportEntries)
+    const summary = readXlsxEntry(workbook, 'xl/worksheets/sheet1.xml') ?? ''
+    // Header + 1 stored row (round 1) + 2 live rows (round 2), each appearing exactly once.
+    expect((summary.match(/<row /g) ?? [])).toHaveLength(4)
+    expect(summary).toContain('<v>60</v>') // round 1, already stored
+    expect(summary).toContain('<v>80</v>') // round 2, derived live
+    expect(summary).toContain('<v>40</v>')
+    // Round 2 is genuinely present as its own round, not folded into round 1.
+    expect(exportEntries.map((entry) => entry.id).sort()).toEqual(['1-01', '2-01', '2-02'])
+  })
+
   it('records nothing that could leak team/magic/boss data into the learning record', () => {
     const player = makeLearner('01', 7)
     player.bossAnswers = [{ questionId: 'boss-rapid-01', selectedChoiceId: 'x', isCorrect: true, answeredAt: 0, responseTimeMs: 10 }]

@@ -15,6 +15,7 @@ import {
   MAX_RECALL_SECONDS_PER_ITEM,
   MIN_BOSS_SECONDS_PER_QUESTION,
   MIN_RECALL_SECONDS_PER_ITEM,
+  RECALL_QUESTION_COUNT,
   RECALL_SECONDS_PER_ITEM,
   RECALL_TIMEOUT_CHOICE_ID,
   createEmptyMagicInventory,
@@ -169,6 +170,8 @@ const createSeedState = (): DemoState => {
     questionStartedAt: null,
     questionClosedAt: null,
     recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
+    recallQuestionIndex: 0,
+    recallQuestionStartedAt: null,
     ...createFreshBossFields(),
     questionIds: selectRoundQuestions(questions),
     previousQuestionIds: [],
@@ -210,6 +213,8 @@ const normalizeState = (state: DemoState): DemoState => {
     // costs nothing and matches the established pattern for every prior field addition here).
     room.phase ??= room.status === 'playing' ? 'main' : 'lobby'
     room.recallQuestionDurationSeconds ??= RECALL_SECONDS_PER_ITEM
+    room.recallQuestionIndex ??= 0
+    room.recallQuestionStartedAt ??= null
     room.bossQuestionIds ??= []
     room.bossQuestionIndex ??= 0
     room.bossQuestionStartedAt ??= null
@@ -481,6 +486,8 @@ export class DemoGameService implements GameService {
       questionStartedAt: null,
       questionClosedAt: null,
     recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
+    recallQuestionIndex: 0,
+    recallQuestionStartedAt: null,
       ...createFreshBossFields(),
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
@@ -593,7 +600,7 @@ export class DemoGameService implements GameService {
     // Main can only start from the team-setup stage — i.e. Story Recall has already run this
     // round. This is the gate that makes "Recall happens before team setup, and Main after it"
     // structural rather than merely the order the teacher happens to click things in.
-    if (roomState.room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำกู้ความทรงจำและจัดทีมให้เสร็จก่อนเริ่มเกมหลัก')
+    if (roomState.room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำทบทวนเรื่องราวและจัดทีมให้เสร็จก่อนเริ่มเกมหลัก')
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มภารกิจไม่ได้')
     if (!roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
     // Milestone 4.1: every team must have finished electing a captain before the game can
@@ -622,7 +629,7 @@ export class DemoGameService implements GameService {
     await writeState(state)
   }
 
-  // Pre-game stage 1 -> 2: 'lobby' -> 'recall'. Teacher-only, fired by "เริ่มกู้ความทรงจำ" once
+  // Pre-game stage 1 -> 2: 'lobby' -> 'recall'. Teacher-only, fired by "เริ่มทบทวนเรื่องราว" once
   // enough students have joined. Deliberately requires NO teams, captain, item, or team name —
   // Story Recall is a pre-team individual learning phase, so the only precondition is that at
   // least one student is present to do it. Idempotent by stage check: a stale/duplicate call
@@ -632,13 +639,40 @@ export class DemoGameService implements GameService {
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
-    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มกู้ความทรงจำได้เฉพาะช่วงห้องรอ')
+    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มทบทวนเรื่องราวได้เฉพาะช่วงห้องรอ')
     if (roomState.room.phase !== 'lobby') return
-    if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มกู้ความทรงจำไม่ได้')
+    if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มทบทวนเรื่องราวไม่ได้')
     roomState.room.phase = 'recall'
     if (recallQuestionDurationSeconds != null) {
       roomState.room.recallQuestionDurationSeconds = clampRecallDuration(recallQuestionDurationSeconds)
     }
+    // Question 1 starts for the whole room at this instant — the shared timeline begins here.
+    roomState.room.recallQuestionIndex = 0
+    roomState.room.recallQuestionStartedAt = Date.now()
+    await writeState(state)
+  }
+
+  // Room-synchronized Recall advance, mirroring advanceQuestion's shape exactly: the caller names
+  // the index it believes is live, and anything else is a silent no-op. That expected-index guard
+  // is what makes duplicate timer callbacks (several teacher tabs, a re-render, a retry) unable to
+  // skip a question. Advancing past the last item leaves recallQuestionIndex at
+  // RECALL_QUESTION_COUNT with no start time — the "sequence finished" state.
+  async advanceRecallQuestion(roomCode: string, teacherSessionId: string, expectedRecallIndex: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (
+      roomState.room.status !== 'waiting'
+      || roomState.room.phase !== 'recall'
+      || roomState.room.recallQuestionIndex !== expectedRecallIndex
+      || roomState.room.recallQuestionIndex >= RECALL_QUESTION_COUNT
+    ) {
+      return
+    }
+    const nextIndex = roomState.room.recallQuestionIndex + 1
+    roomState.room.recallQuestionIndex = nextIndex
+    roomState.room.recallQuestionStartedAt = nextIndex >= RECALL_QUESTION_COUNT ? null : Date.now()
     await writeState(state)
   }
 
@@ -655,6 +689,12 @@ export class DemoGameService implements GameService {
     verifyTeacher(roomState.room, teacherSessionId)
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
     if (roomState.room.phase !== 'recall') return
+    // The gate is the shared Recall timeline finishing all 5 questions — NOT whether every
+    // student personally answered them. A class always has someone who misses an item; that must
+    // not hold the room, but neither may team setup begin while questions are still running.
+    if (roomState.room.recallQuestionIndex < RECALL_QUESTION_COUNT) {
+      throw new Error('ผู้ใช้:ต้องทำทบทวนเรื่องราวให้ครบทั้ง 5 ข้อก่อนจัดทีม')
+    }
     roomState.room.phase = 'teamSetup'
     await writeState(state)
   }
@@ -675,21 +715,30 @@ export class DemoGameService implements GameService {
     // Recall runs while the room is still 'waiting' (nothing competitive has started) — phase is
     // the authority on the stage, status merely confirms Main/Boss aren't running.
     if (roomState.room.status !== 'waiting' || roomState.room.phase !== 'recall') {
-      throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงกู้ความทรงจำ')
+      throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงทบทวนเรื่องราว')
     }
     // Idempotent: a duplicate submit for a concept already answered is a safe no-op — the FIRST
     // answer is what's persisted, matching the spec's "first answer is persisted" requirement.
     if (player.recallAnswers.some((item) => item.conceptId === answer.conceptId)) return
-    // No-skip guard: the submitted concept must be exactly the next expected one in the fixed
-    // RECALL_QUESTIONS order — this is what makes "no skipping" true server-side, not just a
-    // client-side affordance.
-    const expectedQuestion = RECALL_QUESTIONS[answer.expectedRecallIndex]
+    // The ROOM's current question is the authority now, not the player's own progress: a student
+    // who missed earlier items is still on the same shared question as everyone else, so their
+    // recallAnswers.length no longer tracks the index.
+    const expectedQuestion = RECALL_QUESTIONS[roomState.room.recallQuestionIndex]
     if (
-      player.recallAnswers.length !== answer.expectedRecallIndex
+      roomState.room.recallQuestionIndex !== answer.expectedRecallIndex
       || !expectedQuestion
       || expectedQuestion.id !== answer.conceptId
     ) {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+    }
+    // Answers lock when the shared countdown expires, the same way saveAnswer guards Main.
+    const recallTiming = {
+      questionStartedAt: roomState.room.recallQuestionStartedAt,
+      questionDurationSeconds: roomState.room.recallQuestionDurationSeconds,
+      questionClosedAt: null,
+    }
+    if (!roomState.room.recallQuestionStartedAt || getRemainingMilliseconds(recallTiming, Date.now()) <= 0) {
+      throw new Error('ผู้ใช้:หมดเวลาตอบข้อนี้แล้ว')
     }
     // Countdown expiry: the client submits RECALL_TIMEOUT_CHOICE_ID instead of a real choice, and
     // the item is persisted as unanswered -> incorrect for Baseline. Handled before
@@ -1058,7 +1107,7 @@ export class DemoGameService implements GameService {
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
     // Teams may only be created once Story Recall is finished — this is what makes "no teams
     // exist before/during Recall" a structural guarantee rather than a UI convention.
-    if (roomState.room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำกู้ความทรงจำให้เสร็จก่อนจัดทีม')
+    if (roomState.room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำทบทวนเรื่องราวให้เสร็จก่อนจัดทีม')
     if (roomState.room.teamsLocked) throw new Error('ผู้ใช้:กรุณาปลดล็อกทีมก่อนสุ่มใหม่')
     if (!Number.isFinite(teamCount) || teamCount < 1) throw new Error('ผู้ใช้:จำนวนทีมต้องมีอย่างน้อย 1 ทีม')
 

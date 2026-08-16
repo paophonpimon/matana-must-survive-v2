@@ -96,6 +96,13 @@ export const computeBossRanking = (
   )
   if (ranking.length === 0) return { ranking: [], winner: null, tiePoolPlayerIds: [] }
   const best = ranking[0]
+  // A conqueror has to actually conquer something. When the best score is 0 correct there is no
+  // winner at all — whether everyone left all three unanswered, everyone answered and got them
+  // all wrong, or any mix of the two. Without this the sort still puts *someone* first (fastest
+  // wrong answer, or just the lowest playerId), and that player was being handed a random item
+  // for achieving nothing. The full ranking is still returned so the round can complete and be
+  // displayed normally; only the winner/tie-pool — and therefore the reward — are withheld.
+  if (best.correctCount <= 0) return { ranking, winner: null, tiePoolPlayerIds: [] }
   const tiePool = ranking.filter(
     (entry) => entry.correctCount === best.correctCount && Math.abs(entry.totalTimeMs - best.totalTimeMs) <= BOSS_TIE_POOL_THRESHOLD_MS,
   )

@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { BackgroundMusicControls } from '../components/BackgroundMusicControls'
 import { BossResultDetails } from '../components/BossResultDetails'
+import { TeacherReportPrintView } from '../components/TeacherReportPrintView'
 import { GrimoireModal } from '../components/GrimoireModal'
 import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
+import { useBackgroundMusic } from '../hooks/useBackgroundMusic'
 import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers, useRoundHistory } from '../hooks/useGameData'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
 import { computeClassLearningSummary, computeStudentLearningEvidence } from '../lib/learning'
 import { downloadLearningWorkbook } from '../lib/learningExport'
+import { buildRoundHistoryEntry } from '../lib/roundHistory'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
 import { friendlyError } from '../services'
@@ -163,6 +167,9 @@ export const TeacherPage = () => {
   const isLobbyPhase = isPreGameStage && roomState.data?.phase === 'lobby'
   const isRecallPhase = isPreGameStage && roomState.data?.phase === 'recall'
   const recallCompletedCount = playersState.data.filter((player) => player.recallAnswers.length >= RECALL_QUESTION_COUNT).length
+  // Recall progress is the ROOM's shared timeline, not any student's own answer count.
+  const recallQuestionIndex = roomState.data?.recallQuestionIndex ?? 0
+  const recallSequenceFinished = recallQuestionIndex >= RECALL_QUESTION_COUNT
   const bossTiming = roomState.data ? { questionStartedAt: roomState.data.bossQuestionStartedAt, questionDurationSeconds: roomState.data.bossQuestionDurationSeconds, questionClosedAt: null } : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
   const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
@@ -190,6 +197,10 @@ export const TeacherPage = () => {
   // Immutable per-round learning snapshots. Survives round resets and room close, unlike the
   // live player docs the current-round summary reads.
   const roundHistoryState = useRoundHistory(roomCode)
+  // Teacher-only background music. Lives at the page level so the single audio element spans
+  // every stage — Recall, Team Setup, Main, Boss, Result and the Learning Summary all render
+  // inside this same mounted component, so nothing here restarts between them.
+  const backgroundMusic = useBackgroundMusic()
   const [historyOpen, setHistoryOpen] = useState(false)
   const historyRounds = useMemo(() => [...new Set(roundHistoryState.data.map((entry) => entry.round))], [roundHistoryState.data])
 
@@ -249,6 +260,29 @@ export const TeacherPage = () => {
     return map
   }, [teamNameById, guardianNameById])
   const guardianDisplayName = (teamId: string): string => displayTeamNameById.get(teamId) ?? teamId
+
+  // The just-finished round has no stored snapshot yet — those are only written when the teacher
+  // prepares a new round, stops, or closes the room. Rather than persisting early (which would
+  // risk a duplicate snapshot later), the current round's entries are derived in memory from the
+  // live players using the very same pure builder the service uses, then merged under stored
+  // history with stored entries winning. So the export is available the instant the round ends,
+  // and nothing is written.
+  const exportEntries = useMemo(() => {
+    const room = roomState.data
+    if (!room) return roundHistoryState.data
+    const storedIds = new Set(roundHistoryState.data.map((entry) => entry.id))
+    const completedAt = room.completedAt ?? Date.now()
+    const currentRoundEntries = playersState.data
+      .map((player) => {
+        const teamName = player.teamId
+          ? displayTeamNameById.get(player.teamId) ?? ''
+          : ''
+        return buildRoundHistoryEntry(player, room.currentRound, teamName, completedAt)
+      })
+      .filter((entry) => !storedIds.has(entry.id))
+    return [...roundHistoryState.data, ...currentRoundEntries]
+      .sort((a, b) => a.round - b.round || a.studentNumber.localeCompare(b.studentNumber))
+  }, [roomState.data, roundHistoryState.data, playersState.data, displayTeamNameById])
   const magicByTeamId = useMemo(() => new Map(magicState.data.map((magic) => [magic.teamId, magic])), [magicState.data])
   const playerNameById = useMemo(() => new Map(playersState.data.map((player) => [player.id, player.displayName])), [playersState.data])
   // Milestone 4.1: only counts progress entries matching the team's CURRENT election attempt —
@@ -327,6 +361,42 @@ export const TeacherPage = () => {
       advancingQuestion.current = { key: questionKey, attemptedAt: currentTime }
       void service.advanceQuestion(roomCode, teacherSessionId, room.currentQuestionIndex).catch((reason) => {
         advancingQuestion.current = { key: '', attemptedAt: 0 }
+        setError(friendlyError(reason))
+      })
+    }
+    tick()
+    const intervalId = window.setInterval(tick, 250)
+    return () => window.clearInterval(intervalId)
+  }, [roomCode, roomState.data, service, teacherSessionId])
+
+  // Recall auto-advance: the same teacher-client-driven, debounced "answer window, then reveal,
+  // then advance" loop the main flow uses, fed a recall-shaped timing object. This is what makes
+  // Recall room-synchronized — students never advance themselves. advanceRecallQuestion's own
+  // expectedRecallIndex guard makes a duplicate tick a no-op, so a question can never be skipped.
+  const advancingRecallQuestion = useRef({ key: '', attemptedAt: 0 })
+  useEffect(() => {
+    const room = roomState.data
+    if (!room || room.status !== 'waiting' || room.phase !== 'recall') return
+    if (room.recallQuestionIndex >= RECALL_QUESTION_COUNT) return
+    const recallKey = `${room.currentRound}-recall-${room.recallQuestionIndex}`
+    if (advancingRecallQuestion.current.key && advancingRecallQuestion.current.key !== recallKey) {
+      advancingRecallQuestion.current = { key: '', attemptedAt: 0 }
+    }
+    const tick = (): void => {
+      const currentTime = Date.now()
+      setNow(currentTime)
+      const deadline = getQuestionDeadline({
+        questionStartedAt: room.recallQuestionStartedAt,
+        questionDurationSeconds: room.recallQuestionDurationSeconds,
+        questionClosedAt: null,
+      })
+      const recentlyAttempted = advancingRecallQuestion.current.key === recallKey && currentTime - advancingRecallQuestion.current.attemptedAt < 3_000
+      // The existing 4-second reveal window applies here too, so the correct answer and feedback
+      // stay on screen before everyone moves on together.
+      if (deadline == null || currentTime < deadline + ANSWER_REVEAL_MILLISECONDS || recentlyAttempted) return
+      advancingRecallQuestion.current = { key: recallKey, attemptedAt: currentTime }
+      void service.advanceRecallQuestion(roomCode, teacherSessionId, room.recallQuestionIndex).catch((reason) => {
+        advancingRecallQuestion.current = { key: '', attemptedAt: 0 }
         setError(friendlyError(reason))
       })
     }
@@ -473,7 +543,12 @@ export const TeacherPage = () => {
       .catch((reason) => setError(friendlyError(reason)))
       .finally(() => { advancingStageRef.current = false; setAdvancingStageBusy(false) })
   }
-  const handleStartRecall = (): void => runStageTransition(() => service.startRecall(roomCode, teacherSessionId, recallDurationSeconds))
+  const handleStartRecall = (): void => {
+    // Kicked off synchronously inside the click, before the async service call — browsers only
+    // allow play() from a real user gesture, and awaiting the transition first would lose it.
+    backgroundMusic.start()
+    runStageTransition(() => service.startRecall(roomCode, teacherSessionId, recallDurationSeconds))
+  }
   const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
 
   // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
@@ -603,7 +678,24 @@ export const TeacherPage = () => {
     })
   }
 
+  // The music spans the whole activity, so it is only ever torn down when the activity genuinely
+  // ends: the teacher closes the room ("ยุติห้อง" -> status 'closed'). A finished round
+  // (status 'completed') deliberately does NOT stop it — the podium and Learning Summary are
+  // still part of the same session. Keyed on the transition into 'closed' so ordinary rerenders
+  // while already closed never re-trigger it.
+  const wasClosed = useRef(false)
+  const stopBackgroundMusic = backgroundMusic.stop
+  useEffect(() => {
+    const closed = roomState.data?.status === 'closed'
+    if (closed && !wasClosed.current) stopBackgroundMusic()
+    wasClosed.current = closed
+    // stopBackgroundMusic is a stable useCallback; depending on the whole controls object would
+    // re-run this on every render, since the hook returns a fresh object each time.
+  }, [roomState.data?.status, stopBackgroundMusic])
+
   const rememberRoom = (nextTeacherSessionId: string, nextRoomCode: string): void => {
+    // A different room means a different activity — never carry the previous one's music into it.
+    if (nextRoomCode !== roomCode) backgroundMusic.stop()
     setTeacherSessionId(nextTeacherSessionId)
     setRoomCode(nextRoomCode)
     saveTeacherSession({ teacherSessionId: nextTeacherSessionId, roomCode: nextRoomCode, role: 'teacher' })
@@ -936,21 +1028,21 @@ export const TeacherPage = () => {
                     )
                   })}
                 </ul>
-                {/* The teacher is never blocked on stragglers: a class always has someone slow,
-                    and holding the whole room hostage to them is worse than moving on. Unfinished
-                    students are surfaced as a warning, not a lock — their submitted answers are
-                    kept and their unanswered concepts simply count as not-yet-correct. */}
+                {/* Gated on the SHARED sequence finishing all 5 questions — not on every student
+                    having personally answered. The room advances on its own timer, so this
+                    unlocks the moment the last question's reveal ends, regardless of who
+                    answered what. */}
                 <button
                   type="button"
                   className="primary-button recall-start-main-button mt-6"
                   onClick={handleStartTeamSetup}
-                  disabled={advancingStageBusy || sortedPlayers.length === 0}
+                  disabled={advancingStageBusy || sortedPlayers.length === 0 || !recallSequenceFinished}
                 >
                   {advancingStageBusy ? 'กำลังดำเนินการ...' : 'จัดทีมและเตรียมเกม'}
                 </button>
-                {recallCompletedCount < sortedPlayers.length ? (
+                {!recallSequenceFinished ? (
                   <p className="recall-command-hint">
-                    ยังมี {sortedPlayers.length - recallCompletedCount} คนทำไม่เสร็จ — กดต่อได้เลย ระบบจะเก็บคำตอบที่ทำไว้แล้ว
+                    กำลังทำข้อ {Math.min(recallQuestionIndex + 1, RECALL_QUESTION_COUNT)} จาก {RECALL_QUESTION_COUNT} — จัดทีมได้เมื่อครบทุกข้อ
                   </p>
                 ) : null}
                 <StageRoomControls />
@@ -978,10 +1070,11 @@ export const TeacherPage = () => {
                 </button>
               </section>
             ) : roomState.data.bossAwaitingContinue ? (
-              // Rare tie/no-winner case: still pause and still require an explicit continue, but
-              // there is no winner to show yet.
+              // No-winner case — nobody answered a single boss question correctly, so no reward
+              // was granted. The round still pauses and still requires an explicit continue.
               <section className="boss-result-inline mt-4" aria-live="polite">
                 <h2 className="text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h2>
+                <p className="mx-auto mt-2 max-w-md text-center text-[#d8d1c5]">ไม่มีผู้พิชิตด่านในรอบนี้ — ไม่มีทีมใดได้รับไอเทม</p>
                 <button type="button" className="primary-button boss-result-continue-button mt-5" onClick={handleContinueAfterBoss} disabled={continuingBossBusy} autoFocus>
                   {continuingBossBusy ? 'กำลังดำเนินการ...' : 'เล่นต่อ'}
                 </button>
@@ -1064,6 +1157,16 @@ export const TeacherPage = () => {
                       <span className="learning-summary-concept-stat">หลังเล่น {concept.mainCorrectCount}/{concept.totalStudents}</span>
                     </div>
                   ))}
+                </div>
+                {/* Report actions, deliberately at the top of the final summary rather than
+                    buried in the collapsed history section below. */}
+                <div className="learning-report-actions">
+                  <button type="button" className="primary-button" onClick={() => window.print()}>
+                    ⬇ ดาวน์โหลด PDF
+                  </button>
+                  <button type="button" className="secondary-button" onClick={() => downloadLearningWorkbook(exportEntries, roomCode)}>
+                    ⬇ ดาวน์โหลด Excel
+                  </button>
                 </div>
                 <p className="mt-3 text-sm text-[#d8d1c5]">
                   เรื่องที่เข้าใจดีที่สุด: <strong>{classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? classLearningSummary.strongestConceptId : '-'}</strong>
@@ -1472,7 +1575,7 @@ export const TeacherPage = () => {
                     <button type="button" className="copy-button" onClick={() => setHistoryOpen((open) => !open)}>
                       {historyOpen ? 'ซ่อนรายละเอียด' : 'ดูรายละเอียด'}
                     </button>
-                    <button type="button" className="copy-button" onClick={() => downloadLearningWorkbook(roundHistoryState.data, roomCode)}>
+                    <button type="button" className="copy-button" onClick={() => downloadLearningWorkbook(exportEntries, roomCode)}>
                       ⬇ ดาวน์โหลด Excel
                     </button>
                   </div>
@@ -1573,6 +1676,26 @@ export const TeacherPage = () => {
         />
       ) : null}
 
+
+      {/* Print-only report for the finished round. Hidden on screen; the "ดาวน์โหลด PDF" button
+          calls window.print() and the browser's own "Save as PDF" produces the file. */}
+      {roomState.data ? (
+        <TeacherReportPrintView
+          roomCode={roomCode}
+          round={roomState.data.currentRound}
+          players={sortedPlayers}
+          questionIds={roomState.data.questionIds}
+          teamNameById={displayTeamNameById}
+          beforeAverage={classBeforeAverage}
+          afterAverage={classAfterAverage}
+          strongestConceptLabel={classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? '-' : '-'}
+          weakestConceptLabel={classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? '-' : '-'}
+        />
+      ) : null}
+
+      {/* Persistent BGM control — rendered outside the stage-specific content so it stays put
+          through every phase, including the screens where the room-control header is hidden. */}
+      <BackgroundMusicControls controls={backgroundMusic} />
 
       <GrimoireModal open={grimoireOpen} onClose={() => setGrimoireOpen(false)} />
 

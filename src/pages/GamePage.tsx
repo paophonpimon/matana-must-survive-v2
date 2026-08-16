@@ -12,7 +12,7 @@ import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamAnswerProgress, use
 import { resolveStudentRoute } from '../lib/game'
 import { areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
-import { getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
+import { computeHostileMultiplier, formatHostilePercent, getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
 import { friendlyError } from '../services'
 import { getPlayerSession, hasShownBossWinnerBanner, markBossWinnerBannerShown } from '../services/sessionStorage'
 import type { BossWinner } from '../types/game'
@@ -125,6 +125,37 @@ export const GamePage = () => {
     ? illusionEffect.hiddenChoiceId ?? null
     : null
   const visibleChoices = question ? question.choices.filter((choice) => choice.id !== illusionHiddenChoiceId) : []
+
+  // Visual-only: is an item effect landing on the question currently on screen? Derived entirely
+  // from the existing magic state — the team's own queuedEffect for buffs, and the same
+  // magicEvents-backed incoming-seal data the panel below already reads for hostile effects.
+  // Scoped to `affectedQuestionIndex === questionIndex`, so the highlight appears only while the
+  // effect is genuinely active on this question and clears itself the moment the room advances.
+  const ownActiveEffect = !isBossPhase
+    && magicState.data?.queuedEffect
+    && magicState.data.queuedEffect.affectedQuestionIndex === questionIndex
+    && magicState.data.queuedEffect.targetTeamId === player?.teamId
+    ? magicState.data.queuedEffect
+    : null
+  const incomingSealCount = useMemo(() => {
+    if (isBossPhase || !room || !player?.teamId) return 0
+    return magicEventsState.data.filter((event) => (
+      event.round === room.currentRound
+      && event.status === 'queued'
+      && event.itemType === 'score_seal'
+      && event.targetTeamId === player.teamId
+      && event.affectedQuestionIndex === questionIndex
+    )).length
+  }, [isBossPhase, room, player?.teamId, magicEventsState.data, questionIndex])
+  // A hostile effect takes visual precedence: "your points are being halved" is the more urgent
+  // thing for a student to notice than their own buff.
+  const activeEffectKind = incomingSealCount > 0
+    ? 'seal'
+    : ownActiveEffect?.itemType === 'power_surge'
+      ? 'surge'
+      : ownActiveEffect?.itemType === 'illusion'
+        ? 'illusion'
+        : null
   const isCaptain = Boolean(player && magicState.data?.magicHolderPlayerId === player.id)
 
   useEffect(() => {
@@ -272,8 +303,7 @@ export const GamePage = () => {
           // ever starts — fully self-contained (own progress model, no team/magic UI at all).
           <RecallPhase
             player={player}
-            roomCode={normalizedCode}
-            secondsPerItem={room.recallQuestionDurationSeconds}
+            room={room}
             onAnswer={(input) => service.saveRecallAnswer(normalizedCode, player.id, input)}
           />
         ) : isBossPhase ? (
@@ -300,9 +330,12 @@ export const GamePage = () => {
                   />
                 </>
               ) : (
+                // No-winner case — nobody answered a single boss question correctly, so no team
+                // was awarded an item this round.
                 <>
                   <div className="waiting-rings mx-auto" aria-hidden="true"><span /><i>ม</i></div>
                   <h1 className="mt-6 text-center text-2xl font-semibold sm:text-3xl">ศึกด่านชิงมนตราจบแล้ว!</h1>
+                  <p className="mx-auto mt-2 max-w-md text-center text-[#d8d1c5]">ไม่มีผู้พิชิตด่านในรอบนี้ — ไม่มีทีมใดได้รับไอเทม</p>
                 </>
               )}
               <p className="mx-auto mt-3 max-w-md text-center text-[#d8d1c5]">รอครูประกาศผลและกด &quot;เล่นต่อ&quot; เพื่อดำเนินภารกิจต่อ</p>
@@ -424,7 +457,24 @@ export const GamePage = () => {
               <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
             </section>
 
-            <section className={`question-card mt-5 ${hasAnswered ? 'answer-saved' : ''}`}>
+            <section className={`question-card mt-5 ${hasAnswered ? 'answer-saved' : ''} ${activeEffectKind ? `question-card-effect question-card-effect-${activeEffectKind}` : ''}`}>
+              {/* Active-effect frame: an animated border sweep plus a corner badge, so a student
+                  can tell at a glance that this particular question is affected. Purely visual —
+                  scoring, timing and the answer flow are untouched. */}
+              {activeEffectKind ? (
+                <>
+                  <span className="question-card-effect-frame" aria-hidden="true" />
+                  <span className={`question-card-effect-badge question-card-effect-badge-${activeEffectKind}`}>
+                    {activeEffectKind === 'surge' ? (
+                      <><b>×2</b><small>คะแนนแข่งขัน</small></>
+                    ) : activeEffectKind === 'seal' ? (
+                      <><b>{formatHostilePercent(computeHostileMultiplier(incomingSealCount))}%</b><small>ถูกผนึก</small></>
+                    ) : (
+                      <><b>🔮</b><small>มายา</small></>
+                    )}
+                  </span>
+                </>
+              ) : null}
               <div className="flex items-center justify-between gap-3"><span className="category-chip">{categoryLabel}</span><span className="text-sm text-[#aaa298]">เปลี่ยนคำตอบได้จนหมดเวลา</span></div>
               <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{question.question}</h1>
               {illusionHiddenChoiceId ? (

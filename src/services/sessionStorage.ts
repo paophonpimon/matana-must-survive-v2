@@ -54,39 +54,6 @@ export const markMagicPopupShown = (roomCode: string, popupKey: string): void =>
   sessionStorage.setItem(shownMagicPopupKey(roomCode), JSON.stringify([...shown, popupKey]))
 }
 
-// Story Recall per-item countdown anchor. Recall is individual and player-paced, so there is no
-// room-level timer to resume from — without this a refresh mid-question restarted the countdown,
-// silently handing the student a full fresh duration (or, worse, re-running an already-expired
-// question). Kept in sessionStorage (not Firestore) deliberately: it is per-tab display timing for
-// a non-competitive phase, so it needs none of the cost, rules surface, or write volume of room
-// state — matching this file's existing rationale for the popup/banner dedup keys above.
-//
-// Keyed by room + player, and the stored mark carries round + conceptId, so a mark only ever
-// applies to the exact question it was written for. Moving to the next question, a new round, or a
-// different room simply fails that match (and overwrites the mark), which is what makes stale
-// timing impossible without any explicit cleanup pass.
-export interface RecallTimerMark {
-  round: number
-  conceptId: string
-  startedAt: number
-}
-
-const recallTimerKey = (roomCode: string, playerId: string): string => `matana_recall_timer_${roomCode}_${playerId}`
-
-export const readRecallTimerMark = (roomCode: string, playerId: string): RecallTimerMark | null => {
-  const mark = safeParse<RecallTimerMark>(sessionStorage.getItem(recallTimerKey(roomCode, playerId)))
-  if (!mark || typeof mark.startedAt !== 'number' || typeof mark.conceptId !== 'string') return null
-  return mark
-}
-
-export const writeRecallTimerMark = (roomCode: string, playerId: string, mark: RecallTimerMark): void => {
-  sessionStorage.setItem(recallTimerKey(roomCode, playerId), JSON.stringify(mark))
-}
-
-export const clearRecallTimerMark = (roomCode: string, playerId: string): void => {
-  sessionStorage.removeItem(recallTimerKey(roomCode, playerId))
-}
-
 // Milestone 4: "announce the winner and reward on every screen" — a one-time boss-winner
 // banner, deduped the same way as the magic popups above (sessionStorage, per tab, survives a
 // same-tab refresh). Keyed by round (not a per-event id, unlike magic popups) since a round has
