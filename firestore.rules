@@ -157,21 +157,40 @@ service cloud.firestore {
         // creation. The isTeacher branch remains the only path that can ever change teamId
         // (team randomize/lock).
         //
-        // Milestone 4: which array a student may touch depends on room.phase — main-phase
-        // answers only ever touch ['answers', 'score'], boss-phase answers only ever touch
-        // ['bossAnswers']. This is what makes "boss answers do not affect the 100-point
-        // knowledge score" true at the rules layer too, not just in app code.
+        // Milestone 4 / Learning Layer: which array a student may touch depends on room.phase —
+        // recall-phase answers only ever touch ['recallAnswers'], main-phase answers only ever
+        // touch ['answers', 'score'], boss-phase answers only ever touch ['bossAnswers']. This
+        // is what makes "boss answers do not affect the 100-point knowledge score" (and, now,
+        // "Recall carries no competitive points, no team-score impact") true at the rules layer
+        // too, not just in app code.
+        //
+        // Note the status check lives INSIDE each phase branch, not above them: Story Recall is
+        // a pre-team learning phase that runs while the room is still 'waiting' (nothing
+        // competitive has started yet), whereas main/boss answers require 'playing'. Hoisting a
+        // single status == 'playing' check above all three — as an earlier revision did — makes
+        // every legitimate Recall write permission-denied.
         allow update: if isTeacher(roomCode) || (
           signedIn()
           && resource.data.ownerUid == request.auth.uid
           && request.resource.data.ownerUid == resource.data.ownerUid
-          && room(roomCode).status == 'playing'
           && request.resource.data.currentQuestionIndex == resource.data.currentQuestionIndex
           && request.resource.data.submitted == resource.data.submitted
           && request.resource.data.status == resource.data.status
           && (
             (
-              room(roomCode).phase == 'main'
+              room(roomCode).status == 'waiting'
+              && room(roomCode).phase == 'recall'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['recallAnswers'])
+              && (
+                request.resource.data.recallAnswers.size() == resource.data.recallAnswers.size() + 1
+                || request.resource.data.recallAnswers.size() == resource.data.recallAnswers.size()
+              )
+              && request.resource.data.recallAnswers.size() <= 5
+            )
+            ||
+            (
+              room(roomCode).status == 'playing'
+              && room(roomCode).phase == 'main'
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'score'])
               && (
                 request.resource.data.answers.size() == resource.data.answers.size() + 1
@@ -184,7 +203,8 @@ service cloud.firestore {
             )
             ||
             (
-              room(roomCode).phase == 'boss'
+              room(roomCode).status == 'playing'
+              && room(roomCode).phase == 'boss'
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bossAnswers'])
               && (
                 request.resource.data.bossAnswers.size() == resource.data.bossAnswers.size() + 1

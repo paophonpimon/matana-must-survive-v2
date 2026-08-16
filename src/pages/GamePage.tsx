@@ -4,9 +4,11 @@ import { BossResultDetails } from '../components/BossResultDetails'
 import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { MagicPanel } from '../components/MagicPanel'
+import { RecallPhase } from '../components/RecallPhase'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
+import { resolveStudentRoute } from '../lib/game'
 import { areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
@@ -152,12 +154,14 @@ export const GamePage = () => {
     return () => window.clearTimeout(timeoutId)
   }, [room?.bossCompleted, room?.bossWinner, room?.currentRound, normalizedCode])
 
+  // Single source of truth: resolveStudentRoute owns every stage->screen decision, so this page
+  // and LobbyPage can never disagree about where a student belongs. In particular it is what
+  // keeps a student on this page during 'recall' (which runs while status is still 'waiting')
+  // instead of bouncing them back to the lobby.
   useEffect(() => {
     if (!room || !player) return
-    if (room.status === 'closed') navigate(`/closed/${normalizedCode}`, { replace: true })
-    else if (room.winner) navigate(`/congratulations/${normalizedCode}`, { replace: true })
-    else if (room.status === 'completed') navigate(`/result/${normalizedCode}`, { replace: true })
-    else if (room.status === 'waiting') navigate(`/lobby/${normalizedCode}`, { replace: true })
+    const destination = resolveStudentRoute(room, player)
+    if (destination !== `/game/${normalizedCode}`) navigate(destination, { replace: true })
   }, [navigate, normalizedCode, room, player])
 
   const categoryLabel = useMemo(() => {
@@ -262,6 +266,10 @@ export const GamePage = () => {
           <ErrorPanel message={roomState.error || playerState.error || 'ไม่พบข้อมูลห้องหรือข้อมูลผู้เล่นของคุณ'} action={<Link className="primary-button w-full" to="/join">กลับหน้าเข้าร่วม</Link>} />
         ) : room.status === 'completed' ? (
           <LoadingPanel text="กำลังสรุปคะแนน..." />
+        ) : room.phase === 'recall' ? (
+          // Learning Layer: mandatory individual "กู้ความทรงจำมัทนา" phase, before Main's timer
+          // ever starts — fully self-contained (own progress model, no team/magic UI at all).
+          <RecallPhase player={player} onAnswer={(input) => service.saveRecallAnswer(normalizedCode, player.id, input)} />
         ) : isBossPhase ? (
           // Item 5: once the 3rd boss question resolves, phase deliberately stays 'boss' until
           // the teacher presses "เล่นต่อ" (continueAfterBoss) — this branch is what stops every
@@ -311,6 +319,9 @@ export const GamePage = () => {
                 <div className="flex items-center justify-between gap-3"><span className="category-chip">{bossCategoryLabel}</span><span className="text-sm text-[#aaa298]">ตอบครั้งเดียว • เน้นความไว</span></div>
                 <p className="boss-rapid-step">{bossQuestion.bossInteraction?.title ?? `จังหวะที่ ${room.bossQuestionIndex + 1}`}</p>
                 <blockquote className="boss-source-quote">{bossQuestion.question}</blockquote>
+                {bossQuestion.bossInteraction?.question ? (
+                  <p className="boss-rapid-question">{bossQuestion.bossInteraction.question}</p>
+                ) : null}
                 <p className="boss-rapid-instruction">{bossQuestion.bossInteraction?.instruction ?? 'เลือกคำตอบ'}</p>
 
                 {bossQuestion.bossInteraction?.kind === 'swipe' ? (() => {

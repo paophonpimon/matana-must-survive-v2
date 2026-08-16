@@ -1,24 +1,27 @@
 import type { Question } from '../types/game'
 
-// Rapid Boss / ศึกชิงมนตรา
-// Three fixed, very short challenges based on the actual Suthes–Matana–Mayawin episode.
-// They intentionally keep the SAME Question/selectedChoiceId answer contract as the main game,
-// so the existing boss accuracy + total-time ranking and exactly-once reward flow stay intact.
+// Rapid Boss / ศึกด่านชิงมนตรา
+// Three fixed, very short challenges based on the actual Suthes–Matana–Mayawin episode. They
+// intentionally keep the SAME Question/selectedChoiceId answer contract as the main game, so the
+// existing boss accuracy + total-time ranking and exactly-once reward flow stay intact.
+// `question` holds the source passage/quote (rendered as .boss-source-quote in GamePage); when a
+// challenge asks something distinct from "what does this passage mean" (boss-rapid-02), that
+// follow-up is BossInteraction.question, rendered as its own line below the quote.
 export const bossQuestions: Question[] = [
   {
     id: 'boss-rapid-01',
     category: 'plot',
     question: '“ข้าขอแถลงวะจะนะตาม สุระเทวะโปรดปราน.”',
     choices: [
-      { id: 'boss-rapid-01-heart', text: 'พูดจากใจจริง' },
-      { id: 'boss-rapid-01-spell', text: 'อยู่ใต้อำนาจมนตร์' },
+      { id: 'boss-rapid-01-heart', text: 'พูดจากความรู้สึกจริง' },
+      { id: 'boss-rapid-01-spell', text: 'ตอบภายใต้อำนาจมนตร์' },
     ],
     correctChoiceId: 'boss-rapid-01-spell',
-    explanation: 'มัทนากำลังตอบตามอำนาจมนตร์ของมายาวิน มิใช่แสดงความรักจากใจจริง',
+    explanation: 'มัทนากำลังตอบภายใต้อำนาจมนตร์ คำพูดจึงยังไม่ใช่หลักฐานของความรักจากใจจริง',
     difficulty: 'easy',
     bossInteraction: {
       kind: 'binary',
-      title: 'ใจจริง หรือ มนต์สะกด?',
+      title: 'คำพูดนี้มาจากใจหรือไม่?',
       instruction: 'แตะคำตอบให้ไว',
       choiceIcons: {
         'boss-rapid-01-heart': '❤',
@@ -29,23 +32,24 @@ export const bossQuestions: Question[] = [
   {
     id: 'boss-rapid-02',
     category: 'theme',
-    question: '“บังคับ...ให้ตอบ...ได้ตามต้องการ แต่จะบังคับ...ให้ชอบให้ชัง...ย่อมจะเป็นการสุดพ้นวิสัย”',
+    question: '“โยคะอันขลัง บังคับได้จน ให้ตอบยุบล ได้ตามต้องการ แต่จะบังคับ...ให้ชอบให้ชัง...ย่อมจะเป็นการสุดพ้นวิสัย”',
     choices: [
-      { id: 'boss-rapid-02-speech', text: 'บังคับให้ตอบตามต้องการ' },
-      { id: 'boss-rapid-02-love', text: 'บังคับให้เกิดความรักจริง' },
-      { id: 'boss-rapid-02-memory', text: 'ลบความทรงจำ' },
+      { id: 'boss-rapid-02-answer', text: 'บังคับให้ตอบ' },
+      { id: 'boss-rapid-02-love', text: 'บังคับให้รักจริง' },
+      { id: 'boss-rapid-02-repeat', text: 'บังคับให้พูดตาม' },
     ],
-    correctChoiceId: 'boss-rapid-02-speech',
-    explanation: 'มายาวินอธิบายว่ามนตร์บังคับการตอบได้ แต่บังคับใจให้รักหรือชังอย่างแท้จริงไม่ได้',
+    correctChoiceId: 'boss-rapid-02-love',
+    explanation: 'มายาวินอธิบายว่ามนตร์บังคับการตอบได้ แต่ไม่สามารถบังคับจิตใจให้เกิดความรักหรือความชังจริง ๆ',
     difficulty: 'easy',
     bossInteraction: {
       kind: 'rune',
-      title: 'มนตร์ทำอะไรได้?',
+      title: 'ขีดจำกัดของมนตร์',
+      question: 'สิ่งใดเป็นสิ่งที่มนตร์ทำไม่ได้?',
       instruction: 'แตะพลังที่ถูกต้อง',
       choiceIcons: {
-        'boss-rapid-02-speech': '🗣',
+        'boss-rapid-02-answer': '🗣',
         'boss-rapid-02-love': '❤',
-        'boss-rapid-02-memory': '◌',
+        'boss-rapid-02-repeat': '◌',
       },
     },
   },
@@ -55,14 +59,14 @@ export const bossQuestions: Question[] = [
     question: '“ตูข้าสมัคร ฤ มิสมัคร ก็บมิขัดจะคล้อยตาม.”',
     choices: [
       { id: 'boss-rapid-03-not-love', text: 'ยังไม่ใช่ความรักจากใจ' },
-      { id: 'boss-rapid-03-love', text: 'ยอมรับรักด้วยใจจริง' },
+      { id: 'boss-rapid-03-love', text: 'ยอมรับรักสุเทษณ์แล้ว' },
     ],
     correctChoiceId: 'boss-rapid-03-not-love',
-    explanation: 'มัทนากล่าวว่าตนจะสมัครหรือไม่สมัครก็ขัดไม่ได้และต้องคล้อยตาม จึงยังไม่ใช่ความรักที่เกิดจากความสมัครใจ',
+    explanation: 'การคล้อยตามเพราะถูกบังคับไม่เท่ากับความสมัครใจ',
     difficulty: 'medium',
     bossInteraction: {
       kind: 'swipe',
-      title: 'ตัดสินความจริง',
+      title: 'ตัดสินหัวใจมัทนา',
       instruction: 'ปัดซ้ายหรือขวา',
       swipeLeftChoiceId: 'boss-rapid-03-not-love',
       swipeRightChoiceId: 'boss-rapid-03-love',

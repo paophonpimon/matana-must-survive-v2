@@ -12,3 +12,9 @@ coverage
 # Local backup and temporary files
 Matana-must-survive.zip
 tmp/
+
+# Firebase CLI deploy cache
+.firebase/
+
+# Local-only Claude Code settings (launch.json is shared, settings.local.json is per-machine)
+.claude/settings.local.json

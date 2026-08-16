@@ -11,6 +11,10 @@ export type BossInteractionKind = 'binary' | 'rune' | 'swipe'
 export interface BossInteraction {
   kind: BossInteractionKind
   title: string
+  // Optional distinct follow-up question shown below the source quote/passage — only needed
+  // when the passage alone doesn't state what's being asked (e.g. boss-rapid-02, where the
+  // quote is evidence and a separate question asks what conclusion it supports).
+  question?: string
   instruction: string
   choiceIcons?: Record<string, string>
   swipeLeftChoiceId?: string
@@ -56,6 +60,21 @@ export interface BossAnswerRecord {
   responseTimeMs: number
 }
 
+// Learning Layer: "กู้ความทรงจำมัทนา" (Story Recall) — a mandatory, individual, non-competitive
+// phase before Main. Deliberately the leanest possible record: no responseTimeMs (Recall is
+// never speed-scored), no team/score fields at all — this is what makes "no competitive points,
+// no team-score impact, no speed scoring" true by construction, the same way BossAnswerRecord's
+// separation from player.answers/score already makes boss answers not affect the knowledge
+// score. conceptId doubles as the id of both the RecallQuestion it answers and the Learning
+// Evidence concept it represents (see data/recallQuestions.ts) — Recall is exactly one question
+// per concept, so no separate questionId is needed.
+export interface RecallAnswerRecord {
+  conceptId: string
+  selectedChoiceId: string
+  isCorrect: boolean
+  answeredAt: number
+}
+
 export interface Winner {
   teamId: string
   teamName: string
@@ -88,15 +107,41 @@ export interface TeamMeta {
   name: string
 }
 
-// Milestone 4: 'main' is the normal 10-question flow; 'boss' is the 3-question
-// "ศึกด่านชิงมนตรา" side-phase inserted between main question 5 and main question 6.
-// room.status stays 'playing' throughout both — phase only distinguishes which question
-// pool/timer fields are currently live, so every existing status==='playing' gate (magic
-// activation eligibility, broadcast mode, saveAnswer, etc.) keeps working unchanged for boss
-// too, without needing a new RoomStatus value threaded through the whole codebase.
-export type GamePhase = 'main' | 'boss'
+// The single source of truth for which stage of a round the room is in. Teacher and student
+// both resolve their screen from this one field — nothing infers a stage from status.
+//
+//   lobby  -> recall -> teamSetup -> main -> boss -> main -> (completed)
+//
+// Story Recall is a PRE-TEAM individual learning phase: it runs before any team exists, so
+// 'lobby' and 'recall' both precede team assignment entirely. This is why 'lobby' exists as its
+// own value rather than being folded into 'recall' — a freshly created room and an actively
+// running Recall are genuinely different stages, and collapsing them (as an earlier iteration
+// did) makes it impossible for the teacher UI to tell "waiting for students to join" apart from
+// "Recall is underway", and impossible for a student's client to know whether to show the
+// waiting lobby or the Recall questions.
+//
+// room.status remains orthogonal and unchanged in meaning: 'waiting' spans lobby/recall/teamSetup
+// (nothing competitive is running yet), and flips to 'playing' only when Main actually starts.
+// That split is deliberate — every pre-existing `status === 'waiting'` gate (team randomize/lock,
+// captain election, guardian naming, starting-item choice) and every `status === 'playing'` gate
+// (saveAnswer, magic activation, broadcast mode) keeps working untouched, so this refactor adds
+// stages without re-auditing the competitive rules that were already stable.
+export type GamePhase = 'lobby' | 'recall' | 'teamSetup' | 'main' | 'boss'
 
 export const BOSS_QUESTION_COUNT = 3
+// Learning Layer: fixed count of Story Recall questions/concepts every round — see
+// data/recallQuestions.ts for the actual content and lib/learning.ts for how this denominator
+// is used in the Baseline/In-game Evidence/Learning Gain formulas.
+export const RECALL_QUESTION_COUNT = 5
+// Story Recall per-item countdown. One constant, deliberately not teacher-configurable yet.
+// Purely a pacing device for the individual learning phase: on expiry the item is persisted as
+// unanswered/incorrect for Baseline, and it can never influence competitive scoring (Recall
+// writes only ever touch player.recallAnswers — see RecallAnswerRecord).
+export const RECALL_SECONDS_PER_ITEM = 15
+// Sentinel selectedChoiceId persisted when a Recall item's countdown expires with no answer.
+// Deliberately not a real choice id, so Baseline counts it as incorrect while staying
+// distinguishable from a genuine wrong pick in the stored record.
+export const RECALL_TIMEOUT_CHOICE_ID = '__timeout__'
 export const DEFAULT_BOSS_QUESTION_DURATION_SECONDS = 8
 // Boss is inserted after finishing this main question index (0-based) — "before main question
 // 6" means after question 5 (index 4).
@@ -163,6 +208,13 @@ export interface Player {
   // Milestone 4: boss-phase answers, round-scoped (reset to [] on every new round). Never read
   // by knowledge-score or competition-score computations.
   bossAnswers: BossAnswerRecord[]
+  // Learning Layer: Story Recall answers, round-scoped (reset to [] on every new round, same
+  // lifecycle as answers/bossAnswers). Order = answer order, which is also completion progress:
+  // the next unanswered recall question is always RECALL_QUESTIONS[recallAnswers.length] (see
+  // lib/game.ts's evaluateChoice-based validation in saveRecallAnswer for the no-skip guard this
+  // enables). Never read by knowledge-score, competition-score, or any team-facing computation —
+  // Learning Evidence (lib/learning.ts) is the only consumer, and only ever reads raw isCorrect.
+  recallAnswers: RecallAnswerRecord[]
   submitted: boolean
   finishedAt: number | null
   elapsedMs: number | null

@@ -1,7 +1,9 @@
 import { useEffect, useMemo } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
+import { recallQuestionsById } from '../data/recallQuestions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamMagic } from '../hooks/useGameData'
+import { computeStudentLearningEvidence } from '../lib/learning'
 import { getPlayerSession } from '../services/sessionStorage'
 import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS } from '../types/game'
 import type { Player, Room } from '../types/game'
@@ -45,6 +47,7 @@ const previewPlayer: Player = {
   score: 0,
   answers: [],
   bossAnswers: [],
+  recallAnswers: [],
   submitted: true,
   finishedAt: 0,
   elapsedMs: 0,
@@ -71,6 +74,9 @@ export const ResultPage = () => {
   const guardianNamesState = useAllTeamGuardianNames(isPreview ? '' : normalizedCode)
   const guardianNameById = useMemo(() => new Map(guardianNamesState.data.map((entry) => [entry.teamId, entry.name])), [guardianNamesState.data])
   const assignedTeamDisplayName = assignedTeam ? guardianNameById.get(assignedTeam.id) ?? assignedTeam.name : ''
+  // Learning Layer: raw individual correctness only (player.recallAnswers/answers), never
+  // magic/team/boss/speed/ranking — see lib/learning.ts's own doc comment for why.
+  const learningEvidence = useMemo(() => (player ? computeStudentLearningEvidence(player) : null), [player])
 
   useEffect(() => {
     if (!room || !player) return
@@ -131,6 +137,36 @@ export const ResultPage = () => {
                 simply no longer renders it. Final result stays focused on the 10 main
                 questions' knowledge score only. */}
             <div className="score-reveal mt-6"><small>คะแนนความรู้</small><strong>{score * 10}<span>/100</span></strong><small>{score} จาก 10 ข้อ</small></div>
+
+            {/* Learning Layer: appended below the existing competitive result, never replacing
+                it. Shown for every real (non-preview) result — preview mode has no real recall
+                data to summarize. */}
+            {!isPreview && learningEvidence ? (
+              <section className="learning-summary mt-6" aria-label="สรุปการเรียนรู้ของคุณ">
+                <p className="eyebrow">สรุปการเรียนรู้</p>
+                <dl className="learning-summary-grid mt-2">
+                  <div><dt>กู้ความทรงจำ</dt><dd>{learningEvidence.recallCorrectCount}/5</dd></div>
+                  <div><dt>เข้าใจระหว่างภารกิจ</dt><dd>{learningEvidence.mainEvidenceCorrectCount}/5</dd></div>
+                  <div>
+                    <dt>พัฒนาการ</dt>
+                    <dd className={learningEvidence.learningGainPercent >= 0 ? 'learning-gain-positive' : 'learning-gain-negative'}>
+                      {learningEvidence.learningGainPercent >= 0 ? '+' : ''}{Math.round(learningEvidence.learningGainPercent)}%
+                    </dd>
+                  </div>
+                </dl>
+                {learningEvidence.improvedConceptIds.length > 0 ? (
+                  <p className="learning-summary-note learning-summary-note-positive">
+                    พัฒนาขึ้น: {learningEvidence.improvedConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
+                  </p>
+                ) : null}
+                {learningEvidence.stillIncorrectConceptIds.length > 0 ? (
+                  <p className="learning-summary-note">
+                    ยังต้องทบทวน: {learningEvidence.stillIncorrectConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
+
             <div className="waiting-banner mt-6"><span className="pulse-dot" aria-hidden="true" /><span><strong>โปรดรอครูเปิดภารกิจรอบใหม่</strong><small>หน้านี้จะแสดงเฉพาะคะแนนของคุณ และเปลี่ยนอัตโนมัติเมื่อครูเตรียมรอบใหม่</small></span></div>
             <button className="secondary-button mt-4 w-full" type="button" disabled>รอครูเปิดภารกิจรอบใหม่</button>
           </section>

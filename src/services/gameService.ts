@@ -11,6 +11,17 @@ export interface AnswerResult {
   winner: Winner | null
 }
 
+// Learning Layer: deliberately shaped like AnswerInput/BossAnswerInput but with
+// `expectedRecallIndex` instead of a question-index field — Recall has its own individual 0..4
+// sequence (player.recallAnswers.length), never conflated with the main round's
+// currentQuestionIndex or the boss phase's bossQuestionIndex. conceptId doubles as the
+// RecallQuestion id being answered (see data/recallQuestions.ts).
+export interface RecallAnswerInput {
+  conceptId: string
+  selectedChoiceId: string
+  expectedRecallIndex: number
+}
+
 // Milestone 4: deliberately shaped like AnswerInput but with `expectedBossIndex` instead of
 // `expectedQuestionIndex` — boss questions have their own separate 0..2 index, never conflated
 // with the main round's currentQuestionIndex.
@@ -31,6 +42,16 @@ export interface GameService {
   subscribePlayers(roomCode: string, listener: (players: Player[]) => void, onError: (message: string) => void): Unsubscribe
   subscribePlayer(roomCode: string, playerId: string, listener: (player: Player | null) => void, onError: (message: string) => void): Unsubscribe
   startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number): Promise<void>
+  // Learning Layer: startRoom now begins each round in phase 'recall' (individual, no timer) —
+  // this is the only method that ever moves it to 'main' (currentQuestionIndex 0, timer started),
+  // and only ever fired by the teacher's "เริ่ม Main" button, mirroring continueAfterBoss's
+  // teacher-only, expected-token-guarded shape exactly (a stale/duplicate call is a safe no-op).
+  // Pre-game stage transitions. lobby -> recall -> teamSetup, both teacher-only and both
+  // no-ops when the room is already past that stage (so a stale/duplicate click never restarts
+  // Recall or rewinds team setup). startRoom then takes teamSetup -> main.
+  startRecall(roomCode: string, teacherSessionId: string): Promise<void>
+  startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
+  saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void>

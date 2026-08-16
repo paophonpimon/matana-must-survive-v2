@@ -109,9 +109,16 @@ export const LobbyPage = () => {
             <section className="lobby-panel w-full text-center" aria-live="polite">
               <p className="eyebrow">ห้อง {normalizedCode} · รอบที่ {room.currentRound}</p>
               <div className="waiting-rings mx-auto mt-7" aria-hidden="true"><span /><i>ม</i></div>
-              <h1 className="mt-7 text-3xl font-semibold sm:text-4xl">รอครูเริ่มภารกิจ</h1>
+              {/* Stage 'lobby' comes BEFORE Story Recall and before any team exists, so the copy
+                  must promise the Recall activity — not the mission/teams, which are still two
+                  stages away. Stage 'teamSetup' keeps the original mission-facing copy. */}
+              <h1 className="mt-7 text-3xl font-semibold sm:text-4xl">
+                {room.phase === 'lobby' ? 'รอเริ่มกู้ความทรงจำ' : 'รอครูเริ่มภารกิจ'}
+              </h1>
               <p className="mx-auto mt-3 max-w-md text-[#d8d1c5]">
-                {room.teamsLocked ? 'เมื่อประตูเปิด ทุกคนจะได้รับคำถามข้อแรกพร้อมกัน' : 'ครูกำลังจัดทีมให้ทุกคน กรุณารอสักครู่'}
+                {room.phase === 'lobby'
+                  ? 'เมื่อทุกคนเข้าห้องพร้อมแล้ว ครูจะเริ่มกิจกรรม'
+                  : room.teamsLocked ? 'เมื่อประตูเปิด ทุกคนจะได้รับคำถามข้อแรกพร้อมกัน' : 'ครูกำลังจัดทีมให้ทุกคน กรุณารอสักครู่'}
               </p>
               <dl className="lobby-identity mt-7">
                 <div><dt>ชื่อผู้เล่น</dt><dd>{player.displayName}</dd></div>
@@ -121,6 +128,12 @@ export const LobbyPage = () => {
               <div className="mt-7 flex items-center justify-center gap-2 text-sm text-[#c6baa7]"><span className="pulse-dot" aria-hidden="true" />กำลังฟังสัญญาณจากครูแบบ realtime</div>
             </section>
 
+            {/* No team exists at all before Story Recall — showing a "ทีมของคุณ / รอครูจัดทีม"
+                panel during the pre-Recall lobby would present team assignment as imminent when
+                it is actually two stages away. The whole team + magic area only appears once the
+                room has reached 'teamSetup'. */}
+            {room.phase === 'lobby' ? null : (
+            <>
             <section className="glass-panel mt-5 p-5 text-center" aria-live="polite">
               <p className="eyebrow">ทีมของคุณ</p>
               {!player.teamId ? (
@@ -240,6 +253,8 @@ export const LobbyPage = () => {
                 onActivate={(itemType, targetTeamId) => service.activateItem(normalizedCode, player.teamId as string, player.id, itemType, targetTeamId)}
               />
             ) : null}
+            </>
+            )}
           </div>
         )}
       </div>

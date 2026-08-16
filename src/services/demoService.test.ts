@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { questionsById } from '../data/questions'
+import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { resolveStudentRoute } from '../lib/game'
+import { computeStudentLearningEvidence } from '../lib/learning'
 import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
-import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX } from '../types/game'
+import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, RECALL_TIMEOUT_CHOICE_ID } from '../types/game'
 import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
 import { DEMO_STORAGE_KEY, DemoGameService } from './demoService'
 
@@ -126,6 +129,54 @@ const chooseAllStartingItems = async (service: DemoGameService, roomCode: string
   stop()
 }
 
+// Story Recall is now a PRE-TEAM stage: every round runs lobby -> recall -> teamSetup -> main,
+// and teams cannot be created until the room reaches 'teamSetup'. Every pre-existing test that
+// jumps straight to randomizeTeams therefore needs this first — it runs the whole pre-team
+// sequence (start Recall, have every currently-joined player answer all RECALL_QUESTIONS.length
+// items, then hand off to team setup) and leaves the room in exactly the state randomizeTeams
+// used to be called in. Answer choice doesn't matter: correctness has no bearing on being ALLOWED
+// to finish Recall or proceed.
+// Idempotent, because several tests call randomizeTeams more than once (re-randomize before
+// lock) and each of those call sites is prefixed with this helper: once the room has already
+// reached teamSetup there is nothing left to advance, and re-running the Recall answers would
+// throw now that the stage has moved on.
+const advanceToTeamSetup = async (
+  service: DemoGameService,
+  roomCode: string,
+  teacherSessionId = 'teacher-1',
+): Promise<void> => {
+  const current: { value: Room | null } = { value: null }
+  const stopCurrent = service.subscribeRoom(roomCode, (value) => { current.value = value })
+  await vi.waitFor(() => expect(current.value).not.toBeNull())
+  const startingPhase = current.value?.phase
+  stopCurrent()
+  if (startingPhase !== 'lobby') return
+
+  await service.startRecall(roomCode, teacherSessionId)
+
+  const players: { value: Player[] } = { value: [] }
+  const stopPlayers = service.subscribePlayers(roomCode, (value) => { players.value = value })
+  await vi.waitFor(() => expect(players.value.length).toBeGreaterThan(0))
+
+  for (const player of players.value) {
+    for (let index = 0; index < RECALL_QUESTIONS.length; index += 1) {
+      const recallQuestion = RECALL_QUESTIONS[index]
+      await service.saveRecallAnswer(roomCode, player.id, {
+        conceptId: recallQuestion.id,
+        selectedChoiceId: recallQuestion.correctChoiceId,
+        expectedRecallIndex: index,
+      })
+    }
+  }
+  stopPlayers()
+
+  await service.startTeamSetup(roomCode, teacherSessionId)
+  const room: { value: Room | null } = { value: null }
+  const stopRoom = service.subscribeRoom(roomCode, (value) => { room.value = value })
+  await vi.waitFor(() => expect(room.value?.phase).toBe('teamSetup'))
+  stopRoom()
+}
+
 describe('Demo timed classroom flow', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', new MemoryStorage())
@@ -159,6 +210,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const joined = await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
 
@@ -177,6 +229,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const existing = await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
 
@@ -191,6 +244,7 @@ describe('Demo timed classroom flow', () => {
     for (let index = 0; index < 5; index += 1) {
       await service.joinRoom({ roomCode: room.roomCode, displayName: `P${index}`, studentNumber: `${index}` }, `owner-${index}`)
     }
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
 
     const players: { value: Player[] } = { value: [] }
@@ -233,11 +287,13 @@ describe('Demo timed classroom flow', () => {
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')
     await expect(service.lockTeams(room.roomCode, 'teacher-1')).rejects.toThrow('กรุณาสุ่มทีมก่อนล็อกทีม')
 
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 3)).rejects.toThrow('ปลดล็อกทีมก่อนสุ่มใหม่')
 
     await service.unlockTeams(room.roomCode, 'teacher-1')
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
     await service.lockTeams(room.roomCode, 'teacher-1')
     const liveRoom: { value: Room | null } = { value: null }
@@ -250,10 +306,15 @@ describe('Demo timed classroom flow', () => {
   it('randomizeTeams rejects zero players and a team count larger than the player count', async () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
-    await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 1)).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+    // An empty room can never reach the team-setup stage in the first place (Story Recall needs
+    // at least one student), so the stage guard is what rejects here — the "no players" check
+    // inside randomizeTeams is now unreachable with zero players, by construction.
+    await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 1)).rejects.toThrow('กู้ความทรงจำ')
+    await expect(service.startRecall(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
 
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
+    await advanceToTeamSetup(service, room.roomCode)
     await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 3)).rejects.toThrow('จำนวนทีมต้องไม่เกินจำนวนผู้เล่น')
 
     // Exactly as many teams as players is the boundary and must succeed.
@@ -268,6 +329,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
 
     // Beta joins after randomizeTeams ran, so Beta is unassigned (teamId: null) — simulating
@@ -290,6 +352,7 @@ describe('Demo timed classroom flow', () => {
     expect(reconnectedAlpha.player.teamId).not.toBeNull()
 
     // The teacher can re-randomize (now covering Beta) and lock successfully.
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     const relockedRoom: { value: Room | null } = { value: null }
@@ -303,6 +366,7 @@ describe('Demo timed classroom flow', () => {
     const room = await service.createRoom('teacher-1')
     const first = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'First', studentNumber: '01' }, 'owner-1')).player
     const second = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Second', studentNumber: '02' }, 'owner-2')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
@@ -334,6 +398,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const player = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Late', studentNumber: '01' }, 'owner-1')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
@@ -353,6 +418,7 @@ describe('Demo timed classroom flow', () => {
     const room = await service.createRoom('teacher-1')
     const high = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'High', studentNumber: '01' }, 'owner-1')).player
     const low = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Low', studentNumber: '02' }, 'owner-2')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
@@ -382,6 +448,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const player = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Reset', studentNumber: '01' }, 'owner-1')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
@@ -413,6 +480,7 @@ describe('Demo timed classroom flow', () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
     const player = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Recovery', studentNumber: '01' }, 'owner-1')).player
+    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
@@ -436,6 +504,7 @@ describe('Demo timed classroom flow', () => {
   it('resetDemoRoom seeds players whose ids match their studentNumber, so reconnect works for the seeded demo dataset too', async () => {
     const service = new DemoGameService()
     const seededRoom = await service.resetDemoRoom()
+    await advanceToTeamSetup(service, seededRoom.roomCode, 'demo-teacher')
     await service.randomizeTeams(seededRoom.roomCode, 'demo-teacher', 2)
     await service.lockTeams(seededRoom.roomCode, 'demo-teacher')
 
@@ -468,7 +537,8 @@ describe('Demo timed classroom flow', () => {
       for (let index = 0; index < 6; index += 1) {
         await service.joinRoom({ roomCode: room.roomCode, displayName: `P${index}`, studentNumber: `${index}` }, `owner-${index}`)
       }
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       const magic: { value: TeamMagicState[] } = { value: [] }
@@ -496,7 +566,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await service.finalizeCaptainElection(room.roomCode, 'teacher-1', 'team-1')
 
@@ -518,7 +589,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
 
@@ -540,7 +612,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -563,7 +636,8 @@ describe('Demo timed classroom flow', () => {
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       const holder2 = await getHolderId(service, room.roomCode, 'team-2')
@@ -593,7 +667,8 @@ describe('Demo timed classroom flow', () => {
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const p2 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
       const p3 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       // 3 players over 3 teams always splits one-each, but *which* label each player lands on
@@ -677,7 +752,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const p2 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       const holder2 = await getHolderId(service, room.roomCode, 'team-2')
@@ -720,7 +796,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -758,7 +835,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal')
@@ -786,7 +864,8 @@ describe('Demo timed classroom flow', () => {
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
       const gamma = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       const players: { value: Player[] } = { value: [] }
@@ -816,7 +895,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       await service.castCaptainVote(room.roomCode, alpha.id, alpha.id) // self-vote — allowed
@@ -839,7 +919,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await service.castCaptainVote(room.roomCode, alpha.id, alpha.id)
 
@@ -858,7 +939,8 @@ describe('Demo timed classroom flow', () => {
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
       const gamma = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       // 2 votes for Beta, 1 for Alpha — Beta must win. Note: "auto-finalize once everyone has
@@ -882,7 +964,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       // 1-1 tie between Alpha and Beta.
@@ -908,7 +991,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
 
       // Only Alpha votes (for herself) — Beta never gets around to it. The teacher can still
@@ -936,7 +1020,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
     })
@@ -946,7 +1031,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await service.castCaptainVote(room.roomCode, alpha.id, beta.id)
       await service.castCaptainVote(room.roomCode, beta.id, beta.id)
@@ -961,7 +1047,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       expect(holderId).toBe(p1.id)
@@ -973,6 +1060,9 @@ describe('Demo timed classroom flow', () => {
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeNull())
       expect(magic.value?.captainElectionAttempt).toBeGreaterThan(1)
+      // A new round restarts the whole pre-game sequence at 'lobby', so Recall runs again before
+      // the captain gate is even reachable.
+      await advanceToTeamSetup(service, room.roomCode)
       // No captain -> starting the next round is blocked again until a fresh election finishes.
       await expect(service.startRoom(room.roomCode, 'teacher-1', 60)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
       stop()
@@ -984,7 +1074,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderIdWithoutNaming(service, room.roomCode, 'team-1')
       const holder2 = await getHolderIdWithoutNaming(service, room.roomCode, 'team-2')
@@ -1028,7 +1119,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       // Deterministic election (not the random-draw finalize helper): alpha votes for herself,
       // beta votes for alpha too, so alpha wins outright and beta is guaranteed the non-captain.
@@ -1126,7 +1218,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1159,7 +1252,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1189,7 +1283,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1215,7 +1310,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1252,7 +1348,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1294,7 +1391,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
@@ -1316,7 +1414,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
@@ -1344,6 +1443,9 @@ describe('Demo timed classroom flow', () => {
       // Move to round 2: player.score/answers reset, magic inventory resets, but the round-1
       // 'applied' event is NOT deleted from the log — it stays for history.
       await service.stopRound(room.roomCode, 'teacher-1')
+      // A new round restarts the pre-game sequence at 'lobby' — Recall runs again before team
+      // setup and Main become reachable.
+      await advanceToTeamSetup(service, room.roomCode)
       await chooseAllStartingItems(service, room.roomCode) // no item gets activated this round
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
@@ -1376,7 +1478,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1393,6 +1496,9 @@ describe('Demo timed classroom flow', () => {
       expect(progress.value.find((entry) => entry.questionId === round1QuestionId)?.currentRound).toBe(1)
 
       await service.stopRound(room.roomCode, 'teacher-1')
+      // A new round restarts the pre-game sequence at 'lobby' — Recall runs again before team
+      // setup and Main become reachable.
+      await advanceToTeamSetup(service, room.roomCode)
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
@@ -1435,7 +1541,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1452,7 +1559,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
@@ -1501,7 +1609,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
 
@@ -1519,7 +1628,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
 
@@ -1556,7 +1666,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -1578,7 +1689,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode) // every team picks power_surge
       const magicBefore: { value: TeamMagicState[] } = { value: [] }
@@ -1603,7 +1715,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -1617,7 +1730,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -1646,7 +1760,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const p2 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1673,7 +1788,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       // A long duration — if the deadline math ignored questionClosedAt, this question would
@@ -1703,7 +1819,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1725,7 +1842,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1751,7 +1869,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 5)
@@ -1785,7 +1904,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -1884,13 +2004,405 @@ describe('Demo timed classroom flow', () => {
     })
   })
 
+  // Pre-game orchestration: Story Recall is a PRE-TEAM individual learning phase. The stage
+  // machine is lobby -> recall -> teamSetup -> main -> boss, carried entirely by room.phase, and
+  // these tests pin every transition plus the "no teams exist before Recall" guarantee.
+  describe('Pre-game orchestration: lobby -> recall -> teamSetup', () => {
+    const joinAll = async (service: DemoGameService, roomCode: string, count: number): Promise<Player[]> => {
+      const players: Player[] = []
+      for (let index = 0; index < count; index += 1) {
+        const joined = await service.joinRoom(
+          { roomCode, displayName: `Student${index + 1}`, studentNumber: `0${index + 1}` },
+          `owner-${index + 1}`,
+        )
+        players.push(joined.player)
+      }
+      return players
+    }
+
+    const answerAllRecall = async (service: DemoGameService, roomCode: string, playerId: string): Promise<void> => {
+      for (let index = 0; index < RECALL_QUESTIONS.length; index += 1) {
+        const question = RECALL_QUESTIONS[index]
+        await service.saveRecallAnswer(roomCode, playerId, {
+          conceptId: question.id,
+          selectedChoiceId: question.correctChoiceId,
+          expectedRecallIndex: index,
+        })
+      }
+    }
+
+    it('1. a fresh room has joined players but zero teams, and starts in stage lobby', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 3)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      const livePlayers: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
+      await vi.waitFor(() => expect(livePlayers.value).toHaveLength(3))
+
+      expect(liveRoom.value?.status).toBe('waiting')
+      expect(liveRoom.value?.phase).toBe('lobby')
+      // No team concept exists yet, at any level: no team metas, no teamCount, and every player
+      // is still an unassigned individual.
+      expect(liveRoom.value?.teams).toEqual([])
+      expect(liveRoom.value?.teamCount).toBe(0)
+      expect(liveRoom.value?.teamsLocked).toBe(false)
+      expect(livePlayers.value.every((player) => player.teamId === null)).toBe(true)
+      expect(players).toHaveLength(3)
+
+      // And team creation is refused outright while still pre-Recall — the guarantee is
+      // structural, not merely a hidden button.
+      await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 2)).rejects.toThrow('กู้ความทรงจำ')
+
+      stopRoom()
+      stopPlayers()
+    })
+
+    it('2. the teacher can start Recall with no teams, captain, item, or team name in place', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await joinAll(service, room.roomCode, 2)
+
+      // Nothing but "at least one student joined" is required.
+      await service.startRecall(room.roomCode, 'teacher-1')
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      expect(liveRoom.value?.status).toBe('waiting')
+      expect(liveRoom.value?.teams).toEqual([])
+
+      stopRoom()
+    })
+
+    it('2b. starting Recall with nobody in the room is refused, and a duplicate start is a safe no-op', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await expect(service.startRecall(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+
+      await joinAll(service, room.roomCode, 1)
+      await service.startRecall(room.roomCode, 'teacher-1')
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+
+      // A stale/duplicate click must never restart Recall (which would be observable as progress
+      // being wiped) — it is simply ignored.
+      await service.startRecall(room.roomCode, 'teacher-1')
+      expect(liveRoom.value?.phase).toBe('recall')
+
+      stopRoom()
+    })
+
+    it('3. all joined students enter Recall together from the single teacher action', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 3)
+
+      await service.startRecall(room.roomCode, 'teacher-1')
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+
+      // Every student resolves to the game screen off the same room state — one action, one
+      // stage, no per-student gate.
+      for (const player of players) {
+        expect(resolveStudentRoute(liveRoom.value as Room, player)).toBe(`/game/${room.roomCode}`)
+        // ...and each can actually answer immediately.
+        await service.saveRecallAnswer(room.roomCode, player.id, {
+          conceptId: RECALL_QUESTIONS[0].id,
+          selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
+          expectedRecallIndex: 0,
+        })
+      }
+
+      const livePlayers: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
+      await vi.waitFor(() => expect(livePlayers.value.every((player) => player.recallAnswers.length === 1)).toBe(true))
+
+      stopRoom()
+      stopPlayers()
+    })
+
+    it('4. a timed-out Recall item is persisted as unanswered/incorrect and still counts toward Baseline', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const [alpha] = await joinAll(service, room.roomCode, 1)
+      await service.startRecall(room.roomCode, 'teacher-1')
+
+      // Item 1 times out (the client submits the timeout sentinel when the countdown expires),
+      // item 2 is answered correctly.
+      await service.saveRecallAnswer(room.roomCode, alpha.id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_TIMEOUT_CHOICE_ID,
+        expectedRecallIndex: 0,
+      })
+      await service.saveRecallAnswer(room.roomCode, alpha.id, {
+        conceptId: RECALL_QUESTIONS[1].id,
+        selectedChoiceId: RECALL_QUESTIONS[1].correctChoiceId,
+        expectedRecallIndex: 1,
+      })
+
+      const player: { value: Player | null } = { value: null }
+      const stopPlayer = service.subscribePlayer(room.roomCode, alpha.id, (value) => { player.value = value })
+      await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(2))
+
+      expect(player.value?.recallAnswers[0]).toMatchObject({
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_TIMEOUT_CHOICE_ID,
+        isCorrect: false,
+      })
+      expect(player.value?.recallAnswers[1].isCorrect).toBe(true)
+      // A timeout does NOT block progression, and it counts as an incorrect item for Baseline.
+      expect(computeStudentLearningEvidence(player.value as Player).recallCorrectCount).toBe(1)
+      // It is also first-answer-locked like any other item: re-submitting the real answer later
+      // cannot overwrite the recorded timeout.
+      await service.saveRecallAnswer(room.roomCode, alpha.id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
+        expectedRecallIndex: 0,
+      })
+      expect(player.value?.recallAnswers).toHaveLength(2)
+      expect(player.value?.recallAnswers[0].isCorrect).toBe(false)
+
+      stopPlayer()
+    })
+
+    it('5. completing Recall creates and assigns no teams whatsoever', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 2)
+      await service.startRecall(room.roomCode, 'teacher-1')
+      for (const player of players) await answerAllRecall(service, room.roomCode, player.id)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      const livePlayers: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
+      await vi.waitFor(() => expect(livePlayers.value).toHaveLength(2))
+      await vi.waitFor(() => expect(livePlayers.value.every((player) => player.recallAnswers.length === RECALL_QUESTIONS.length)).toBe(true))
+      await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
+
+      expect(liveRoom.value?.phase).toBe('recall')
+      expect(liveRoom.value?.teams).toEqual([])
+      expect(liveRoom.value?.teamCount).toBe(0)
+      expect(livePlayers.value.every((player) => player.teamId === null)).toBe(true)
+
+      stopRoom()
+      stopPlayers()
+    })
+
+    it('6. the teacher transitions Recall -> teamSetup, and a duplicate call is a safe no-op', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 2)
+      await service.startRecall(room.roomCode, 'teacher-1')
+      for (const player of players) await answerAllRecall(service, room.roomCode, player.id)
+
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
+      expect(liveRoom.value?.status).toBe('waiting')
+
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      expect(liveRoom.value?.phase).toBe('teamSetup')
+      // Recall is closed once past that stage.
+      await expect(service.saveRecallAnswer(room.roomCode, players[0].id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
+        expectedRecallIndex: 0,
+      })).rejects.toThrow('ไม่ได้อยู่ในช่วงกู้ความทรงจำ')
+
+      stopRoom()
+    })
+
+    it('7. the existing team setup workflow runs unchanged after Recall, and Main starts from it', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const players = await joinAll(service, room.roomCode, 2)
+      await service.startRecall(room.roomCode, 'teacher-1')
+      for (const player of players) await answerAllRecall(service, room.roomCode, player.id)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+
+      // The stable, pre-existing sequence — untouched by this refactor.
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 30)
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.status).toBe('playing'))
+      expect(liveRoom.value?.phase).toBe('main')
+      expect(liveRoom.value?.teams).toHaveLength(2)
+      expect(liveRoom.value?.teamsLocked).toBe(true)
+      // Main's timer is live immediately, so students can answer right away.
+      expect(liveRoom.value?.questionStartedAt).not.toBeNull()
+
+      stopRoom()
+    })
+
+    it('7b. Main cannot be started while still in lobby or recall, however complete team setup looks', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      await joinAll(service, room.roomCode, 2)
+
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('กู้ความทรงจำ')
+      await service.startRecall(room.roomCode, 'teacher-1')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('กู้ความทรงจำ')
+    })
+
+    it('8. Recall answers and Baseline survive team setup, Main, and Boss', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const [alpha] = await joinAll(service, room.roomCode, 1)
+      await service.startRecall(room.roomCode, 'teacher-1')
+
+      // A deliberately mixed Recall result so Baseline is a distinctive, checkable number.
+      const wrongChoice = RECALL_QUESTIONS[0].choices.find((choice) => choice.id !== RECALL_QUESTIONS[0].correctChoiceId)
+      await service.saveRecallAnswer(room.roomCode, alpha.id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: wrongChoice?.id as string,
+        expectedRecallIndex: 0,
+      })
+      for (let index = 1; index < RECALL_QUESTIONS.length; index += 1) {
+        await service.saveRecallAnswer(room.roomCode, alpha.id, {
+          conceptId: RECALL_QUESTIONS[index].id,
+          selectedChoiceId: RECALL_QUESTIONS[index].correctChoiceId,
+          expectedRecallIndex: index,
+        })
+      }
+
+      const player: { value: Player | null } = { value: null }
+      const stopPlayer = service.subscribePlayer(room.roomCode, alpha.id, (value) => { player.value = value })
+      await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length))
+      const baselineAfterRecall = computeStudentLearningEvidence(player.value as Player).baselinePercent
+      expect(baselineAfterRecall).toBe(80)
+
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await service.lockTeams(room.roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, room.roomCode)
+      await service.startRoom(room.roomCode, 'teacher-1', 30)
+
+      // Survives team setup + Main start...
+      await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length))
+      expect(computeStudentLearningEvidence(player.value as Player).baselinePercent).toBe(baselineAfterRecall)
+
+      // ...and survives playing through Main into the Boss phase.
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
+      for (let index = 0; index <= BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {
+        await service.advanceQuestion(room.roomCode, 'teacher-1', index)
+      }
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('boss'))
+      expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length)
+      expect(computeStudentLearningEvidence(player.value as Player).baselinePercent).toBe(baselineAfterRecall)
+
+      stopRoom()
+      stopPlayer()
+    })
+
+    it('9. refresh (a fresh subscription) restores the right stage in lobby, Recall, Recall-complete, and teamSetup', async () => {
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const [alpha] = await joinAll(service, room.roomCode, 1)
+
+      // A brand-new subscription pair with no shared state is exactly what a reloaded tab does:
+      // mount fresh and subscribe from scratch.
+      const readStage = async (expectedPhase: string): Promise<string> => {
+        const freshRoom: { value: Room | null } = { value: null }
+        const stopFreshRoom = service.subscribeRoom(room.roomCode, (value) => { freshRoom.value = value })
+        const freshPlayer: { value: Player | null } = { value: null }
+        const stopFreshPlayer = service.subscribePlayer(room.roomCode, alpha.id, (value) => { freshPlayer.value = value })
+        await vi.waitFor(() => expect(freshRoom.value?.phase).toBe(expectedPhase))
+        await vi.waitFor(() => expect(freshPlayer.value).not.toBeNull())
+        const route = resolveStudentRoute(freshRoom.value as Room, freshPlayer.value as Player)
+        stopFreshRoom()
+        stopFreshPlayer()
+        return route
+      }
+
+      // Stage lobby -> the waiting lobby.
+      expect(await readStage('lobby')).toBe(`/lobby/${room.roomCode}`)
+
+      // Stage recall, partially answered -> the game screen (Recall), progress intact.
+      await service.startRecall(room.roomCode, 'teacher-1')
+      await service.saveRecallAnswer(room.roomCode, alpha.id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
+        expectedRecallIndex: 0,
+      })
+      expect(await readStage('recall')).toBe(`/game/${room.roomCode}`)
+      const midPlayer: { value: Player | null } = { value: null }
+      const stopMid = service.subscribePlayer(room.roomCode, alpha.id, (value) => { midPlayer.value = value })
+      await vi.waitFor(() => expect(midPlayer.value?.recallAnswers).toHaveLength(1))
+      stopMid()
+
+      // Stage recall, fully answered (waiting for classmates) -> still the game screen, which is
+      // where the "กู้ความทรงจำครบแล้ว / รอเพื่อนร่วมภารกิจ" waiting state lives.
+      for (let index = 1; index < RECALL_QUESTIONS.length; index += 1) {
+        await service.saveRecallAnswer(room.roomCode, alpha.id, {
+          conceptId: RECALL_QUESTIONS[index].id,
+          selectedChoiceId: RECALL_QUESTIONS[index].correctChoiceId,
+          expectedRecallIndex: index,
+        })
+      }
+      expect(await readStage('recall')).toBe(`/game/${room.roomCode}`)
+
+      // Stage teamSetup -> back to the lobby, which is where team setup is presented.
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      expect(await readStage('teamSetup')).toBe(`/lobby/${room.roomCode}`)
+    })
+
+    it('10. two students in the same room keep separate identities and separate Recall progress', async () => {
+      // The reported multi-tab symptom was a Firestore-rules denial, not an identity collision
+      // (getPlayerSession/savePlayerSession are already sessionStorage-backed, i.e. per-tab). This
+      // pins the service-layer half of that finding: distinct ownerUids produce distinct player
+      // docs whose Recall progress never bleeds into one another.
+      const service = new DemoGameService()
+      const room = await service.createRoom('teacher-1')
+      const alpha = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-tab-1')).player
+      const beta = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-tab-2')).player
+      expect(alpha.id).not.toBe(beta.id)
+      expect(alpha.ownerUid).not.toBe(beta.ownerUid)
+
+      await service.startRecall(room.roomCode, 'teacher-1')
+      // Only Alpha answers.
+      await answerAllRecall(service, room.roomCode, alpha.id)
+
+      const livePlayers: { value: Player[] } = { value: [] }
+      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
+      await vi.waitFor(() => expect(livePlayers.value).toHaveLength(2))
+
+      const liveAlpha = livePlayers.value.find((player) => player.id === alpha.id)
+      const liveBeta = livePlayers.value.find((player) => player.id === beta.id)
+      expect(liveAlpha?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length)
+      expect(liveBeta?.recallAnswers).toHaveLength(0)
+      expect(liveAlpha?.ownerUid).toBe('owner-tab-1')
+      expect(liveBeta?.ownerUid).toBe('owner-tab-2')
+
+      // A reconnect from tab 2 resolves to tab 2's own player, never tab 1's.
+      const rejoinedBeta = await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-tab-2')
+      expect(rejoinedBeta.player.id).toBe(beta.id)
+      expect(rejoinedBeta.player.recallAnswers).toHaveLength(0)
+
+      stopPlayers()
+    })
+  })
   describe('Team roster and answer progress', () => {
     it('shows a provisional roster immediately after randomizeTeams, before any lock', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
 
       const roster: { value: TeamRosterSummary | null } = { value: null }
       const liveRoom: { value: Room | null } = { value: null }
@@ -1909,7 +2421,8 @@ describe('Demo timed classroom flow', () => {
       for (let index = 0; index < 6; index += 1) {
         joined.push((await service.joinRoom({ roomCode: room.roomCode, displayName: `P${index}`, studentNumber: `${index}` }, `owner-${index}`)).player)
       }
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 3)
 
       const players: { value: Player[] } = { value: [] }
       const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
@@ -1946,7 +2459,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
 
       const roster1: { value: TeamRosterSummary | null } = { value: null }
       const stop1 = service.subscribeTeamRoster(room.roomCode, 'team-1', (value) => { roster1.value = value })
@@ -1955,7 +2469,8 @@ describe('Demo timed classroom flow', () => {
 
       // Force everyone onto team-1 this time — team-2's old roster (if it had this member)
       // must not retain it.
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       const roster1Again: { value: TeamRosterSummary | null } = { value: null }
       const roster2: { value: TeamRosterSummary | null } = { value: null }
       const stopAgain = service.subscribeTeamRoster(room.roomCode, 'team-1', (value) => { roster1Again.value = value })
@@ -1996,7 +2511,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -2021,7 +2537,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
       const p2 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -2051,7 +2568,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
@@ -2075,7 +2593,8 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Silent', studentNumber: '02' }, 'owner-2')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
 
       const roster: { value: TeamRosterSummary | null } = { value: null }
       const stop = service.subscribeTeamRoster(room.roomCode, 'team-1', (value) => { roster.value = value })
@@ -2089,7 +2608,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
+      await advanceToTeamSetup(service, room.roomCode)
+    await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)

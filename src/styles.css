@@ -606,6 +606,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .boss-rapid-card { overflow: hidden; }
 .boss-rapid-step { margin-top: 1rem; color: #f2d58d; font-size: clamp(1.35rem, 4vw, 2rem); font-weight: 800; text-align: center; }
 .boss-source-quote { margin: 0.85rem auto 0; max-width: 46rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 0.9rem; padding: 0.9rem 1rem; color: #fff5dc; background: rgba(5,6,22,0.42); font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.15rem, 3.7vw, 1.65rem); line-height: 1.55; text-align: center; }
+/* Optional distinct follow-up question below the source quote (see BossInteraction.question in
+   types/game.ts) — used when the passage alone doesn't state what's being asked. */
+.boss-rapid-question { margin-top: 0.6rem; color: #f2d58d; font-size: 1.05rem; font-weight: 700; text-align: center; }
 .boss-rapid-instruction { margin-top: 0.7rem; color: #bdb5ac; font-size: 0.82rem; font-weight: 700; text-align: center; }
 .boss-rapid-choices { display: grid; gap: 0.75rem; margin-top: 1rem; }
 .boss-rapid-choices-binary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -946,6 +949,94 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 /* ================= Item 5: boss pause-and-continue waiting panel (student) ================= */
 .boss-awaiting-continue { display: grid; justify-items: center; padding: 3rem 1rem; text-align: center; }
+
+/* ================= Learning Layer: "กู้ความทรงจำมัทนา" (Story Recall) =================
+   Student-facing individual phase. Composed as one centered column with a decorative aura behind
+   the question card — the earlier version read as an empty page because the card sat alone on a
+   full-width field with no framing, progression, or timing signal. */
+.recall-phase { position: relative; display: grid; justify-items: center; width: min(100%, 46rem); margin-inline: auto; padding-block: clamp(0.75rem, 3vh, 2rem); }
+/* Soft radial aura using the existing palette — pure CSS atmosphere, no new image assets. */
+.recall-phase::before { content: ''; position: absolute; inset: -10% -20% auto; height: 26rem; background: radial-gradient(60% 60% at 50% 30%, rgba(158,92,196,0.18), transparent 70%); pointer-events: none; }
+.recall-phase > * { position: relative; }
+.recall-phase-header { text-align: center; }
+.recall-phase-note { margin-top: 0.35rem; color: #c9a55f; font-size: 0.85rem; }
+.recall-phase-footnote { max-width: 34rem; margin-top: 1.25rem; color: #999187; font-size: 0.75rem; line-height: 1.6; text-align: center; }
+
+/* Status bar: step count, 5-step pips, and the countdown, on one line above the card. */
+.recall-status-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; margin-top: 1.1rem; }
+.recall-step-count { color: #d8d1c5; font-size: 0.9rem; font-weight: 600; white-space: nowrap; }
+.recall-step-pips { display: flex; flex: 1; gap: 0.4rem; justify-content: center; margin: 0; padding: 0; list-style: none; }
+.recall-step-pips li { width: 100%; max-width: 3.5rem; height: 0.4rem; border-radius: 999px; background: rgba(255,255,255,0.12); transition: background 0.3s ease; }
+.recall-step-pips li.recall-step-done { background: linear-gradient(90deg, #e9b34f, #f2d58d); }
+.recall-step-pips li.recall-step-current { background: rgba(242,213,141,0.45); }
+.recall-countdown { display: grid; place-items: center; min-width: 3.6rem; padding: 0.35rem 0.5rem; border: 1px solid rgba(226,189,101,0.3); border-radius: 0.75rem; background: rgba(20,12,38,0.5); color: #f2d58d; font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.05; }
+.recall-countdown small { color: #a9a095; font-size: 0.6rem; font-weight: 600; }
+.recall-countdown-urgent { border-color: rgba(224,138,138,0.55); color: #ffb1b1; animation: pulse-glow 1s ease-in-out infinite; }
+.recall-countdown-done { color: #8b8377; }
+
+/* Question card: stronger, centered, more presence than the generic .question-card. */
+.recall-question-card { width: 100%; margin-top: 0.9rem; border: 1px solid rgba(230,197,112,0.24); border-radius: 1.25rem; padding: clamp(1.4rem, 4vw, 2.25rem); background: linear-gradient(165deg, rgba(44,28,64,0.62), rgba(24,15,44,0.58)); box-shadow: 0 1.2rem 3rem rgba(0,0,0,0.32), 0 0 2.5rem rgba(158,92,196,0.08); text-align: center; }
+.recall-question-label { display: inline-block; border: 1px solid rgba(226,189,101,0.32); border-radius: 999px; padding: 0.3rem 0.85rem; color: #f2d58d; background: rgba(77,49,19,0.28); font-size: 0.78rem; font-weight: 700; }
+.recall-question-prompt { margin-top: 1rem; color: #fff7df; font-size: clamp(1.15rem, 3.2vw, 1.6rem); font-weight: 600; line-height: 1.65; }
+/* Larger answer targets than the standard choice button — comfortable on a projected screen and
+   on iPad, where these are the only two things on the page a student ever taps. */
+.recall-choice-grid { display: grid; gap: 0.85rem; margin-top: 1.6rem; }
+.recall-choice-button { min-height: 4.25rem; padding: 1rem 1.15rem; font-size: 1.02rem; text-align: left; }
+.recall-feedback-text { margin-top: 0.4rem; color: #d8d1c5; font-size: 0.92rem; line-height: 1.55; text-align: left; }
+.recall-next-button { width: min(100%, 18rem); margin-top: 1.25rem; margin-inline: auto; }
+.recall-phase-complete-status { margin-top: 0.5rem; color: #f2d58d; font-size: 1.1rem; font-weight: 700; text-align: center; }
+@media (max-width: 480px) {
+  .recall-status-bar { flex-wrap: wrap; justify-content: center; }
+  .recall-step-pips { order: 3; flex-basis: 100%; }
+}
+/* Teacher Recall UX fix: dedicated single-screen control view — this REPLACES the entire
+   dashboard body while phase === 'recall' (see TeacherPage.tsx), so nothing below it forces
+   scrolling. Bounded min-height (not 100dvh — the compact room bar above still needs room) keeps
+   it centered and fully visible on one normal desktop/tablet viewport. */
+.recall-command-view { display: grid; justify-items: center; align-content: center; gap: 0.5rem; min-height: min(58vh, 32rem); margin-top: 1.25rem; text-align: center; border: 1px solid rgba(230,197,112,0.26); border-radius: 1.25rem; padding: clamp(2rem, 5vw, 3.5rem) 1.5rem; background: linear-gradient(160deg, rgba(42,26,61,0.5), rgba(26,16,48,0.42) 60%, rgba(44,20,32,0.4)); box-shadow: 0 0 2.8rem rgba(202,147,56,0.12); }
+.recall-command-title { margin-top: 0.2rem; color: #fff7df; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 700; }
+.recall-command-status { margin-top: 0.5rem; color: #f2d58d; font-size: clamp(1.15rem, 3vw, 1.5rem); font-weight: 700; }
+.recall-command-status-done { color: #7fdc9d; }
+.recall-command-supporting { max-width: 30rem; margin-top: 0.4rem; color: #d8d1c5; line-height: 1.6; }
+.recall-command-count { margin-top: 0.8rem; color: #fff7df; font-size: clamp(1.4rem, 4vw, 2rem); font-weight: 800; font-variant-numeric: tabular-nums; }
+.recall-command-progress-bar { width: min(100%, 24rem); height: 0.75rem; margin-top: 0.5rem; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,0.1); }
+.recall-command-progress-bar i { display: block; height: 100%; background: linear-gradient(90deg, #e9b34f, #f2d58d); transition: width 0.3s ease; }
+.recall-command-progress-bar-full i { background: linear-gradient(90deg, #6bd68f, #9be8b4); }
+.recall-command-baseline { margin-top: 0.8rem; color: #d8d1c5; font-size: 0.95rem; }
+.recall-command-hint { margin-top: 0.6rem; color: #bdb5ac; font-size: 0.8rem; }
+.teacher-shell-stage { padding-bottom: 1rem; }
+/* Room-level escape hatch on the stage screens — quiet by design so it never competes with the
+   primary stage action above it, but always reachable. */
+.stage-room-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-top: clamp(0.75rem, 2vh, 1.5rem); }
+.stage-room-controls > button { color: #d9a3a3; border-color: rgba(224,138,138,0.35); }
+.stage-room-controls > button:hover:not(:disabled) { color: #ffc4c4; border-color: rgba(224,138,138,0.6); }
+/* The stage screen sizes itself to whatever height is left after the compact header and room
+   bar rather than claiming a fixed minimum, and trades vertical padding for viewport height on
+   shorter screens — together these keep a 768px-tall iPad landscape viewport scroll-free. */
+.teacher-shell-stage .recall-command-view { min-height: 0; padding-block: clamp(1rem, 2.5vh, 2rem); }
+/* Compact per-participant chips — the "individual phase" signal on the teacher screen. Wraps and
+   scrolls internally so a large class can never push the primary button off the viewport. */
+.recall-player-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; justify-content: center; width: min(100%, 44rem); max-height: 9rem; margin: 1.1rem 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.recall-player-chip { display: inline-flex; align-items: center; gap: 0.45rem; border: 1px solid rgba(255,255,255,0.14); border-radius: 999px; padding: 0.3rem 0.75rem; background: rgba(20,12,38,0.45); color: #d8d1c5; font-size: 0.82rem; }
+.recall-player-chip b { color: #f2d58d; font-variant-numeric: tabular-nums; }
+.recall-player-chip-done { border-color: rgba(127,220,157,0.4); background: rgba(28,58,40,0.4); color: #cfeeda; }
+.recall-player-chip-done b { color: #7fdc9d; }
+.recall-start-main-button { width: min(100%, 20rem); }
+
+/* ================= Learning Layer: Learning Summary (student + teacher) ================= */
+.learning-summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-block: 1px solid rgba(255,255,255,0.08); }
+.learning-summary-grid div { padding: 0.9rem 0.45rem; text-align: center; }
+.learning-summary-grid div + div { border-left: 1px solid rgba(255,255,255,0.08); }
+.learning-summary-grid dt { min-height: 2rem; color: #a9a095; font-size: 0.68rem; line-height: 1.35; }
+.learning-summary-grid dd { margin-top: 0.2rem; color: #f4d47d; font-size: 1.35rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.learning-gain-positive { color: #7fdc9d !important; }
+.learning-gain-negative { color: #f3aaa7 !important; }
+.learning-summary-note { margin-top: 0.6rem; color: #c0b7ab; font-size: 0.82rem; line-height: 1.5; }
+.learning-summary-note-positive { color: #9ee6b4; }
+.learning-summary-concepts { display: grid; gap: 0.5rem; }
+.learning-summary-concept-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 0.5rem; }
+.learning-summary-concept-label { color: #fff7df; font-weight: 700; }
+.learning-summary-concept-stat { color: #c0b7ab; font-size: 0.82rem; }
 
 /* ================= Item 7: dramatic spell-impact toast (student) ================= */
 /* Upgrades the existing .magic-toast content model (icon+text) with a bigger icon behind a

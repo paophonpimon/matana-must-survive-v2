@@ -25,10 +25,16 @@ describe('การสุ่มคำถาม', () => {
     expect(counts).toEqual(ROUND_CATEGORY_COUNTS)
   })
 
-  it('ไม่ใช้ทั้งชุดเดิมซ้ำเมื่อยังมีคำถามสำรอง', () => {
+  // Learning Layer iteration: the bank is now exactly these 10 fixed questions (one full
+  // category pool per ROUND_CATEGORY_COUNTS entry), so every round selects literally all of
+  // them — this is what "do not randomly replace the five mapped evidence questions" requires
+  // structurally. The set can never vary round to round; only presentation order (still
+  // shuffled) can.
+  it('เลือกคำถามชุดเดิมทั้ง 10 ข้อเสมอ ไม่ว่ารอบก่อนจะใช้ชุดใด (เพราะคลังมีพอดี 10 ข้อ)', () => {
     const previous = selectRoundQuestions(questions, [], () => 0.1)
-    const next = selectRoundQuestions(questions, previous, () => 0.1)
-    expect(new Set(next)).not.toEqual(new Set(previous))
+    const next = selectRoundQuestions(questions, previous, () => 0.77)
+    expect(new Set(next)).toEqual(new Set(previous))
+    expect(new Set(next)).toEqual(new Set(questions.map((question) => question.id)))
   })
 })
 
@@ -141,5 +147,26 @@ describe('route resolver', () => {
     expect(resolveStudentRoute({ ...room, winner: { teamId: 'winner' } as Room['winner'] }, player)).toBe('/congratulations/ABC234')
     expect(resolveStudentRoute({ ...room, status: 'waiting' }, player)).toBe('/lobby/ABC234')
     expect(resolveStudentRoute({ ...room, status: 'closed' }, player)).toBe('/closed/ABC234')
+  })
+
+  // Stage precedence: 'recall' is the one phase that overrides the status-based lobby routing
+  // (it runs while status is still 'waiting'), but the TERMINAL statuses must in turn outrank it.
+  // closeRoom only changes status and deliberately leaves phase untouched, so a room closed
+  // mid-Recall still carries phase 'recall' — without this precedence a student (and, in the bug
+  // this pins, the teacher's own screen) would stay stranded on the Recall screen of a dead room.
+  it('สถานะปิด/จบเกม ต้องมาก่อนระยะ recall เสมอ แม้ห้องจะถูกปิดกลางกู้ความทรงจำ', () => {
+    const recallRoom = { ...room, status: 'waiting', phase: 'recall' } as Room
+    expect(resolveStudentRoute(recallRoom, player)).toBe('/game/ABC234')
+
+    expect(resolveStudentRoute({ ...recallRoom, status: 'closed' }, player)).toBe('/closed/ABC234')
+    expect(resolveStudentRoute({ ...recallRoom, status: 'completed' }, player)).toBe('/result/ABC234')
+    expect(resolveStudentRoute({ ...recallRoom, winner: { teamId: 'winner' } as Room['winner'] }, player)).toBe('/congratulations/ABC234')
+  })
+
+  it('ระยะ lobby และ teamSetup อยู่ที่ห้องรอ ส่วน recall อยู่ที่หน้าเกม', () => {
+    const waiting = { ...room, status: 'waiting' } as Room
+    expect(resolveStudentRoute({ ...waiting, phase: 'lobby' } as Room, player)).toBe('/lobby/ABC234')
+    expect(resolveStudentRoute({ ...waiting, phase: 'recall' } as Room, player)).toBe('/game/ABC234')
+    expect(resolveStudentRoute({ ...waiting, phase: 'teamSetup' } as Room, player)).toBe('/lobby/ABC234')
   })
 })

@@ -1,11 +1,17 @@
 import type { JoinInput, Player, Question, QuestionCategory, Room, TeacherSession } from '../types/game'
 
+// Learning Layer iteration: matches data/questions.ts's fixed 10-question bank exactly (1 per
+// category, except characters:2 and theme:5) — every category's quota below equals that
+// category's ENTIRE pool size in the bank, so selectRoundQuestions's per-category
+// shuffle-and-slice can only ever select literally all of them, every round. This is what makes
+// "Main must use exactly these 10 questions, do not randomly replace the five mapped evidence
+// questions" true structurally: there is no larger pool to randomly substitute from.
 export const ROUND_CATEGORY_COUNTS: Record<QuestionCategory, number> = {
-  basic: 2,
+  basic: 1,
   characters: 2,
-  plot: 3,
-  poetry: 2,
-  theme: 1,
+  plot: 1,
+  poetry: 1,
+  theme: 5,
 }
 
 // Legacy 6-character room codes (letters/digits, excluding easily-confused O/I/L/0/1) — no
@@ -72,8 +78,11 @@ export const generateRoomCode = (random: () => number = Math.random): string =>
 export const calculateScore = (answers: Array<{ isCorrect: boolean }>): number =>
   answers.reduce((score, answer) => score + (answer.isCorrect ? 1 : 0), 0)
 
+// Narrowed to just the two fields actually needed (rather than the full Question shape) so this
+// same function also validates Story Recall answers (lib/learning.ts's RecallQuestion has no
+// category/difficulty/explanation) without a second, duplicated implementation.
 export const evaluateChoice = (
-  question: Question | undefined,
+  question: Pick<Question, 'choices' | 'correctChoiceId'> | undefined,
   selectedChoiceId: string,
 ): { valid: boolean; isCorrect: boolean } => ({
   valid: Boolean(question?.choices.some((choice) => choice.id === selectedChoiceId)),
@@ -100,11 +109,17 @@ export const validateJoinInput = (input: JoinInput): Partial<Record<keyof JoinIn
   return errors
 }
 
+// room.phase is the single source of truth for which stage a student belongs in — teacher and
+// student both resolve from it, so the two can never disagree about the current stage. Only
+// 'recall' overrides the status-based routing below: it is the one stage that runs while
+// status === 'waiting' but still belongs on the game screen rather than the lobby (the lobby
+// covers 'lobby' and 'teamSetup', the two waiting stages that genuinely have nothing to answer).
 export const resolveStudentRoute = (room: Room, player: Player): string => {
   const base = room.roomCode
   if (room.status === 'closed') return `/closed/${base}`
   if (room.winner) return `/congratulations/${base}`
   if (room.status === 'completed') return `/result/${base}`
+  if (room.phase === 'recall') return `/game/${base}`
   if (room.status === 'waiting') return `/lobby/${base}`
   if (player.submitted) return `/result/${base}`
   return `/game/${base}`

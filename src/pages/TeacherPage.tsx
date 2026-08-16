@@ -8,11 +8,13 @@ import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, us
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
+import { computeClassLearningSummary } from '../lib/learning'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
 import { friendlyError } from '../services'
 import { getTeacherSession, hasShownMagicPopup, markMagicPopupShown, saveTeacherSession } from '../services/sessionStorage'
-import { createEmptyMagicInventory, type Player } from '../types/game'
+import { recallQuestionsById } from '../data/recallQuestions'
+import { createEmptyMagicInventory, RECALL_QUESTION_COUNT, type Player } from '../types/game'
 
 type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | null
 
@@ -120,6 +122,21 @@ export const TeacherPage = () => {
   // {questionStartedAt: bossQuestionStartedAt, questionDurationSeconds: bossQuestionDurationSeconds,
   // questionClosedAt: null} object (boss has no early-close).
   const isBossPhase = roomState.data?.phase === 'boss'
+  // Learning Layer: mandatory individual "กู้ความทรงจำมัทนา" phase every round begins in —
+  // completion is purely a count derived from the already-subscribed players list (each
+  // player's own recallAnswers, teacher-readable the same way every other player field is).
+  // Stage comes off room.phase ('lobby' and 'recall' are distinct values, so no cross-check is
+  // needed to tell "waiting for students" apart from "Recall running"). The status === 'waiting'
+  // requirement serves a DIFFERENT purpose: 'closed' and 'completed' are terminal statuses that
+  // must outrank any pre-game stage. closeRoom only changes status — it leaves phase as-is — so
+  // without this, closing a room mid-Recall left the teacher stuck on a dead room's stage screen
+  // with the dashboard (and its "สร้างห้องใหม่" escape) still hidden behind it. This mirrors the
+  // precedence resolveStudentRoute already applies for students (closed/winner/completed are all
+  // checked before phase === 'recall').
+  const isPreGameStage = roomState.data?.status === 'waiting'
+  const isLobbyPhase = isPreGameStage && roomState.data?.phase === 'lobby'
+  const isRecallPhase = isPreGameStage && roomState.data?.phase === 'recall'
+  const recallCompletedCount = playersState.data.filter((player) => player.recallAnswers.length >= RECALL_QUESTION_COUNT).length
   const bossTiming = roomState.data ? { questionStartedAt: roomState.data.bossQuestionStartedAt, questionDurationSeconds: roomState.data.bossQuestionDurationSeconds, questionClosedAt: null } : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
   const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
@@ -165,6 +182,10 @@ export const TeacherPage = () => {
     [visiblePlayers, roomState.data?.teams, roomState.data?.questionIds, roomState.data?.currentRound, magicEventsState.data],
   )
   const teamStatsById = useMemo(() => new Map(teamStats.map((team) => [team.id, team])), [teamStats])
+  // Learning Layer: raw playersState.data (never visiblePlayers/magic-adjusted/team-scored) —
+  // computeClassLearningSummary only ever reads player.recallAnswers/answers isCorrect, per the
+  // spec's explicit "raw individual knowledge correctness only" requirement.
+  const classLearningSummary = useMemo(() => computeClassLearningSummary(playersState.data), [playersState.data])
   const currentQuestionStats = useMemo(
     () => computeCurrentQuestionStats(playersState.data, currentQuestionId),
     [playersState.data, currentQuestionId],
@@ -396,6 +417,23 @@ export const TeacherPage = () => {
       .catch((reason) => setError(friendlyError(reason)))
       .finally(() => { continuingBossRef.current = false; setContinuingBossBusy(false) })
   }
+
+  // Pre-game stage transitions, both teacher-driven and both using the same double-click ref
+  // guard shape as handleContinueAfterBoss. Neither is auto-fired by a polling effect — the
+  // teacher decides when enough students have joined, and when the class has finished Recall.
+  const advancingStageRef = useRef(false)
+  const [advancingStageBusy, setAdvancingStageBusy] = useState(false)
+  const runStageTransition = (transition: () => Promise<void>): void => {
+    if (advancingStageRef.current) return
+    advancingStageRef.current = true
+    setAdvancingStageBusy(true)
+    setError('')
+    void transition()
+      .catch((reason) => setError(friendlyError(reason)))
+      .finally(() => { advancingStageRef.current = false; setAdvancingStageBusy(false) })
+  }
+  const handleStartRecall = (): void => runStageTransition(() => service.startRecall(roomCode, teacherSessionId))
+  const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
 
   // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
   // magicEvents subscription the "ประวัติล่าสุด" log already reads, queues a popup for every
@@ -656,6 +694,20 @@ export const TeacherPage = () => {
     },
   } as const
 
+  // Room-level escape hatch for the two pre-team stage screens. Those screens replace the whole
+  // dashboard — including the controls aside that normally holds "ยุติห้อง" — so without this the
+  // teacher has no way to close or abandon a room once Recall has been reached. Deliberately only
+  // the room-lifecycle actions: "หยุดเกม" is a status==='playing' concept and simply doesn't apply
+  // while the room is still waiting.
+  const StageRoomControls = () => (
+    <div className="stage-room-controls">
+      <button type="button" className="copy-button" onClick={() => setConfirmAction('close')} disabled={busy}>ยุติห้อง</button>
+      {service.isDemo ? (
+        <button type="button" className="copy-button" onClick={() => void createRoom()} disabled={busy}>สร้างห้องทดสอบใหม่</button>
+      ) : null}
+    </div>
+  )
+
   const currentDialog = confirmAction ? dialogContent[confirmAction] : null
   const broadcastMode = roomState.data?.status === 'playing'
   const finalMode = roomState.data?.status === 'completed' || roomState.data?.status === 'closed'
@@ -664,15 +716,28 @@ export const TeacherPage = () => {
   return (
     <ScenePage compact className={broadcastMode ? 'teacher-broadcast-mode' : finalMode ? 'teacher-final-page' : ''}>
       <BrandHeader backTo="/" />
-      <div className="teacher-shell mx-auto w-full max-w-7xl flex-1 px-5 pb-10 pt-4 sm:px-8">
-        <div className="teacher-intro mb-7 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="eyebrow">ศูนย์บัญชาการครู</p>
-            <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">ควบคุมภารกิจ</h1>
-            <p className="mt-2 text-[#cfc7bb]">สร้างห้อง จัดทีม ติดตามทุกคน และเริ่มรอบพร้อมกันจากหน้าจอนี้</p>
+      {/* The pre-team stages render one self-contained screen, so the shell's generous bottom
+          padding (sized for the long scrolling dashboard) is trimmed — without it the page
+          overflows by exactly that padding on a 768px-tall iPad landscape viewport. */}
+      <div className={`teacher-shell mx-auto w-full max-w-7xl flex-1 px-5 pt-4 sm:px-8 ${isLobbyPhase || isRecallPhase ? 'teacher-shell-stage' : 'pb-10'}`}>
+        {/* Compact top branding for the dedicated single-viewport Recall screen: the full hero
+            header (big heading + descriptive subtitle) collapses to one line, so branding + room
+            bar + Recall view all fit one viewport together with no scrolling. */}
+        {isRecallPhase ? (
+          <div className="teacher-intro-compact mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="eyebrow m-0">ศูนย์บัญชาการครู · ควบคุมภารกิจ</p>
+            {service.isDemo ? <span className="demo-mode-pill"><i />โหมดสาธิต</span> : <span className="live-mode-pill"><i />Firebase realtime</span>}
           </div>
-          {service.isDemo ? <span className="demo-mode-pill"><i />โหมดสาธิต</span> : <span className="live-mode-pill"><i />Firebase realtime</span>}
-        </div>
+        ) : (
+          <div className="teacher-intro mb-7 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="eyebrow">ศูนย์บัญชาการครู</p>
+              <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">ควบคุมภารกิจ</h1>
+              <p className="mt-2 text-[#cfc7bb]">สร้างห้อง จัดทีม ติดตามทุกคน และเริ่มรอบพร้อมกันจากหน้าจอนี้</p>
+            </div>
+            {service.isDemo ? <span className="demo-mode-pill"><i />โหมดสาธิต</span> : <span className="live-mode-pill"><i />Firebase realtime</span>}
+          </div>
+        )}
 
         {!roomCode ? (
           <section className="glass-panel mx-auto mt-10 max-w-2xl p-7 text-center sm:p-10">
@@ -709,7 +774,9 @@ export const TeacherPage = () => {
               <div className="grid grid-cols-2 gap-5 sm:flex sm:gap-8">
                 <div><small>สถานะ</small><StatusPill status={roomState.data.status} /></div>
                 <div><small>รอบที่</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.currentRound}</strong></div>
-                {roomState.data.status === 'playing' && isBossPhase ? (
+                {isRecallPhase ? (
+                  <div><small>ระยะ</small><strong className="block text-2xl text-[#f2d58d]">กู้ความทรงจำ ({recallCompletedCount}/{sortedPlayers.length})</strong></div>
+                ) : roomState.data.status === 'playing' && isBossPhase ? (
                   <>
                     <div><small>ศึกด่านชิงมนตรา</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.bossQuestionIndex + 1}/3</strong></div>
                     <div><small>{bossRevealRemainingMs > 0 ? 'กำลังแสดงผล' : 'เวลาคงเหลือ'}</small><strong className="block text-2xl text-[#f2d58d]">{bossRevealRemainingMs > 0 ? formatCountdown(bossRevealRemainingMs) : formatCountdown(bossRemainingMs)}</strong></div>
@@ -726,6 +793,94 @@ export const TeacherPage = () => {
             </section>
 
             {(error || (notice && !broadcastMode && !finalMode)) ? <div className={error ? 'error-message mt-4' : 'success-message mt-4'} role="status">{error || notice}</div> : null}
+
+            {/* Learning Layer teacher UX fix: while phase === 'recall', the normal long dashboard
+                (scoreboard, team setup, magic history — everything below) is hidden entirely in
+                favor of this dedicated single-screen control view, so the teacher never has to
+                scroll to see "how many students are done" or to start Main. Three states, purely
+                derived from already-existing data (sortedPlayers.length / recallCompletedCount /
+                classLearningSummary) — no new Recall scoring or data logic. */}
+            {/* Stage 'lobby' — students join as individuals, no team concept is presented at all
+                (team count deliberately isn't offered here; it belongs to the teamSetup stage,
+                two stages later). The teacher decides when enough students have arrived. */}
+            {isLobbyPhase ? (
+              <section className="recall-command-view" aria-live="polite">
+                <p className="eyebrow">ขั้นที่ 1 · รวมผู้เรียน</p>
+                <h2 className="recall-command-title">รอนักเรียนเข้าร่วม</h2>
+                <p className="recall-command-count">{sortedPlayers.length} คน</p>
+                <p className="recall-command-supporting">
+                  ส่งรหัสห้อง <strong className="text-[#f2d58d]">{roomCode}</strong> ให้นักเรียน รายชื่อจะขึ้นที่นี่แบบเรียลไทม์ — ยังไม่ต้องจัดทีมในขั้นนี้
+                </p>
+                {sortedPlayers.length > 0 ? (
+                  <ul className="recall-player-chips" aria-label="ผู้เข้าร่วม">
+                    {sortedPlayers.map((player) => (
+                      <li key={player.id} className="recall-player-chip"><span>{player.displayName}</span></li>
+                    ))}
+                  </ul>
+                ) : null}
+                <button
+                  type="button"
+                  className="primary-button recall-start-main-button mt-6"
+                  onClick={handleStartRecall}
+                  disabled={advancingStageBusy || sortedPlayers.length === 0}
+                >
+                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มกู้ความทรงจำ'}
+                </button>
+                {sortedPlayers.length === 0 ? (
+                  <p className="recall-command-hint">ต้องมีอย่างน้อย 1 คนจึงจะเริ่มได้</p>
+                ) : null}
+                <StageRoomControls />
+              </section>
+            ) : null}
+
+            {/* Stage 'recall' — one dedicated viewport. Deliberately shows no teams, captain,
+                magic, team scores, or Main controls: none of those concepts exist yet. */}
+            {isRecallPhase ? (
+              <section className="recall-command-view" aria-live="polite">
+                <p className="eyebrow">ขั้นที่ 2 · กิจกรรมรายบุคคล</p>
+                <h2 className="recall-command-title">กู้ความทรงจำมัทนา</h2>
+                {recallCompletedCount < sortedPlayers.length ? (
+                  <>
+                    <p className="recall-command-status">กำลังรื้อฟื้นเรื่องราว</p>
+                    <p className="recall-command-count">เสร็จแล้ว {recallCompletedCount} / {sortedPlayers.length} คน</p>
+                    <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={recallCompletedCount}>
+                      <i style={{ width: `${sortedPlayers.length > 0 ? (recallCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="recall-command-status recall-command-status-done">ทุกคนกู้ความทรงจำเรียบร้อยแล้ว</p>
+                    <p className="recall-command-count">{recallCompletedCount} / {sortedPlayers.length} คน</p>
+                    <div className="recall-command-progress-bar recall-command-progress-bar-full">
+                      <i style={{ width: '100%' }} />
+                    </div>
+                    <p className="recall-command-baseline">Baseline ของห้อง: <strong>{classLearningSummary.baselinePercent.toFixed(0)}%</strong></p>
+                  </>
+                )}
+                {/* Compact per-player progress — the "this is still an individual phase" signal,
+                    and what keeps this screen from reading as empty while students work. */}
+                <ul className="recall-player-chips" aria-label="ความคืบหน้ารายบุคคล">
+                  {sortedPlayers.map((player) => {
+                    const done = player.recallAnswers.length >= RECALL_QUESTION_COUNT
+                    return (
+                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
+                        <span>{player.displayName}</span>
+                        <b>{player.recallAnswers.length}/{RECALL_QUESTION_COUNT}</b>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <button
+                  type="button"
+                  className="primary-button recall-start-main-button mt-6"
+                  onClick={handleStartTeamSetup}
+                  disabled={advancingStageBusy || !(sortedPlayers.length > 0 && recallCompletedCount === sortedPlayers.length)}
+                >
+                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'จัดทีมและเตรียมเกม'}
+                </button>
+                <StageRoomControls />
+              </section>
+            ) : null}
 
             {/* Item 6 follow-up: replaces the old popup modal. While bossAwaitingContinue is
                 true, this prominent inline screen — the same BossResultDetails content the
@@ -762,6 +917,13 @@ export const TeacherPage = () => {
               </p>
             ) : null}
 
+            {/* The entire normal dashboard body (podium, learning summary, scoreboard, team
+                setup, magic history) is hidden during the two pre-team stages — the dedicated
+                single-viewport screen above is the only thing shown, so there is nothing left
+                below it to force scrolling, and no team concept is presented before Recall is
+                done. It returns in full, unchanged, at the 'teamSetup' stage. */}
+            {!isLobbyPhase && !isRecallPhase ? (
+              <>
             {finalMode && teamStats.length > 0 ? (
               <section className="teacher-victory-stage" aria-labelledby="victory-stage-title">
                 <div className="victory-fireworks" aria-hidden="true"><i /><i /><i /><i /></div>
@@ -795,6 +957,39 @@ export const TeacherPage = () => {
                     </div>
                   ) : null}
                 </div>
+              </section>
+            ) : null}
+
+            {/* Learning Layer: keeps the existing competitive podium/scoreboard as the primary
+                result — this is additional, appended below it, never replacing it. */}
+            {finalMode ? (
+              <section className="learning-summary-panel glass-panel mt-6 p-5" aria-label="สรุปการเรียนรู้ของห้อง">
+                <p className="eyebrow">สรุปการเรียนรู้ (Learning Summary)</p>
+                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">กู้ความทรงจำ vs เข้าใจระหว่างภารกิจ</h2>
+                <dl className="learning-summary-grid mt-4">
+                  <div><dt>Baseline ของห้อง</dt><dd>{classLearningSummary.baselinePercent.toFixed(0)}%</dd></div>
+                  <div><dt>In-game Evidence ของห้อง</dt><dd>{classLearningSummary.inGameEvidencePercent.toFixed(0)}%</dd></div>
+                  <div>
+                    <dt>Learning Gain</dt>
+                    <dd className={classLearningSummary.learningGainPercent >= 0 ? 'learning-gain-positive' : 'learning-gain-negative'}>
+                      {classLearningSummary.learningGainPercent >= 0 ? '+' : ''}{classLearningSummary.learningGainPercent.toFixed(0)}%
+                    </dd>
+                  </div>
+                </dl>
+                <div className="learning-summary-concepts mt-4">
+                  {classLearningSummary.concepts.map((concept) => (
+                    <div key={concept.conceptId} className="learning-summary-concept-row">
+                      <span className="learning-summary-concept-label">{recallQuestionsById.get(concept.conceptId)?.label ?? concept.conceptId}</span>
+                      <span className="learning-summary-concept-stat">กู้ความทรงจำ {concept.recallCorrectCount}/{concept.totalStudents}</span>
+                      <span className="learning-summary-concept-stat">Main {concept.mainCorrectCount}/{concept.totalStudents}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-3 text-sm text-[#d8d1c5]">
+                  แนวคิดที่เข้าใจดีที่สุด: <strong>{classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? classLearningSummary.strongestConceptId : '-'}</strong>
+                  {' · '}
+                  แนวคิดที่ควรทบทวนเพิ่ม: <strong>{classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? classLearningSummary.weakestConceptId : '-'}</strong>
+                </p>
               </section>
             ) : null}
 
@@ -1176,6 +1371,8 @@ export const TeacherPage = () => {
                   })}
                 </ul>
               </section>
+            ) : null}
+              </>
             ) : null}
           </>
         )}
