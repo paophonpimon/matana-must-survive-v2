@@ -16,7 +16,7 @@ export const HomePage = () => (
         so breakpoints can move/scale it without shrinking the copy or the actions. */}
     <img
       className="home-characters"
-      src="/assets/home/home-characters.png"
+      src="/assets/home/home-cast.png"
       alt="ตัวละครจากเรื่องมัทนะพาธา"
     />
 

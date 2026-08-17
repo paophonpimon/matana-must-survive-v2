@@ -1177,15 +1177,17 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .home-characters {
   position: absolute;
   z-index: 2;
-  right: -2%;
+  /* Flush right. The art carries only ~0.9% transparent margin on that edge, so any negative
+     offset here would crop the outer figure rather than empty space. */
+  right: 0;
   /* Starts below the centred top banner so the tallest crown never rises into that text. */
   top: clamp(2.2rem, 7dvh, 4rem);
   /* Width is the primary constraint, not height. Sizing by height alone made the layer grow wider
-     on taller windows and march left into the logo (at 1440x900 it overlapped by ~84px); the 66vw
-     cap keeps clear negative space around the logo at every aspect ratio. The 132dvh term only
+     on taller windows and march left into the logo (at 1440x900 it overlapped by ~84px); the 60vw
+     cap keeps clear negative space around the logo at every aspect ratio. The 111dvh term only
      binds on unusually short/wide screens, where it preserves the half-body crop. Height stays
      `auto` so the intrinsic aspect ratio is used verbatim — the art can never be distorted. */
-  width: min(66vw, 132dvh);
+  width: min(60vw, 111dvh);
   height: auto;
   /* The global preflight `img { max-width: 100% }` would otherwise clamp this back to its box. */
   max-width: none;
@@ -1405,16 +1407,17 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
      is driven by width here (not height) so all three characters stay within the narrow viewport;
      the lower body falls behind the bottom-weighted scrim and the copy rather than off-screen. */
   .home-characters {
-    right: -2%;
-    top: 3rem;
+    right: 0;
+    top: 4rem;
     bottom: auto;
-    width: 92%;
+    width: 96%;
     height: auto;
     opacity: 0.34;
     /* Stacked layouts put the copy on top of the artwork, so the group is faded out above the
-       copy column instead of sitting behind it — that is what keeps the logo readable here. */
-    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 52%);
-    mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 52%);
+       copy column instead of sitting behind it — that is what keeps the logo readable here. The
+       stops are a fraction of the layer's own height, so they track this asset's tall 2:3 ratio. */
+    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 16%, transparent 33%);
+    mask-image: linear-gradient(180deg, #000 0%, #000 16%, transparent 33%);
   }
   .home-scrim {
     background:
@@ -1422,7 +1425,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   }
 }
 @media (max-width: 640px) {
-  .home-characters { right: -6%; top: -2dvh; width: 108%; opacity: 0.28; }
+  /* Tighter tracking keeps the banner on one line at phone widths; the art then clears it. */
+  .home-eyebrow { letter-spacing: 0.12em; font-size: 0.82rem; }
+  .home-characters { right: 0; top: 4.25rem; width: 104%; opacity: 0.28; }
   .home-copy { --home-logo-w: min(100%, 22rem); }
   .home-actions { gap: 0.9rem; }
   .home-cta-primary { flex: 1 1 100%; }
@@ -1434,6 +1439,408 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 @media (max-height: 660px) and (min-width: 1025px) {
   .home-copy { --home-logo-w: min(100%, 18rem); }
+}
+
+/* ================= Student Join =================================================
+   Two-column composition on the approved Home background: compact brand at top-left, home link at
+   top-right, intro copy left, player form right. Deep navy dominant, crimson CTA, restrained gold
+   hairlines, rose as the only floral motif. One surface only — the form panel — so nothing here
+   nests a card inside a card. */
+.join-page {
+  /* The single floral motif used on this screen: a small rose, drawn as SVG rather than shipped as
+     artwork, reused by the intro divider and the form's corner marks. */
+  --rose-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c98a97' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M12 8.4a2 2 0 1 0 2 2'/%3E%3Cpath d='M14 10.4a3.4 3.4 0 1 1-3.4-3.4'/%3E%3Cpath d='M10.6 7a5 5 0 1 1-4.5 6.8'/%3E%3Cpath d='M6.6 12.6c-1.3 2.2-.5 4.7 1.7 5.8'/%3E%3Cpath d='M17.2 9.6c1.5 1.9 1.2 4.6-.7 6'/%3E%3C/svg%3E");
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  isolation: isolate;
+  overflow-x: clip;
+  background: #080b23;
+  color: #f3ece0;
+}
+.join-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 45%;
+}
+.join-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(90deg, rgba(6, 9, 32, 0.82) 0%, rgba(7, 10, 34, 0.6) 42%, rgba(8, 11, 35, 0.72) 100%),
+    linear-gradient(0deg, rgba(5, 8, 26, 0.72) 0%, rgba(6, 9, 30, 0.2) 45%, rgba(6, 9, 30, 0.5) 100%);
+}
+
+/* ---- header ---- */
+.join-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: clamp(1rem, 2.4vh, 1.75rem) clamp(1.25rem, 4vw, 3.5rem);
+}
+.join-brand { display: inline-flex; align-items: center; text-decoration: none; }
+.join-brand img {
+  display: block;
+  width: clamp(6.5rem, 10.5vw, 9.5rem);
+  height: auto;
+  max-width: none;
+  filter: drop-shadow(0 0.4rem 1.4rem rgba(0, 0, 0, 0.55));
+}
+.join-home-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  color: #e4d9c7;
+  font-size: clamp(0.95rem, 1.05vw, 1.08rem);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 180ms ease, background 180ms ease;
+}
+.join-home-link svg { width: 1.35em; height: 1.35em; }
+@media (hover: hover) {
+  .join-home-link:hover { color: #f6ecd9; background: rgba(12, 16, 44, 0.5); }
+}
+.join-home-link:focus-visible { outline: 2px solid #c9a253; outline-offset: 2px; }
+
+/* ---- layout ---- */
+.join-layout {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(2rem, 5vw, 5rem);
+  width: 100%;
+  max-width: 92rem;
+  margin: 0 auto;
+  padding: clamp(1rem, 3vh, 2.5rem) clamp(1.25rem, 4vw, 3.5rem) clamp(2rem, 5vh, 3.5rem);
+}
+
+/* ---- left intro ---- */
+.join-intro { max-width: 34rem; }
+/* Hairline rule trailing the eyebrow, echoing the reference's thin gold divider. */
+.join-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0;
+  color: #e0c179;
+  font-size: clamp(0.95rem, 1.15vw, 1.15rem);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+.join-eyebrow::after {
+  content: '';
+  flex: 1;
+  max-width: 8rem;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(201, 162, 83, 0.55), transparent);
+}
+.join-title {
+  margin: clamp(0.9rem, 2.2vh, 1.5rem) 0 0;
+  color: #f0d9a4;
+  font-size: clamp(2.6rem, 4.6vw, 4.6rem);
+  font-weight: 700;
+  line-height: 1.15;
+  text-shadow: 0 0.4rem 1.6rem rgba(4, 6, 22, 0.75);
+}
+/* Rose divider: the single floral motif on this screen. */
+.join-title::after {
+  content: '';
+  display: block;
+  height: 1.5rem;
+  margin-top: clamp(0.9rem, 2vh, 1.4rem);
+  background:
+    linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.5) 22%, transparent 44%) center/100% 1px no-repeat,
+    var(--rose-mark) center/1.5rem 1.5rem no-repeat;
+}
+.join-lede {
+  max-width: 30rem;
+  margin: clamp(1.1rem, 2.6vh, 1.9rem) 0 0;
+  color: #e2d8c9;
+  font-size: clamp(1.05rem, 1.3vw, 1.3rem);
+  line-height: 1.85;
+}
+
+/* ---- form panel ---- */
+.join-form {
+  position: relative;
+  width: 100%;
+  max-width: 40rem;
+  margin-left: auto;
+  border: 1px solid rgba(201, 162, 83, 0.45);
+  border-radius: 1.5rem;
+  padding: clamp(1.35rem, 2.6vw, 2.35rem);
+  background: linear-gradient(165deg, rgba(16, 20, 54, 0.9), rgba(9, 12, 36, 0.94));
+  box-shadow: 0 1.6rem 4rem rgba(0, 0, 0, 0.5);
+}
+/* Inner gold hairline — a frame, not a second card: it has no background of its own. */
+.join-form::before {
+  content: '';
+  position: absolute;
+  inset: 0.5rem;
+  border: 1px solid rgba(201, 162, 83, 0.22);
+  border-radius: 1.1rem;
+  pointer-events: none;
+}
+/* Rose corner marks, mirrored across the panel. */
+.join-form::after {
+  content: '';
+  position: absolute;
+  inset: 1.15rem;
+  background-image: var(--rose-mark), var(--rose-mark), var(--rose-mark), var(--rose-mark);
+  background-repeat: no-repeat;
+  background-size: 1.6rem 1.6rem;
+  background-position: left top, right top, left bottom, right bottom;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.join-form-eyebrow {
+  margin: 0;
+  color: rgba(205, 176, 116, 0.85);
+  font-size: clamp(0.78rem, 0.85vw, 0.88rem);
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.join-form-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.75rem, 2vw, 1.35rem);
+  margin: 0.45rem 0 0;
+  color: #f2dcaa;
+  font-size: clamp(1.5rem, 2.05vw, 2rem);
+  font-weight: 700;
+}
+.join-form-title::before,
+.join-form-title::after {
+  content: '';
+  width: clamp(2rem, 5vw, 4.5rem);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.6), transparent);
+}
+
+.join-demo { width: 100%; margin-top: 1.25rem; text-align: left; }
+
+.join-fields { display: grid; gap: clamp(0.8rem, 1.9vh, 1.35rem); margin-top: clamp(1.1rem, 2.6vh, 1.8rem); }
+.join-field > span {
+  margin-bottom: 0.55rem;
+  color: #efe4d2;
+  font-size: clamp(1rem, 1.15vw, 1.15rem);
+  font-weight: 600;
+}
+.join-input-shell { position: relative; display: block; }
+.join-input-icon {
+  position: absolute;
+  top: 50%;
+  left: 1rem;
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  color: #6d6a68;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.join-input-icon svg { width: 100%; height: 100%; }
+/* Divider between the mark and the typed value, as in the reference. */
+.join-input-shell::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 3.2rem;
+  width: 1px;
+  height: 1.5rem;
+  background: rgba(0, 0, 0, 0.22);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+/* Warm cream input surfaces. Scoped to .join-field so no other screen's fields change. */
+.join-field input {
+  width: 100%;
+  min-height: 3.6rem;
+  border: 1px solid rgba(120, 100, 70, 0.35);
+  border-radius: 0.85rem;
+  padding: 0 1.1rem 0 4rem;
+  color: #241d2c;
+  font-size: clamp(1.02rem, 1.2vw, 1.18rem);
+  background: linear-gradient(180deg, #f4ecdd, #e9dfcd);
+  box-shadow: inset 0 1px 3px rgba(58, 44, 22, 0.16);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.join-field input::placeholder { color: #857c72; }
+.join-field input:hover { border-color: rgba(150, 122, 74, 0.5); }
+.join-field input:focus {
+  border-color: #b8913f;
+  background: linear-gradient(180deg, #f8f1e4, #efe6d5);
+  outline: none;
+  box-shadow: inset 0 1px 3px rgba(58, 44, 22, 0.12), 0 0 0 3px rgba(201, 162, 83, 0.22);
+}
+.join-field input[aria-invalid='true'] { border-color: #b3454b; }
+
+/* Room code stays dark and emphasised — it is the value the teacher reads aloud. */
+.join-field-code .join-input-icon { color: #c9a253; }
+.join-field-code .join-input-shell::after { background: rgba(201, 162, 83, 0.3); }
+.join-field-code input {
+  min-height: 4rem;
+  border-color: rgba(201, 162, 83, 0.5);
+  color: #f6e7c4;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: clamp(1.25rem, 1.7vw, 1.6rem);
+  letter-spacing: 0.28em;
+  background: linear-gradient(180deg, #0a0c22, #070917);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.55), 0 0 1.4rem rgba(180, 90, 110, 0.16);
+}
+.join-field-code input::placeholder { color: #5c5668; letter-spacing: 0.28em; }
+.join-field-code input:focus {
+  border-color: #e0bb72;
+  background: linear-gradient(180deg, #0c0f28, #08091c);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 0 3px rgba(201, 162, 83, 0.22);
+}
+
+.join-error { margin-top: 1.25rem; }
+
+/* ---- CTA ---- */
+/* Same crimson-and-gold language as the Home primary action, rebuilt here at full width with its
+   own selector so Home is not touched. Pure CSS — no image asset. */
+.join-submit {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 4rem;
+  margin-top: clamp(1.2rem, 2.8vh, 2rem);
+  border: 1px solid #b8913f;
+  border-radius: 999px;
+  color: #fdf1dc;
+  font-size: clamp(1.24rem, 1.55vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow: 0 1px 3px rgba(52, 4, 12, 0.7);
+  background-image:
+    linear-gradient(180deg, rgba(255, 226, 170, 0.28) 0%, rgba(255, 210, 150, 0.05) 26%, transparent 52%),
+    linear-gradient(180deg, #b3283a 0%, #8e1a29 42%, #6c111e 78%, #530a16 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(228, 195, 124, 0.28),
+    inset 0 2px 1px rgba(255, 232, 186, 0.34),
+    inset 0 -6px 12px rgba(52, 4, 14, 0.5),
+    0 0.75rem 1.9rem rgba(0, 0, 0, 0.5);
+  transition: background-image 200ms ease, border-color 200ms ease, transform 140ms ease, box-shadow 200ms ease;
+}
+.join-submit::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: -0.5rem;
+  border-radius: 999px;
+  background: radial-gradient(ellipse at center, rgba(214, 173, 94, 0.5) 0%, rgba(214, 173, 94, 0.16) 45%, transparent 72%);
+  filter: blur(7px);
+  opacity: 0.55;
+  animation: home-cta-aura 4.2s ease-in-out infinite;
+}
+@media (hover: hover) {
+  .join-submit:not(:disabled):hover {
+    border-color: #e0bb72;
+    background-image:
+      linear-gradient(180deg, rgba(255, 232, 182, 0.34) 0%, rgba(255, 214, 156, 0.07) 26%, transparent 52%),
+      linear-gradient(180deg, #c22d40 0%, #9c1e2e 42%, #771322 78%, #5c0c18 100%);
+  }
+  .join-submit:not(:disabled):hover::before { opacity: 0.95; animation-duration: 3s; }
+}
+.join-submit:not(:disabled):active {
+  transform: translateY(1px);
+  border-color: #9c7a37;
+  background-image: linear-gradient(180deg, #7a1523 0%, #5e0e1b 55%, #470912 100%);
+  box-shadow: inset 0 0 0 1px rgba(200, 168, 104, 0.22), inset 0 3px 8px rgba(30, 2, 8, 0.62), 0 0.2rem 0.6rem rgba(0, 0, 0, 0.4);
+}
+.join-submit:not(:disabled):active::before { opacity: 0.2; animation: none; }
+.join-submit:disabled {
+  border-color: rgba(140, 116, 66, 0.45);
+  background-image: linear-gradient(180deg, #5a2029 0%, #4a1a22 100%);
+  color: rgba(253, 243, 226, 0.6);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.join-submit:disabled::before { display: none; }
+.join-submit:focus-visible { outline: 2px solid #d9b86a; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .join-submit::before { animation: none; opacity: 0.6; }
+}
+
+.join-back-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.7rem, 1.8vw, 1.2rem);
+  min-height: 2.75rem;
+  margin-top: clamp(0.85rem, 2vh, 1.35rem);
+  color: #cfc4b2;
+  font-size: clamp(0.98rem, 1.1vw, 1.1rem);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 180ms ease;
+}
+.join-back-link::before,
+.join-back-link::after {
+  content: '';
+  width: clamp(1.5rem, 3.5vw, 3rem);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.45), transparent);
+}
+@media (hover: hover) { .join-back-link:hover { color: #f3ece0; } }
+.join-back-link:focus-visible { outline: 2px solid #c9a253; outline-offset: 3px; }
+
+/* ---- responsive ---- */
+/* Shorter desktops (a 1280x720 projector, or 16:9 with browser chrome) compress the vertical
+   rhythm rather than scrolling — the whole form must stay reachable without a scroll. Touch
+   targets stay at or above 52px. */
+@media (min-width: 1025px) and (max-height: 840px) {
+  .join-header { padding-block: 0.6rem; }
+  .join-layout { padding-top: 0.75rem; padding-bottom: 1.25rem; }
+  .join-form { padding: clamp(1.1rem, 1.9vw, 1.7rem); }
+  .join-form-title { font-size: clamp(1.35rem, 1.7vw, 1.7rem); }
+  .join-brand img { width: clamp(6rem, 8.5vw, 8rem); }
+  .join-title { font-size: clamp(2.2rem, 3.6vw, 3.3rem); }
+  .join-lede { font-size: clamp(1rem, 1.15vw, 1.14rem); line-height: 1.7; }
+  .join-field input { min-height: 3.3rem; }
+  .join-field-code input { min-height: 3.6rem; }
+  .join-submit { min-height: 3.6rem; }
+}
+/* Stack only once the two columns can no longer both hold their measure. Hierarchy is preserved:
+   intro first, then the form; touch targets and margins are unchanged. */
+@media (max-width: 1024px) {
+  .join-layout {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: clamp(1.75rem, 4vh, 2.75rem);
+    max-width: 44rem;
+  }
+  .join-intro { max-width: none; }
+  .join-title { font-size: clamp(2.4rem, 6.2vw, 3.4rem); }
+  .join-form { max-width: none; margin-left: 0; }
+}
+@media (max-width: 640px) {
+  .join-header { padding-inline: 1.25rem; }
+  .join-brand img { width: 7rem; }
+  .join-home-link span { display: none; }
+  .join-home-link { padding: 0.5rem; }
+  .join-form::after { inset: 0.9rem; background-size: 1.2rem 1.2rem; }
+  .join-field input { padding-left: 3.6rem; }
+  .join-input-shell::after { left: 2.9rem; }
 }
 
 /* ================= Teacher printable report (PDF via browser print) =================
