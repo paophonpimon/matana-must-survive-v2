@@ -1134,6 +1134,308 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .question-card-effect-badge { animation: none; }
 }
 
+/* ================= Home ==========================================================
+   Full-viewport composition built from the approved production assets. Deep navy/midnight indigo
+   dominates; muted rose is the single accent; gold appears only as a restrained border/hairline;
+   cream is used sparingly for text. Background, scrim, characters and logo are four independent
+   layers so each can be scaled or repositioned per breakpoint without shrinking the whole
+   composition. No panels or cards — the copy sits directly on the artwork. */
+.home-page {
+  position: relative;
+  min-height: 100dvh;
+  isolation: isolate;
+  overflow: hidden;
+  background: #080b23;
+  color: #f3ece0;
+}
+.home-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  /* Cover is intentional: the background may crop safely at any aspect ratio. */
+  object-fit: cover;
+  object-position: 50% 45%;
+}
+/* Legibility scrim, weighted to the left where the copy lives so the artwork on the right stays
+   clear. Deep navy rather than neutral black to keep the palette consistent. */
+.home-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(100deg, rgba(6, 9, 32, 0.9) 0%, rgba(7, 10, 34, 0.72) 34%, rgba(8, 11, 35, 0.24) 60%, rgba(8, 11, 35, 0.05) 100%),
+    linear-gradient(0deg, rgba(6, 9, 30, 0.55) 0%, transparent 38%);
+}
+/* Half-body composition. The asset is a full-body group on a transparent background (figures span
+   8–95% of its width, head to base of its height). Rather than crop the file, the layer is scaled
+   to ~158dvh and pushed below the fold, so the viewport shows the top ~63% — head to waist/upper
+   thigh. `contain` guarantees the aspect ratio is never distorted; the overflow is clipped by
+   .home-page. The -3% right offset only consumes the asset's own transparent right margin (~4.6%),
+   so all three characters stay fully visible. */
+.home-characters {
+  position: absolute;
+  z-index: 2;
+  right: -2%;
+  /* Starts below the centred top banner so the tallest crown never rises into that text. */
+  top: clamp(2.2rem, 7dvh, 4rem);
+  /* Width is the primary constraint, not height. Sizing by height alone made the layer grow wider
+     on taller windows and march left into the logo (at 1440x900 it overlapped by ~84px); the 66vw
+     cap keeps clear negative space around the logo at every aspect ratio. The 132dvh term only
+     binds on unusually short/wide screens, where it preserves the half-body crop. Height stays
+     `auto` so the intrinsic aspect ratio is used verbatim — the art can never be distorted. */
+  width: min(66vw, 132dvh);
+  height: auto;
+  /* The global preflight `img { max-width: 100% }` would otherwise clamp this back to its box. */
+  max-width: none;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
+.home-layout {
+  position: relative;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: 42% 58%;
+  align-items: center;
+  min-height: 100dvh;
+  padding-inline: clamp(1.5rem, 5vw, 5.5rem);
+  padding-block: clamp(1.5rem, 4vh, 3rem);
+}
+/* One shared vertical rhythm for the column: logo -(sm)- lede -(lg)- actions. The tight step keeps
+   the supporting line tucked under the logo; the wide step isolates the CTA as the action point. */
+.home-copy {
+  --home-gap-sm: clamp(0.7rem, 1.4vh, 1.1rem);
+  --home-gap-lg: clamp(1.85rem, 3.5vh, 2.7rem);
+  /* Single source for the logo's rendered width. The lede/CTA column is sized to exactly this, and
+     the logo's transparent-padding compensation is derived from it, so one value keeps the block
+     centred on the logo at every breakpoint. */
+  --home-logo-w: min(100%, 28rem);
+  display: grid;
+  /* Centred on the logo rather than flush-left: the logo art is itself a centred composition, so a
+     left-aligned lede and button row read as skewed against it. */
+  justify-items: center;
+  gap: 0;
+  width: var(--home-logo-w);
+  max-width: 100%;
+  text-align: center;
+}
+
+/* Course label: a centred banner pinned to the top of the whole composition, above the character
+   layer. Sits outside .home-copy so it is not part of the left column's rhythm. */
+.home-eyebrow {
+  position: absolute;
+  z-index: 4;
+  top: clamp(1rem, 2.6dvh, 2rem);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 92vw;
+  margin: 0;
+  color: rgba(214, 185, 124, 0.92);
+  font-size: clamp(1rem, 1.25vw, 1.35rem);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  line-height: 1.5;
+  text-align: center;
+  text-shadow: 0 2px 10px rgba(4, 6, 22, 0.85);
+  text-transform: uppercase;
+}
+.home-logo-heading { margin: 0; }
+.home-logo {
+  display: block;
+  width: var(--home-logo-w);
+  /* The asset carries ~15% transparent padding below the artwork, which read as a 63px hole
+     between the title and the line under it. Pulling the box up by a fixed ratio of its own width
+     closes that phantom gap without touching the approved file. */
+  margin-bottom: calc(var(--home-logo-w) * -0.095);
+  height: auto;
+  /* A soft warm halo lifts the logo off the artwork without altering the asset itself. */
+  filter: drop-shadow(0 0.6rem 2.4rem rgba(0, 0, 0, 0.55));
+}
+/* Copy blocks stay inside 26rem: past that they would run under the enlarged character layer. */
+.home-lede {
+  max-width: 26rem;
+  margin: var(--home-gap-sm) 0 0;
+  color: #ece3d6;
+  font-size: clamp(1.28rem, 1.65vw, 1.6rem);
+  line-height: 1.6;
+}
+.home-lede strong { color: #e8b7bf; font-weight: 600; }
+
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: clamp(0.85rem, 1.6vw, 1.4rem);
+  margin-top: var(--home-gap-lg);
+}
+/* Primary: deep crimson surface with a refined gold border and a slow gold aura. Built entirely
+   from CSS (no image asset) so every state stays responsive. Dimension comes from a two-stop
+   crimson gradient plus inset gold highlight/shadow hairlines — deliberately matte, not glossy. */
+.home-cta-primary {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 4.1rem;
+  padding: 0 clamp(2.8rem, 4.6vw, 4.2rem);
+  border: 1px solid #b8913f;
+  border-radius: 999px;
+  /* Warm sheen across the top third, deepening to near-black crimson at the base — this is what
+     gives the surface its curvature without a glossy highlight. */
+  background-image:
+    linear-gradient(180deg, rgba(255, 226, 170, 0.28) 0%, rgba(255, 210, 150, 0.05) 26%, transparent 52%),
+    linear-gradient(180deg, #b3283a 0%, #8e1a29 42%, #6c111e 78%, #530a16 100%);
+  color: #fdf1dc;
+  font-size: clamp(1.24rem, 1.55vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  text-shadow: 0 1px 3px rgba(52, 4, 12, 0.7);
+  /* A fine gold ring inset just inside the border reads as chased metal rather than a plain
+     stroke; the dark inner shadow below it seats the surface into the ring. */
+  box-shadow:
+    inset 0 0 0 1px rgba(228, 195, 124, 0.28),
+    inset 0 2px 1px rgba(255, 232, 186, 0.34),
+    inset 0 -6px 12px rgba(52, 4, 14, 0.5),
+    0 0.75rem 1.9rem rgba(0, 0, 0, 0.5);
+  transition: background-image 200ms ease, border-color 200ms ease, transform 140ms ease, box-shadow 200ms ease;
+}
+/* The aura is a separate blurred layer behind the button so it can pulse without touching the
+   button's own shadow stack. Restrained on purpose: low opacity, large radius, slow cycle. */
+.home-cta-primary::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: -0.5rem;
+  border-radius: 999px;
+  background: radial-gradient(ellipse at center, rgba(214, 173, 94, 0.5) 0%, rgba(214, 173, 94, 0.16) 45%, transparent 72%);
+  filter: blur(7px);
+  opacity: 0.55;
+  animation: home-cta-aura 4.2s ease-in-out infinite;
+}
+@keyframes home-cta-aura {
+  0%, 100% { opacity: 0.4; transform: scale(0.985); }
+  50% { opacity: 0.85; transform: scale(1.03); }
+}
+/* Secondary: dark navy translucent with a restrained gold hairline. Deliberately flat — no glow,
+   no fill weight — so it never competes with the crimson-and-gold primary. */
+.home-cta-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3.5rem;
+  padding: 0 clamp(1.8rem, 2.8vw, 2.6rem);
+  border: 1px solid rgba(201, 162, 83, 0.38);
+  border-radius: 999px;
+  background: rgba(10, 14, 40, 0.5);
+  color: #e6dccd;
+  font-size: clamp(1.02rem, 1.2vw, 1.15rem);
+  font-weight: 600;
+  text-decoration: none;
+  backdrop-filter: blur(6px);
+  transition: border-color 200ms ease, background 200ms ease;
+}
+/* Teacher: plain text action, never a button shape. */
+.home-cta-text {
+  color: #cfc4b2;
+  font-size: clamp(1.02rem, 1.2vw, 1.15rem);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 0.2rem;
+  transition: color 200ms ease, border-color 200ms ease;
+}
+@media (hover: hover) {
+  .home-cta-primary:hover {
+    border-color: #e0bb72;
+    background-image:
+      linear-gradient(180deg, rgba(255, 232, 182, 0.34) 0%, rgba(255, 214, 156, 0.07) 26%, transparent 52%),
+      linear-gradient(180deg, #c22d40 0%, #9c1e2e 42%, #771322 78%, #5c0c18 100%);
+    box-shadow:
+      inset 0 0 0 1px rgba(238, 208, 143, 0.42),
+      inset 0 2px 1px rgba(255, 236, 197, 0.42),
+      inset 0 -6px 12px rgba(52, 4, 14, 0.45),
+      0 0.85rem 2.1rem rgba(0, 0, 0, 0.52);
+  }
+  .home-cta-primary:hover::before { opacity: 0.95; animation-duration: 3s; }
+  .home-cta-secondary:hover { border-color: rgba(201, 162, 83, 0.62); background: rgba(14, 19, 50, 0.66); }
+  .home-cta-text:hover { color: #f3ece0; border-bottom-color: rgba(201, 162, 83, 0.55); }
+}
+/* Pressed: the button sinks, the red darkens and the aura recedes. */
+.home-cta-primary:active {
+  transform: translateY(1px);
+  border-color: #9c7a37;
+  background-image: linear-gradient(180deg, #7a1523 0%, #5e0e1b 55%, #470912 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(200, 168, 104, 0.22),
+    inset 0 3px 8px rgba(30, 2, 8, 0.62),
+    0 0.2rem 0.6rem rgba(0, 0, 0, 0.4);
+}
+.home-cta-primary:active::before { opacity: 0.2; animation: none; }
+.home-cta-primary[aria-disabled='true'] {
+  border-color: rgba(140, 116, 66, 0.45);
+  background-image: linear-gradient(180deg, #5a2029 0%, #4a1a22 100%);
+  color: rgba(253, 243, 226, 0.55);
+  box-shadow: none;
+  pointer-events: none;
+}
+.home-cta-primary[aria-disabled='true']::before { display: none; }
+/* An animated aura is decorative; motion-sensitive users get the same colours, held still. */
+@media (prefers-reduced-motion: reduce) {
+  .home-cta-primary::before { animation: none; opacity: 0.6; }
+}
+.home-cta-primary:focus-visible,
+.home-cta-secondary:focus-visible,
+.home-cta-text:focus-visible { outline: 2px solid #d9b86a; outline-offset: 3px; }
+
+/* Tablet / narrow: the characters move behind the copy and recede rather than the whole
+   composition scaling down, so the CTA area stays large and readable. */
+@media (max-width: 1024px) {
+  .home-layout {
+    grid-template-columns: 1fr;
+    align-items: end;
+    padding-bottom: clamp(2rem, 6vh, 4rem);
+  }
+  .home-copy { --home-logo-w: min(100%, 30rem); }
+  /* Tablet stacks, so the group moves to the top of the screen and recedes behind the copy. Size
+     is driven by width here (not height) so all three characters stay within the narrow viewport;
+     the lower body falls behind the bottom-weighted scrim and the copy rather than off-screen. */
+  .home-characters {
+    right: -2%;
+    top: 3rem;
+    bottom: auto;
+    width: 92%;
+    height: auto;
+    opacity: 0.34;
+    /* Stacked layouts put the copy on top of the artwork, so the group is faded out above the
+       copy column instead of sitting behind it — that is what keeps the logo readable here. */
+    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 52%);
+    mask-image: linear-gradient(180deg, #000 0%, #000 30%, transparent 52%);
+  }
+  .home-scrim {
+    background:
+      linear-gradient(0deg, rgba(6, 9, 30, 0.94) 0%, rgba(7, 10, 34, 0.8) 42%, rgba(8, 11, 35, 0.35) 100%);
+  }
+}
+@media (max-width: 640px) {
+  .home-characters { right: -6%; top: -2dvh; width: 108%; opacity: 0.28; }
+  .home-copy { --home-logo-w: min(100%, 22rem); }
+  .home-actions { gap: 0.9rem; }
+  .home-cta-primary { flex: 1 1 100%; }
+}
+/* Short landscape (a projector at 16:9 with browser chrome) — keep everything on one screen
+   without shrinking the type: the logo gives up height instead. */
+@media (max-height: 800px) and (min-width: 1025px) {
+  .home-copy { --home-logo-w: min(100%, 23rem); }
+}
+@media (max-height: 660px) and (min-width: 1025px) {
+  .home-copy { --home-logo-w: min(100%, 18rem); }
+}
+
 /* ================= Teacher printable report (PDF via browser print) =================
    Hidden on screen; revealed only while printing. Thai shaping is left entirely to the browser's
    text engine, which is what keeps vowels/tone marks correctly stacked — no font embedding. */

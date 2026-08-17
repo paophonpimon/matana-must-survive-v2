@@ -1,30 +1,47 @@
 import { Link } from 'react-router-dom'
-import { ScenePage } from '../components/Layout'
 
+// Home deliberately does NOT use ScenePage: that wrapper layers a fallback gradient, a scene
+// overlay and a vignette tuned for the old hero art, which would fight the approved background.
+// Home owns its own stacking instead — background, scrim, characters and logo are each an
+// independent layer so they can be scaled and repositioned separately per breakpoint.
+//
+// Routes and actions are unchanged from the previous Home: /join for learners, /teacher for the
+// teacher. No game logic is touched here.
 export const HomePage = () => (
-  <ScenePage image="/images/hero-curse.png" imageAlt="ดอกกุหลาบต้องคำสาปท่ามกลางป่ารัตติกาล" imagePosition="50% 58%">
-    <div className="home-shell mx-auto flex min-h-dvh w-full max-w-7xl flex-col px-5 pb-[max(2rem,env(safe-area-inset-bottom))] pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-8">
-      <div className="home-ornament flex items-center justify-between text-[#eed7a2]">
-        <span className="ornament-line" aria-hidden="true">✦</span>
-        <p className="text-sm tracking-[0.22em]">วรรณคดีไทย · มัธยมศึกษาปีที่ ๕</p>
-        <span className="ornament-line" aria-hidden="true">✦</span>
-      </div>
-      <section className="home-content">
-        <div className="home-title-block">
-          <p className="eyebrow">ภารกิจแห่งรัตติกาล</p>
-          <h1 className="hero-title mt-3">มัทนา<br /><span>ต้องรอด</span></h1>
-        </div>
-        <div className="home-action-block">
-          <p className="max-w-xl text-lg leading-relaxed text-[#eee5d7] sm:text-xl">
-          ภารกิจคลายคำสาปจากวรรณคดีเรื่อง <strong className="font-medium text-[#f1ce7b]">มัทนะพาธา</strong>
-          </p>
-          <div className="mt-7 grid max-w-xl gap-3 sm:grid-cols-2">
-            <Link className="primary-button" to="/teacher"><span>สำหรับครู</span><span aria-hidden="true">→</span></Link>
-            <Link className="secondary-button" to="/join"><span>สำหรับผู้เรียน</span><span aria-hidden="true">→</span></Link>
-          </div>
-          <p className="mt-5 text-sm text-[#bdb5ac]">หนึ่งห้อง · สิบคำถาม · ทุกกลุ่มใช้เวลาเท่ากันและสรุปคะแนนพร้อมกันเมื่อจบรอบ</p>
+  <main className="home-page">
+    <img className="home-bg" src="/assets/home/home-bg.png" alt="" aria-hidden="true" />
+    <div className="home-scrim" aria-hidden="true" />
+
+    {/* Character artwork is its own positioned layer, not a background of the content column,
+        so breakpoints can move/scale it without shrinking the copy or the actions. */}
+    <img
+      className="home-characters"
+      src="/assets/home/home-characters.png"
+      alt="ตัวละครจากเรื่องมัทนะพาธา"
+    />
+
+    {/* The course label is a banner across the top of the composition rather than part of the
+        left column, so it reads as a header for the whole screen. */}
+    <p className="home-eyebrow">วรรณคดีไทย · มัธยมศึกษาปีที่ ๕</p>
+
+    <div className="home-layout">
+      <section className="home-copy">
+        {/* The approved logo carries the title artwork; the heading stays in the DOM for
+            screen readers and document outline without visually duplicating it. */}
+        <h1 className="home-logo-heading">
+          <span className="sr-only">มัทนาต้องรอด — ภารกิจคลายคำสาป</span>
+          <img className="home-logo" src="/assets/home/home-logo.png" alt="" aria-hidden="true" />
+        </h1>
+
+        <p className="home-lede">
+          ภารกิจคลายคำสาปจากวรรณคดีเรื่อง <strong>มัทนะพาธา</strong>
+        </p>
+
+        <div className="home-actions">
+          <Link className="home-cta-primary" to="/join">เริ่มเล่น</Link>
+          <Link className="home-cta-text" to="/teacher">สำหรับครู →</Link>
         </div>
       </section>
     </div>
-  </ScenePage>
+  </main>
 )
