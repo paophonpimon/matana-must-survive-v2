@@ -1,7 +1,7 @@
-// Learning Layer: "กู้ความทรงจำมัทนา" (Story Recall) — the mandatory individual phase every round
+// Learning Layer: "ทบทวนเรื่องราว" (Story Recall) — the mandatory individual phase every round
 // begins with, before the competitive Main game. Exactly 5 items, each mapped 1:1 to a concept
 // id and to the specific Main question (see data/questions.ts) that later serves as "in-game
-// evidence" for the same concept — see lib/learning.ts for how Baseline/In-game Evidence/
+// evidence" for the same concept — see lib/learning.ts for how the review result is reported.
 // Learning Gain are computed from that mapping. Order here is fixed and is also the required
 // answering order (no skipping): the next unanswered question for a player is always
 // RECALL_QUESTIONS[player.recallAnswers.length].
@@ -16,8 +16,6 @@ export interface RecallQuestion {
   choices: [{ id: string; text: string }, { id: string; text: string }]
   correctChoiceId: string
   feedback: string
-  // The Main question (data/questions.ts) this concept's "in-game evidence" is read from.
-  mappedMainQuestionId: string
 }
 
 export const RECALL_QUESTIONS: RecallQuestion[] = [
@@ -31,7 +29,6 @@ export const RECALL_QUESTIONS: RecallQuestion[] = [
     ],
     correctChoiceId: 'recall-mayawin-b',
     feedback: 'สุเทษณ์ยังหลงรักมัทนา แต่นางไม่รับรัก จึงให้มายาวินใช้มนตร์เรียกนางมาหา',
-    mappedMainQuestionId: 'main-04',
   },
   {
     id: 'recall-curse',
@@ -43,7 +40,6 @@ export const RECALL_QUESTIONS: RecallQuestion[] = [
     ],
     correctChoiceId: 'recall-curse-a',
     feedback: 'สุเทษณ์โกรธและสาปมัทนาให้เป็นดอกกุหลาบ โดยนางจะคืนร่างมนุษย์ได้ในคืนวันเพ็ญ',
-    mappedMainQuestionId: 'main-06',
   },
   {
     id: 'recall-human-love',
@@ -55,7 +51,6 @@ export const RECALL_QUESTIONS: RecallQuestion[] = [
     ],
     correctChoiceId: 'recall-human-love-b',
     feedback: 'พระฤๅษีกาลทรรศินนำกุหลาบมัทนาไปปลูก และต่อมาท้าวชัยเสนมาประพาสป่า จนทั้งสองได้พบและรักกัน',
-    mappedMainQuestionId: 'main-07',
   },
   {
     id: 'recall-jealousy',
@@ -67,7 +62,6 @@ export const RECALL_QUESTIONS: RecallQuestion[] = [
     ],
     correctChoiceId: 'recall-jealousy-a',
     feedback: 'ท้าวชัยเสนมีพระมเหสีคือจัณฑีอยู่แล้ว ความริษยาของจัณฑีจึงนำไปสู่ความเข้าใจผิดและความทุกข์ของมัทนา',
-    mappedMainQuestionId: 'main-08',
   },
   {
     id: 'recall-ending',
@@ -79,7 +73,6 @@ export const RECALL_QUESTIONS: RecallQuestion[] = [
     ],
     correctChoiceId: 'recall-ending-b',
     feedback: 'เมื่อมัทนาทุกข์เพราะความรัก นางขอให้สุเทษณ์ช่วย แต่ยังปฏิเสธที่จะรับรักเขา สุเทษณ์จึงสาปให้นางกลายเป็นดอกกุหลาบตลอดกาล',
-    mappedMainQuestionId: 'main-09',
   },
 ]
 

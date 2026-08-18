@@ -212,6 +212,55 @@ service cloud.firestore {
               )
               && request.resource.data.bossAnswers.size() <= 3
             )
+            ||
+            // Assessment Layer (Milestone 1). Three more phase branches, each following the
+            // recall branch's shape exactly: this phase, this one field, append-or-no-op.
+            //
+            // The status check stays INSIDE each branch for the same reason documented above —
+            // preTest runs before anything competitive starts (status 'waiting', like recall),
+            // while postTest and survey run after Main/Boss with the room still 'playing'.
+            // Hoisting a single status check above all branches would deny one of these.
+            //
+            // hasOnly() is what makes these writes provably unable to touch score, answers,
+            // bossAnswers, recallAnswers, teamId or identity — a student answering a pre/post
+            // test or a survey can never move the knowledge score or any competitive field.
+            //
+            // The `<= 10` caps mirror recall's `<= 5` and boss's `<= 3`, and match
+            // ASSESSMENT_QUESTION_COUNT in data/assessmentQuestions.ts. Correctness itself is
+            // evaluated service-side against those banks — rules cannot check an answer key, so
+            // this bound is a size guard, not a scoring guard.
+            (
+              room(roomCode).status == 'waiting'
+              && room(roomCode).phase == 'preTest'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['preTestAnswers'])
+              && (
+                request.resource.data.preTestAnswers.size() == resource.data.preTestAnswers.size() + 1
+                || request.resource.data.preTestAnswers.size() == resource.data.preTestAnswers.size()
+              )
+              && request.resource.data.preTestAnswers.size() <= 10
+            )
+            ||
+            (
+              room(roomCode).status == 'playing'
+              && room(roomCode).phase == 'postTest'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['postTestAnswers'])
+              && (
+                request.resource.data.postTestAnswers.size() == resource.data.postTestAnswers.size() + 1
+                || request.resource.data.postTestAnswers.size() == resource.data.postTestAnswers.size()
+              )
+              && request.resource.data.postTestAnswers.size() <= 10
+            )
+            ||
+            (
+              room(roomCode).status == 'playing'
+              && room(roomCode).phase == 'survey'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['surveyResponses'])
+              && (
+                request.resource.data.surveyResponses.size() == resource.data.surveyResponses.size() + 1
+                || request.resource.data.surveyResponses.size() == resource.data.surveyResponses.size()
+              )
+              && request.resource.data.surveyResponses.size() <= 6
+            )
           )
         );
         allow delete: if false;

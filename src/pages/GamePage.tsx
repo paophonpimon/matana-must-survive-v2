@@ -5,6 +5,9 @@ import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { MagicPanel } from '../components/MagicPanel'
 import { TeamItemStatus } from '../components/TeamItemStatus'
+import { PostTestPhase } from '../components/PostTestPhase'
+import { SurveyPhase } from '../components/SurveyPhase'
+import { PreTestPhase } from '../components/PreTestPhase'
 import { RecallPhase } from '../components/RecallPhase'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
@@ -298,8 +301,28 @@ export const GamePage = () => {
           <ErrorPanel message={roomState.error || playerState.error || 'ไม่พบข้อมูลห้องหรือข้อมูลผู้เล่นของคุณ'} action={<Link className="primary-button w-full" to="/join">กลับหน้าเข้าร่วม</Link>} />
         ) : room.status === 'completed' ? (
           <LoadingPanel text="กำลังสรุปคะแนน..." />
+        ) : room.phase === 'survey' ? (
+          // Final individual step: an opinion survey. No score, no correctness, no ranking.
+          <SurveyPhase
+            player={player}
+            onRespond={(input) => service.saveSurveyResponse(normalizedCode, player.id, input)}
+          />
+        ) : room.phase === 'postTest' ? (
+          // Assessment Layer: individual, self-paced post-test. Runs after Main with the room
+          // still 'playing'; the Main score is already final and is neither read nor written here.
+          <PostTestPhase
+            player={player}
+            onAnswer={(input) => service.savePostTestAnswer(normalizedCode, player.id, input)}
+          />
+        ) : room.phase === 'preTest' ? (
+          // Assessment Layer: individual, self-paced pre-test. Rendered inside the existing game
+          // shell so routing/session handling stay identical to every other phase.
+          <PreTestPhase
+            player={player}
+            onAnswer={(input) => service.savePreTestAnswer(normalizedCode, player.id, input)}
+          />
         ) : room.phase === 'recall' ? (
-          // Learning Layer: mandatory individual "กู้ความทรงจำมัทนา" phase, before Main's timer
+          // Learning Layer: mandatory individual "ทบทวนเรื่องราว" phase, before Main's timer
           // ever starts — fully self-contained (own progress model, no team/magic UI at all).
           <RecallPhase
             player={player}

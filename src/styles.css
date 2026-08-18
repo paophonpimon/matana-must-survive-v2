@@ -1,7 +1,14 @@
 @import "tailwindcss";
 
 :root {
-  font-family: "Noto Sans Thai", "Leelawadee UI", Tahoma, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  /* One Thai typographic system for the whole product. Pridi (a literary Thai serif-ish display
+     face) carries headings and prominent display text; Anuphan (a clean modern Thai UI sans)
+     carries body copy, buttons, labels, inputs and tables. Tahoma is the fallback everywhere, so a
+     slow or blocked webfont request degrades to a readable Thai face rather than a system default
+     that breaks the layout. */
+  --font-display: "Pridi", Tahoma, sans-serif;
+  --font-body: "Anuphan", Tahoma, sans-serif;
+  font-family: var(--font-body);
   color: #fff7df;
   background: #080b23;
   font-synthesis: none;
@@ -16,7 +23,16 @@
 * { box-sizing: border-box; }
 html { min-width: 320px; background: var(--navy); scroll-behavior: smooth; }
 body { margin: 0; min-width: 320px; min-height: 100dvh; overflow-x: hidden; }
+/* Headings take the display face. Pridi's Thai loops and upper/lower vowel marks need more room
+   than the previous stack, so headings get a floor on line-height; individual rules that set a
+   tighter value for a specific display treatment still win. Pridi tops out at 700, so no rule
+   should ask for more — synthesised bold would coarsen the Thai strokes. */
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.35; font-weight: 600; }
 button, input { font: inherit; }
+/* Body text, controls, form fields and tables stay on the UI face: Anuphan keeps typed values and
+   dense numeric data legible where a display face would not. Declared after `font: inherit` so a
+   control nested inside a heading still renders in the UI face. */
+button, input, select, textarea, table { font-family: var(--font-body); }
 button, a { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, a:focus-visible, input:focus-visible {
   outline: 3px solid #f4d98f;
@@ -70,7 +86,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .brand-mark small { display: block; margin-top: 0.08rem; color: #bdb5ac; font-size: 0.66rem; letter-spacing: 0.08em; }
 .brand-symbol {
   display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border: 1px solid rgba(226, 189, 101, 0.55); border-radius: 999px;
-  background: linear-gradient(145deg, rgba(117, 32, 69, 0.82), rgba(31, 15, 62, 0.88)); color: #f3d481; font-family: serif; font-size: 1.25rem;
+  background: linear-gradient(145deg, rgba(117, 32, 69, 0.82), rgba(31, 15, 62, 0.88)); color: #f3d481; font-family: var(--font-display); font-size: 1.25rem;
   box-shadow: 0 0 1.25rem rgba(188, 73, 111, 0.25), inset 0 0 0 4px rgba(255,255,255,0.03);
 }
 .quiet-link { display: inline-flex; align-items: center; gap: 0.4rem; color: #d5ccc0; font-size: 0.9rem; text-decoration: none; transition: color 180ms ease; }
@@ -95,7 +111,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 .eyebrow { color: #e5c16b; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; }
 .hero-title {
-  font-family: "Th Sarabun New", "Leelawadee UI", serif;
+  font-family: var(--font-display);
   font-size: clamp(4.4rem, 14vw, 7.8rem);
   line-height: 0.88;
   font-weight: 700;
@@ -165,7 +181,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .result-hero-copy { position: relative; z-index: 2; min-width: 0; }
 .result-title {
   color: #fff8e6;
-  font-family: "Th Sarabun New", "Leelawadee UI", serif;
+  font-family: var(--font-display);
   font-size: clamp(3rem, 5vw, 4.8rem);
   font-weight: 700;
   line-height: 0.98;
@@ -241,7 +257,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .congratulations-title {
   margin-top: 0.65rem;
   color: #fff8e6;
-  font-family: "Th Sarabun New", "Leelawadee UI", serif;
+  font-family: var(--font-display);
   font-size: clamp(2.7rem, 4vw, 4.4rem);
   font-weight: 700;
   line-height: 0.98;
@@ -320,7 +336,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 .teacher-seal, .closed-seal, .success-seal {
   display: grid; place-items: center; width: 4.5rem; height: 4.5rem; border: 1px solid rgba(226,189,101,0.5); border-radius: 50%;
-  color: #f0d37f; background: linear-gradient(145deg, rgba(132,39,78,0.55), rgba(29,15,60,0.76)); box-shadow: 0 0 2rem rgba(189,72,111,0.2), inset 0 0 0 6px rgba(255,255,255,0.03); font-family: serif; font-size: 1.25rem;
+  color: #f0d37f; background: linear-gradient(145deg, rgba(132,39,78,0.55), rgba(29,15,60,0.76)); box-shadow: 0 0 2rem rgba(189,72,111,0.2), inset 0 0 0 6px rgba(255,255,255,0.03); font-family: var(--font-display); font-size: 1.25rem;
 }
 .closed-seal { border-color: rgba(171,164,160,0.35); color: #cbc4bf; background: rgba(48,40,55,0.55); }
 .success-seal { width: 3.7rem; height: 3.7rem; color: #fff0b4; background: rgba(145,92,34,0.4); box-shadow: 0 0 2rem rgba(255,207,102,0.35); animation: glow-seal 2.6s ease-in-out infinite; }
@@ -378,7 +394,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .scoreboard-crown { display: grid; place-items: center; width: 5rem; height: 5rem; border: 1px solid rgba(250,218,132,0.62); border-radius: 50%; color: #ffe091; background: radial-gradient(circle at 35% 30%, rgba(255,224,133,0.35), rgba(118,64,24,0.5)); box-shadow: 0 0 0 0.5rem rgba(239,190,71,0.08), 0 0 2rem rgba(239,190,71,0.32); font-family: Georgia, serif; font-size: 2.5rem; text-shadow: 0 0 1.2rem rgba(255,215,112,0.65); }
 .scoreboard-spotlight small, .scoreboard-spotlight strong, .scoreboard-spotlight div > span { display: block; }
 .scoreboard-spotlight small { color: #dac99f; font-size: 0.7rem; font-weight: 800; letter-spacing: 0.12em; }
-.scoreboard-spotlight strong { margin-top: 0.15rem; overflow-wrap: anywhere; color: #fff0b0; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(2.6rem, 5vw, 4.8rem); line-height: 0.95; text-shadow: 0 0 2rem rgba(241,192,72,0.35); }
+.scoreboard-spotlight strong { margin-top: 0.15rem; overflow-wrap: anywhere; color: #fff0b0; font-family: var(--font-display); font-size: clamp(2.6rem, 5vw, 4.8rem); line-height: 0.95; text-shadow: 0 0 2rem rgba(241,192,72,0.35); }
 .scoreboard-spotlight div > span { margin-top: 0.3rem; color: #ded3c2; font-size: 0.78rem; }
 .scoreboard-spotlight-score { min-width: 7.5rem; border-left: 1px solid rgba(255,255,255,0.13); padding-left: 1.5rem; text-align: right; }
 .scoreboard-spotlight b { color: #ffdd78; font-size: clamp(3.4rem, 5vw, 4.8rem); font-variant-numeric: tabular-nums; line-height: 1; text-shadow: 0 0 1.8rem rgba(241,192,72,0.32); }
@@ -436,7 +452,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 .victory-stage-content { position: relative; z-index: 3; display: flex; min-height: 36rem; flex-direction: column; align-items: center; justify-content: center; padding: 2.2rem clamp(1rem, 4vw, 4rem); text-align: center; }
 .victory-kicker { color: #f3cf75; font-size: 0.75rem; font-weight: 800; letter-spacing: 0.2em; text-transform: uppercase; }
-.teacher-victory-stage h2 { margin-top: 0.55rem; color: #fff4d4; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(2.2rem, 4vw, 3.7rem); font-weight: 700; line-height: 1; text-shadow: 0 0 2rem rgba(255,216,118,0.2); }
+.teacher-victory-stage h2 { margin-top: 0.55rem; color: #fff4d4; font-family: var(--font-display); font-size: clamp(2.2rem, 4vw, 3.7rem); font-weight: 700; line-height: 1; text-shadow: 0 0 2rem rgba(255,216,118,0.2); }
 .champion-medal { position: relative; display: grid; place-items: center; width: 5.3rem; height: 5.3rem; margin-top: 1.1rem; border: 2px solid #ffe49a; border-radius: 50%; color: #4c2810; background: radial-gradient(circle at 35% 30%, #fff0aa, #dc9e34 58%, #8d4d17); box-shadow: 0 0 0 0.45rem rgba(244,199,87,0.12), 0 0 2.5rem rgba(246,194,65,0.5); }
 .champion-medal::before, .champion-medal::after { content: ""; position: absolute; top: 3.7rem; z-index: -1; width: 1.65rem; height: 3.2rem; background: linear-gradient(#8b234f, #dc557c); clip-path: polygon(0 0,100% 0,82% 100%,50% 73%,18% 100%); }
 .champion-medal::before { left: 0.25rem; transform: rotate(18deg); }
@@ -447,7 +463,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .champion-team-list-tied { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); }
 .champion-team { min-width: 0; }
 .champion-team strong, .champion-team span { display: block; overflow-wrap: anywhere; }
-.champion-team strong { color: #ffe18b; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(3.5rem, 7vw, 6.5rem); font-weight: 700; letter-spacing: -0.035em; line-height: 0.9; text-shadow: 0 0 2.5rem rgba(245,193,61,0.42), 0 0.4rem 1rem rgba(7,3,15,0.5); }
+.champion-team strong { color: #ffe18b; font-family: var(--font-display); font-size: clamp(3.5rem, 7vw, 6.5rem); font-weight: 700; letter-spacing: -0.035em; line-height: 0.9; text-shadow: 0 0 2.5rem rgba(245,193,61,0.42), 0 0.4rem 1rem rgba(7,3,15,0.5); }
 .champion-team-list-tied .champion-team strong { font-size: clamp(2.7rem, 5vw, 4.6rem); }
 .champion-team span { margin-top: 0.55rem; color: #f5ead4; font-size: 0.9rem; }
 .champion-score { display: flex; align-items: baseline; gap: 0.4rem; margin-top: 0.6rem; }
@@ -504,7 +520,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .teacher-final-dashboard .scoreboard-row-leading .team-rank-emblem { width: 5rem; height: 5.6rem; }
 .teacher-final-dashboard .scoreboard-row-leading .scoreboard-team strong {
   color: #ffe49a;
-  font-family: "Th Sarabun New", "Leelawadee UI", serif;
+  font-family: var(--font-display);
   font-size: clamp(2.4rem, 4vw, 3.6rem);
   line-height: 1;
   text-shadow: 0 0 1.8rem rgba(238,192,81,0.32);
@@ -605,7 +621,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 /* ================= Rapid Boss: 3 short interaction beats ================= */
 .boss-rapid-card { overflow: hidden; }
 .boss-rapid-step { margin-top: 1rem; color: #f2d58d; font-size: clamp(1.35rem, 4vw, 2rem); font-weight: 800; text-align: center; }
-.boss-source-quote { margin: 0.85rem auto 0; max-width: 46rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 0.9rem; padding: 0.9rem 1rem; color: #fff5dc; background: rgba(5,6,22,0.42); font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.15rem, 3.7vw, 1.65rem); line-height: 1.55; text-align: center; }
+.boss-source-quote { margin: 0.85rem auto 0; max-width: 46rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 0.9rem; padding: 0.9rem 1rem; color: #fff5dc; background: rgba(5,6,22,0.42); font-family: var(--font-display); font-size: clamp(1.15rem, 3.7vw, 1.65rem); line-height: 1.55; text-align: center; }
 /* Optional distinct follow-up question below the source quote (see BossInteraction.question in
    types/game.ts) — used when the passage alone doesn't state what's being asked. */
 .boss-rapid-question { margin-top: 0.6rem; color: #f2d58d; font-size: 1.05rem; font-weight: 700; text-align: center; }
@@ -674,7 +690,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .timer-setting select option { color: #171027; background: #fff7df; }
 .timer-setting small { display: block; margin-top: 0.55rem; color: #aaa198; font-size: 0.7rem; line-height: 1.45; }
 
-.winner-name { margin-top: 0.1rem; color: #f5d47d; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(3rem, 5vw, 5.2rem); font-weight: 700; line-height: 1; letter-spacing: -0.025em; text-shadow: 0 0 2rem rgba(236,187,83,0.42), 0 0.5rem 2rem rgba(20,6,12,0.5); }
+.winner-name { margin-top: 0.1rem; color: #f5d47d; font-family: var(--font-display); font-size: clamp(3rem, 5vw, 5.2rem); font-weight: 700; line-height: 1; letter-spacing: -0.025em; text-shadow: 0 0 2rem rgba(236,187,83,0.42), 0 0.5rem 2rem rgba(20,6,12,0.5); }
 .winner-name, .lobby-identity dd, .team-row strong, .team-row small { overflow-wrap: anywhere; }
 .winner-stats { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 1.5rem; overflow: hidden; border: 1px solid rgba(255,255,255,0.15); border-radius: 0.85rem; background: rgba(8,7,24,0.4); }
 .winner-stats div { padding: 0.9rem 0.4rem; }
@@ -933,7 +949,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
    for the rest of the round. */
 .boss-winner-pill { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid rgba(230,197,112,0.3); border-radius: 999px; padding: 0.45rem 0.85rem; color: #f1d38c; background: rgba(87,60,23,0.28); font-size: 0.82rem; font-weight: 700; }
 .boss-result-inline { display: grid; justify-items: center; text-align: center; border: 1px solid rgba(230,197,112,0.26); border-radius: 1.1rem; padding: clamp(1.5rem, 4vw, 2.5rem) 1.25rem; background: linear-gradient(160deg, rgba(42,26,61,0.5), rgba(26,16,48,0.42) 60%, rgba(44,20,32,0.4)); box-shadow: 0 0 2.8rem rgba(202,147,56,0.12); }
-.boss-result-winner-name { margin-top: 0.4rem; color: #ffe49a; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.8rem, 5vw, 2.5rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(238,192,81,0.35); }
+.boss-result-winner-name { margin-top: 0.4rem; color: #ffe49a; font-family: var(--font-display); font-size: clamp(1.8rem, 5vw, 2.5rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(238,192,81,0.35); }
 .boss-result-team { margin-top: 0.2rem; color: #d8d1c5; }
 .boss-result-team-tag { color: #a89f92; }
 .boss-result-stats { display: grid; grid-template-columns: repeat(2, 1fr); width: min(100%, 22rem); margin-top: 1.1rem; overflow: hidden; border: 1px solid rgba(255,255,255,0.14); border-radius: 0.8rem; background: rgba(6,7,25,0.4); }
@@ -950,7 +966,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 /* ================= Item 5: boss pause-and-continue waiting panel (student) ================= */
 .boss-awaiting-continue { display: grid; justify-items: center; padding: 3rem 1rem; text-align: center; }
 
-/* ================= Learning Layer: "กู้ความทรงจำมัทนา" (Story Recall) =================
+/* ================= Learning Layer: "ทบทวนเรื่องราว" (Story Recall) =================
    Student-facing individual phase. Composed as one centered column with a decorative aura behind
    the question card — the earlier version read as an empty page because the card sat alone on a
    full-width field with no framing, progression, or timing signal. */
@@ -994,7 +1010,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
    scrolling. Bounded min-height (not 100dvh — the compact room bar above still needs room) keeps
    it centered and fully visible on one normal desktop/tablet viewport. */
 .recall-command-view { display: grid; justify-items: center; align-content: center; gap: 0.5rem; min-height: min(58vh, 32rem); margin-top: 1.25rem; text-align: center; border: 1px solid rgba(230,197,112,0.26); border-radius: 1.25rem; padding: clamp(2rem, 5vw, 3.5rem) 1.5rem; background: linear-gradient(160deg, rgba(42,26,61,0.5), rgba(26,16,48,0.42) 60%, rgba(44,20,32,0.4)); box-shadow: 0 0 2.8rem rgba(202,147,56,0.12); }
-.recall-command-title { margin-top: 0.2rem; color: #fff7df; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 700; }
+.recall-command-title { margin-top: 0.2rem; color: #fff7df; font-family: var(--font-display); font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 700; }
 .recall-command-status { margin-top: 0.5rem; color: #f2d58d; font-size: clamp(1.15rem, 3vw, 1.5rem); font-weight: 700; }
 .recall-command-status-done { color: #7fdc9d; }
 .recall-command-supporting { max-width: 30rem; margin-top: 0.4rem; color: #d8d1c5; line-height: 1.6; }
@@ -1016,9 +1032,35 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .teacher-shell-stage { padding-bottom: 1rem; }
 /* Room-level escape hatch on the stage screens — quiet by design so it never competes with the
    primary stage action above it, but always reachable. */
-.stage-room-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-top: clamp(0.75rem, 2vh, 1.5rem); }
-.stage-room-controls > button { color: #d9a3a3; border-color: rgba(224,138,138,0.35); }
-.stage-room-controls > button:hover:not(:disabled) { color: #ffc4c4; border-color: rgba(224,138,138,0.6); }
+.stage-room-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; width: 100%; margin-top: clamp(0.75rem, 2vh, 1.5rem); }
+/* Room-level action ("ยุติห้อง"). A solid cream button so it reads as a real control rather than
+   a faint outline, sized to match the stage CTA — but light instead of crimson, so it never
+   competes with the primary action above it. The confirm dialog still gates the destructive step. */
+.stage-room-controls > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: min(100%, 14rem);
+  min-height: 3.2rem;
+  padding: 0 1.6rem;
+  border: 1px solid rgba(150, 122, 74, 0.55);
+  border-radius: 0.9rem;
+  color: #6b1220;
+  font-size: clamp(1rem, 1.15vw, 1.12rem);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: linear-gradient(180deg, #f7f1e5, #e8dfcd);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 0.4rem 1.1rem rgba(0, 0, 0, 0.35);
+  transition: background 180ms ease, border-color 180ms ease, transform 140ms ease;
+}
+@media (hover: hover) {
+  .stage-room-controls > button:hover:not(:disabled) {
+    border-color: rgba(184, 145, 63, 0.8);
+    background: linear-gradient(180deg, #fffaf0, #f0e8d8);
+  }
+}
+.stage-room-controls > button:active:not(:disabled) { transform: translateY(1px); background: linear-gradient(180deg, #e8dfcd, #ddd3bf); }
+.stage-room-controls > button:disabled { color: #8b7f77; background: linear-gradient(180deg, #ded8cd, #cfc8bc); box-shadow: none; }
 /* The stage screen sizes itself to whatever height is left after the compact header and room
    bar rather than claiming a fixed minimum, and trades vertical padding for viewport height on
    shorter screens — together these keep a 768px-tall iPad landscape viewport scroll-free. */
@@ -1037,7 +1079,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
    which is what stops the team name reading as the student's name. */
 .result-identity { display: grid; gap: 0.6rem; justify-items: start; }
 /* Display-size, warm, letter-spaced — the student's name is the hero of this block. */
-.result-identity-name { color: #fff7df; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.75rem, 5vw, 2.6rem); font-weight: 700; line-height: 1.15; letter-spacing: 0.01em; text-shadow: 0 0 1.8rem rgba(238,192,81,0.28); }
+.result-identity-name { color: #fff7df; font-family: var(--font-display); font-size: clamp(1.75rem, 5vw, 2.6rem); font-weight: 700; line-height: 1.15; letter-spacing: 0.01em; text-shadow: 0 0 1.8rem rgba(238,192,81,0.28); }
 .result-identity-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
 .result-identity-team { display: inline-flex; align-items: center; border: 1px solid rgba(255,255,255,0.18); border-radius: 999px; padding: 0.22rem 0.7rem; background: rgba(20,12,38,0.45); color: #d8d1c5; font-size: 0.82rem; font-weight: 600; }
 .result-identity-captain { display: inline-flex; align-items: center; gap: 0.25rem; border: 1px solid rgba(226,189,101,0.5); border-radius: 999px; padding: 0.22rem 0.7rem; background: linear-gradient(135deg, rgba(120,82,26,0.5), rgba(78,51,16,0.35)); color: #f2d58d; font-size: 0.82rem; font-weight: 700; }
@@ -1441,6 +1483,822 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .home-copy { --home-logo-w: min(100%, 18rem); }
 }
 
+/* ================= Teacher shell: topbar, room bar, lobby stage ==================
+   Gold-framed panels on deep navy with rose corner marks. Shared by every teacher stage (topbar
+   and room bar) plus the lobby stage's two-column command/roster split. */
+/* The rose motif, drawn as SVG rather than shipped as artwork, shared by the room bar and the
+   lobby panels. Declared on the consumers so it inherits to their children (.rose-rule). */
+.teacher-room-bar, .lobby-stage {
+  --rose-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c9566f' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M12 8.4a2 2 0 1 0 2 2'/%3E%3Cpath d='M14 10.4a3.4 3.4 0 1 1-3.4-3.4'/%3E%3Cpath d='M10.6 7a5 5 0 1 1-4.5 6.8'/%3E%3Cpath d='M6.6 12.6c-1.3 2.2-.5 4.7 1.7 5.8'/%3E%3Cpath d='M17.2 9.6c1.5 1.9 1.2 4.6-.7 6'/%3E%3C/svg%3E");
+}
+/* ---- cream panel system ----
+   The teacher stages sit on antique-cream surfaces framed in gold, against the navy page. Text
+   inside a cream panel flips to ink; these tokens keep that consistent everywhere. */
+.cream-panel, .teacher-room-bar, .lobby-command, .lobby-roster {
+  --ink: #2c2233;
+  --ink-soft: #6d6154;
+  --ink-faint: #8d8275;
+  --crimson: #8e1a29;
+  --gold-line: rgba(150, 122, 74, 0.45);
+  position: relative;
+  border: 1px solid rgba(150, 122, 74, 0.6);
+  border-radius: 1.1rem;
+  background: linear-gradient(180deg, #fbf6ea, #f1e8d6);
+  box-shadow: 0 1rem 2.6rem rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+}
+/* Inner gold hairline — a frame, not a second surface. */
+.cream-panel::before, .teacher-room-bar::before, .lobby-command::before, .lobby-roster::before {
+  content: '';
+  position: absolute;
+  inset: 0.4rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 0.75rem;
+  pointer-events: none;
+}
+.cream-panel > *, .teacher-room-bar > * { position: relative; }
+.cream-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0;
+  color: var(--crimson);
+  font-family: var(--font-display);
+  font-size: clamp(1.05rem, 1.4vw, 1.35rem);
+  font-weight: 600;
+}
+.cream-panel-title svg { width: 1.3em; height: 1.3em; color: #b8913f; }
+.cream-count-pill {
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  padding: 0.15rem 0.75rem;
+  color: var(--ink-soft);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.55);
+}
+.cream-footnote {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0;
+  color: var(--ink-faint);
+  font-size: clamp(0.76rem, 0.9vw, 0.88rem);
+}
+.cream-footnote-mark {
+  display: grid;
+  place-items: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: none;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  color: #b8913f;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+/* Room bar on cream, with a rose at the trailing edge as in the reference. */
+.teacher-room-bar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.teacher-room-bar::after {
+  content: '';
+  position: absolute;
+  top: 0.75rem;
+  right: 1rem;
+  bottom: 0.75rem;
+  width: 5rem;
+  background: var(--rose-mark) right center/3.4rem 3.4rem no-repeat;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.teacher-room-bar small { color: var(--ink-soft); font-size: 0.78rem; font-weight: 600; }
+.teacher-room-bar .room-code { color: var(--crimson); }
+/* Status pill on cream needs its own light treatment — the dark-page variant is unreadable here. */
+.teacher-room-bar .status-pill {
+  border: 1px solid rgba(90, 150, 100, 0.45);
+  color: #2f6b3f;
+  background: #eaf5ea;
+}
+.teacher-room-bar .status-pill i { background: #3f9e57; box-shadow: 0 0 0.5rem rgba(63, 158, 87, 0.6); }
+.teacher-room-bar .room-bar-metric { color: var(--ink); }
+.teacher-room-bar .room-bar-metric svg { color: #b8913f; }
+.teacher-room-bar strong.text-2xl { color: var(--crimson); }
+.teacher-room-bar > div:first-child > p { color: var(--ink-soft); }
+/* Copy button becomes a solid crimson chip on the light bar. */
+.teacher-room-bar .copy-button {
+  border-color: rgba(150, 122, 74, 0.5);
+  color: #fdf1dc;
+  background: linear-gradient(180deg, #a72333, #7d1522);
+  font-weight: 700;
+}
+
+/* ---- topbar ---- */
+.teacher-topbar {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.6rem, 1.4vw, 1.1rem);
+  padding: clamp(0.5rem, 1.4vh, 1rem) clamp(1rem, 3vw, 2.5rem);
+}
+/* Three-part header: brand left, stage identity centred, live state + home right. */
+.teacher-topbar-brand { display: inline-flex; align-items: center; gap: 0.7rem; flex: 1 1 0; min-width: 0; text-decoration: none; }
+.teacher-topbar-brand img {
+  display: block;
+  width: clamp(3rem, 4vw, 4.4rem);
+  height: auto;
+  max-width: none;
+  filter: drop-shadow(0 0.3rem 1rem rgba(0, 0, 0, 0.5));
+}
+.teacher-topbar-brand strong {
+  display: block;
+  color: #f3dcab;
+  font-family: var(--font-display);
+  font-size: clamp(1.05rem, 1.4vw, 1.4rem);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.teacher-topbar-brand small { display: block; color: #b1a693; font-size: clamp(0.72rem, 0.85vw, 0.85rem); }
+.teacher-topbar-stage { flex: 0 1 auto; text-align: center; }
+.teacher-topbar-title {
+  margin: 0;
+  color: #f7e7c2;
+  font-family: var(--font-display);
+  font-size: clamp(1.2rem, 1.8vw, 1.8rem);
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.teacher-topbar-subtitle { margin: 0.1rem 0 0; color: #b8ac98; font-size: clamp(0.76rem, 0.92vw, 0.92rem); white-space: nowrap; }
+.teacher-topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: clamp(0.5rem, 1.5vw, 1.25rem); flex: 1 1 0; }
+.teacher-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #cfe6cf;
+  font-size: clamp(0.78rem, 0.95vw, 0.92rem);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.teacher-live-pill strong { display: block; font-weight: 600; }
+.teacher-live-pill small { display: block; color: #9aa79a; font-size: 0.74rem; }
+.teacher-live-pill i {
+  width: 0.6rem;
+  height: 0.6rem;
+  flex: none;
+  border-radius: 999px;
+  background: #4fd07a;
+  box-shadow: 0 0 0.7rem rgba(79, 208, 122, 0.8);
+  animation: pulse-glow 2.4s ease-in-out infinite;
+}
+.teacher-live-pill.is-offline { color: #f0c0b6; }
+.teacher-live-pill.is-offline i { background: #e0716a; box-shadow: 0 0 0.7rem rgba(224, 113, 106, 0.75); animation: none; }
+.teacher-topbar-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  color: #e4d9c7;
+  font-size: clamp(0.85rem, 1vw, 1rem);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 180ms ease, background 180ms ease;
+}
+.teacher-topbar-home svg { width: 1.3em; height: 1.3em; }
+@media (hover: hover) { .teacher-topbar-home:hover { color: #f6ecd9; background: rgba(12, 16, 44, 0.55); } }
+.teacher-topbar-divider + .teacher-topbar-title { margin-right: 0.25rem; }
+
+/* ---- room bar ---- */
+.room-bar-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #f2d58d;
+  font-family: var(--font-display);
+  font-size: clamp(1.15rem, 1.6vw, 1.6rem);
+  font-weight: 600;
+  line-height: 1.2;
+}
+.room-bar-metric svg { width: 1.15em; height: 1.15em; color: #c9a253; }
+.copy-button svg { width: 1.05em; height: 1.05em; margin-right: 0.35rem; }
+
+/* ---- lobby stage ---- */
+.lobby-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(1rem, 2.2vw, 1.75rem);
+  margin-top: clamp(0.75rem, 2vh, 1.25rem);
+}
+.lobby-command, .lobby-roster { padding: clamp(1.1rem, 2.2vw, 2rem); }
+.lobby-command > *, .lobby-roster > * { position: relative; }
+/* Rose corner marks. */
+.lobby-command::after, .lobby-roster::after {
+  content: '';
+  position: absolute;
+  inset: 0.9rem;
+  background-image: var(--rose-mark), var(--rose-mark), var(--rose-mark), var(--rose-mark);
+  background-repeat: no-repeat;
+  background-size: 1.5rem 1.5rem;
+  background-position: left top, right top, left bottom, right bottom;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.lobby-command { display: grid; justify-items: center; text-align: center; }
+
+/* Stage badge — the crimson ribbon at the top of the command panel. */
+.stage-badge {
+  margin: 0;
+  border: 1px solid rgba(214, 173, 94, 0.55);
+  border-radius: 999px;
+  padding: 0.4rem 1.5rem;
+  color: #f7e3bd;
+  font-size: clamp(0.85rem, 1vw, 1rem);
+  font-weight: 600;
+  background: linear-gradient(180deg, #8e1a29, #6c111e);
+  box-shadow: inset 0 1px 0 rgba(255, 232, 186, 0.28), 0 0.4rem 1.2rem rgba(0, 0, 0, 0.4);
+}
+.lobby-command-title {
+  margin: clamp(0.9rem, 2vh, 1.4rem) 0 0;
+  color: var(--crimson);
+  font-family: var(--font-display);
+  font-size: clamp(1.7rem, 2.7vw, 2.6rem);
+  font-weight: 600;
+  line-height: 1.3;
+}
+/* Rose divider — the only floral motif in this panel. */
+.rose-rule {
+  width: min(100%, 20rem);
+  height: 1.4rem;
+  margin-top: clamp(0.6rem, 1.4vh, 1rem);
+  background:
+    linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.5) 25%, transparent 45%) center/100% 1px no-repeat,
+    var(--rose-mark) center/1.4rem 1.4rem no-repeat;
+}
+.lobby-count-label { margin: clamp(0.7rem, 1.6vh, 1.1rem) 0 0; color: var(--ink-soft); font-size: clamp(0.9rem, 1.05vw, 1.05rem); }
+.lobby-count {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: clamp(0.3rem, 0.9vh, 0.6rem) 0 0;
+  color: var(--ink);
+  font-size: clamp(1.1rem, 1.4vw, 1.35rem);
+}
+.lobby-count svg { width: 2.1em; height: 2.1em; color: #b8913f; }
+.lobby-count strong {
+  color: var(--crimson);
+  font-family: var(--font-display);
+  font-size: clamp(2.2rem, 3.4vw, 3.2rem);
+  font-weight: 700;
+  line-height: 1;
+}
+.lobby-helper { margin: clamp(0.8rem, 1.8vh, 1.3rem) 0 0; color: var(--ink-soft); font-size: clamp(0.88rem, 1.02vw, 1rem); line-height: 1.85; }
+.lobby-helper-accent { color: var(--crimson); font-weight: 700; }
+.lobby-divider { width: 100%; height: 1px; margin: clamp(0.9rem, 2vh, 1.4rem) 0 0; background: linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.3), transparent); }
+
+.lobby-duration { margin-top: clamp(0.85rem, 1.9vh, 1.3rem); width: min(100%, 26rem); }
+.lobby-duration label { color: #d8ccb8; font-size: clamp(0.9rem, 1.05vw, 1.02rem); }
+/* The field keeps a free-entry number input; only its shell is restyled. */
+.lobby-duration .stage-duration-input {
+  width: 100%;
+  min-height: 3.4rem;
+  border: 1px solid rgba(201, 162, 83, 0.42);
+  border-radius: 0.75rem;
+  padding: 0 1rem;
+  background: linear-gradient(180deg, rgba(10, 13, 36, 0.9), rgba(7, 9, 26, 0.95));
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+.lobby-duration-icon { width: 1.5rem; height: 1.5rem; flex: none; color: #c9a253; }
+.lobby-duration .stage-duration-input input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #f7e7c2;
+  font-size: clamp(1.05rem, 1.25vw, 1.2rem);
+  text-align: left;
+}
+.lobby-duration .stage-duration-input span { color: #c0b7ab; font-size: clamp(0.92rem, 1.05vw, 1.02rem); }
+.lobby-duration .stage-duration-input:focus-within { border-color: #e0bb72; box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(201, 162, 83, 0.2); }
+
+/* Crimson-and-gold stage CTA, matching the Home and Join primary actions. */
+.stage-cta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 26rem);
+  min-height: 3.6rem;
+  margin-top: clamp(0.85rem, 1.9vh, 1.35rem);
+  border: 1px solid #b8913f;
+  border-radius: 0.9rem;
+  color: #fdf1dc;
+  font-size: clamp(1.05rem, 1.35vw, 1.3rem);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 3px rgba(52, 4, 12, 0.7);
+  background-image:
+    linear-gradient(180deg, rgba(255, 226, 170, 0.26) 0%, rgba(255, 210, 150, 0.05) 26%, transparent 52%),
+    linear-gradient(180deg, #b3283a 0%, #8e1a29 42%, #6c111e 78%, #530a16 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(228, 195, 124, 0.28),
+    inset 0 2px 1px rgba(255, 232, 186, 0.32),
+    inset 0 -6px 12px rgba(52, 4, 14, 0.5),
+    0 0.6rem 1.5rem rgba(0, 0, 0, 0.45);
+  transition: background-image 200ms ease, border-color 200ms ease, transform 140ms ease;
+}
+@media (hover: hover) {
+  .stage-cta:not(:disabled):hover {
+    border-color: #e0bb72;
+    background-image:
+      linear-gradient(180deg, rgba(255, 232, 182, 0.32) 0%, rgba(255, 214, 156, 0.07) 26%, transparent 52%),
+      linear-gradient(180deg, #c22d40 0%, #9c1e2e 42%, #771322 78%, #5c0c18 100%);
+  }
+}
+.stage-cta:not(:disabled):active { transform: translateY(1px); background-image: linear-gradient(180deg, #7a1523 0%, #5e0e1b 55%, #470912 100%); }
+.stage-cta:disabled { border-color: rgba(140, 116, 66, 0.45); background-image: linear-gradient(180deg, #5a2029, #4a1a22); color: rgba(253, 243, 226, 0.6); box-shadow: none; }
+
+.lobby-footnote {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: clamp(0.8rem, 1.7vh, 1.2rem) 0 0;
+  color: var(--ink-faint);
+  font-size: clamp(0.8rem, 0.92vw, 0.9rem);
+}
+.lobby-footnote-mark {
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  border: 1px solid rgba(201, 162, 83, 0.45);
+  border-radius: 999px;
+  color: #b8913f;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* ---- roster ---- */
+.lobby-roster { display: flex; flex-direction: column; min-height: 0; }
+.lobby-roster-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin: 0;
+  color: var(--crimson);
+  font-family: var(--font-display);
+  font-size: clamp(1.1rem, 1.5vw, 1.45rem);
+  font-weight: 600;
+}
+.lobby-roster-count { color: var(--ink-soft); font-family: var(--font-body); font-size: clamp(0.9rem, 1.05vw, 1.02rem); font-weight: 600; }
+.lobby-roster-list {
+  flex: 1;
+  min-height: 0;
+  max-height: min(52vh, 32rem);
+  margin: clamp(0.9rem, 2vh, 1.4rem) 0 0;
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+.lobby-roster-item {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.7rem 0.4rem;
+  border-bottom: 1px solid rgba(150, 122, 74, 0.22);
+}
+.lobby-roster-item:last-child { border-bottom: 0; }
+.lobby-roster-avatar {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  border: 1px solid rgba(201, 162, 83, 0.45);
+  border-radius: 999px;
+  color: #b8913f;
+  background: rgba(255, 255, 255, 0.6);
+}
+.lobby-roster-avatar svg { width: 1.4rem; height: 1.4rem; }
+.lobby-roster-name { color: var(--ink); font-size: clamp(0.95rem, 1.12vw, 1.1rem); overflow-wrap: anywhere; }
+.lobby-roster-empty { margin: auto 0; color: var(--ink-faint); text-align: center; }
+
+/* ---- team setup stage ---- */
+.setup-stage {
+  --rose-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c9566f' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M12 8.4a2 2 0 1 0 2 2'/%3E%3Cpath d='M14 10.4a3.4 3.4 0 1 1-3.4-3.4'/%3E%3Cpath d='M10.6 7a5 5 0 1 1-4.5 6.8'/%3E%3Cpath d='M6.6 12.6c-1.3 2.2-.5 4.7 1.7 5.8'/%3E%3Cpath d='M17.2 9.6c1.5 1.9 1.2 4.6-.7 6'/%3E%3C/svg%3E");
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: clamp(0.7rem, 1.4vw, 1.1rem);
+  /* Stretch, not start: both columns take the height the shell hands them, so their inner regions
+     can scroll instead of the page. */
+  align-items: stretch;
+  min-height: 0;
+  margin-top: clamp(0.5rem, 1.4vh, 0.9rem);
+}
+.setup-roster, .setup-settings { padding: clamp(0.7rem, 1.3vw, 1.1rem); min-height: 0; }
+.setup-roster { display: flex; flex-direction: column; min-height: 0; }
+/* One-viewport fit for this stage only. ScenePage's inner column is `min-h-dvh`, which lets content
+   grow past the viewport; capping it to exactly 100dvh here (and nowhere else) is what turns the
+   page scroll into internal scrolling inside the roster and settings regions. */
+.teacher-setup-page > .z-10 { height: 100dvh; min-height: 100dvh; overflow: hidden; }
+.teacher-shell-setup { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.teacher-shell-setup .setup-stage { flex: 1; min-height: 0; }
+
+.setup-table-wrap {
+  margin-top: 0.9rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 0.7rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: rgba(255, 255, 255, 0.5);
+}
+.setup-table { width: 100%; border-collapse: collapse; font-size: clamp(0.85rem, 1vw, 0.98rem); }
+.setup-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--gold-line);
+  color: var(--ink-soft);
+  font-weight: 700;
+  text-align: center;
+  background: #f6efe0;
+}
+.setup-table th:nth-child(2) { text-align: left; }
+.setup-table td { padding: 0.5rem 0.7rem; border-bottom: 1px solid rgba(150, 122, 74, 0.16); text-align: center; }
+.setup-table tr:last-child td { border-bottom: 0; }
+.setup-row-index {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.9rem;
+  min-height: 1.9rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.7);
+}
+.setup-row-name { color: var(--ink); font-weight: 600; text-align: left; overflow-wrap: anywhere; }
+.setup-row-number { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.setup-team-tag {
+  display: inline-block;
+  min-width: 8rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  padding: 0.25rem 0.8rem;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+  background: rgba(255, 255, 255, 0.75);
+}
+.setup-team-tag.is-assigned {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border-color: var(--tone-line);
+  color: var(--tone-ink);
+  font-weight: 700;
+  background: var(--tone-bg);
+}
+.team-tone-dot { width: 0.55rem; height: 0.55rem; flex: none; border-radius: 999px; background: var(--tone-ink); }
+
+/* ---- team colour palette ----
+   Twelve slots assigned by team order, so "ทีม 1" is always the same colour for the whole round.
+   Each slot carries a tint, a border and an ink colour chosen to stay legible on the cream panel;
+   the palette stays inside the product's world (rose, gold, plum, indigo, teal, olive) rather than
+   defaulting to primary hues. Every tag also shows a dot, so colour is never the only signal. */
+.team-tone-0 { --tone-bg: #fbe9ec; --tone-line: rgba(142, 26, 41, 0.42); --tone-ink: #8e1a29; }
+.team-tone-1 { --tone-bg: #e9eefb; --tone-line: rgba(42, 66, 138, 0.42); --tone-ink: #2a4a8a; }
+.team-tone-2 { --tone-bg: #e7f4ec; --tone-line: rgba(35, 105, 66, 0.42); --tone-ink: #236942; }
+.team-tone-3 { --tone-bg: #fbf0e2; --tone-line: rgba(150, 100, 30, 0.45); --tone-ink: #8a5c17; }
+.team-tone-4 { --tone-bg: #f2eafa; --tone-line: rgba(97, 55, 140, 0.42); --tone-ink: #61378c; }
+.team-tone-5 { --tone-bg: #e6f3f5; --tone-line: rgba(24, 100, 112, 0.42); --tone-ink: #186470; }
+.team-tone-6 { --tone-bg: #fdeadf; --tone-line: rgba(160, 78, 30, 0.42); --tone-ink: #a04e1e; }
+.team-tone-7 { --tone-bg: #eef2e4; --tone-line: rgba(89, 106, 40, 0.45); --tone-ink: #596a28; }
+.team-tone-8 { --tone-bg: #fce9f4; --tone-line: rgba(150, 40, 105, 0.4); --tone-ink: #962869; }
+.team-tone-9 { --tone-bg: #e8ecef; --tone-line: rgba(70, 86, 100, 0.45); --tone-ink: #465664; }
+.team-tone-10 { --tone-bg: #f6ece6; --tone-line: rgba(128, 74, 58, 0.42); --tone-ink: #804a3a; }
+.team-tone-11 { --tone-bg: #eaf0f9; --tone-line: rgba(46, 92, 120, 0.42); --tone-ink: #2e5c78; }
+.setup-empty { margin: 0; padding: 1.6rem; color: var(--ink-faint); text-align: center; }
+
+/* ---- grouped roster (after teams are locked) ----
+   Each team is its own bordered group with a tinted header, so members can never be read across
+   team boundaries. Auto-fit columns keep a class of any size compact instead of one long list. */
+.setup-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  /* min-content rows, not auto: with a definite container height the rows would otherwise be
+     compressed to fit and each card (overflow:hidden) would silently clip its own members. */
+  grid-auto-rows: min-content;
+  align-content: start;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+  /* flex:1 + min-height:0 is what actually bounds this region. Without the flex basis it sizes to
+     its content and a large class gets clipped by the page's height cap instead of scrolling. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.setup-group {
+  border: 1px solid var(--tone-line, var(--gold-line));
+  border-radius: 0.65rem;
+  overflow: hidden;
+  background: var(--tone-bg, rgba(255, 255, 255, 0.55));
+}
+.setup-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0;
+  border-bottom: 1px solid var(--tone-line, var(--gold-line));
+  padding: 0.35rem 0.6rem;
+  color: var(--tone-ink, var(--ink));
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.45);
+}
+.setup-group-head small { color: var(--ink-faint); font-family: var(--font-body); font-size: 0.7rem; font-weight: 500; }
+.setup-group-head .team-tone-dot { align-self: center; }
+.setup-group-count { margin-left: auto; color: var(--ink-soft); font-family: var(--font-body); font-size: 0.75rem; font-weight: 600; }
+.setup-group-list { margin: 0; padding: 0.25rem 0.35rem; list-style: none; background: rgba(255, 255, 255, 0.55); }
+.setup-group-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.22rem 0.3rem;
+  border-radius: 0.35rem;
+}
+.setup-group-list li + li { border-top: 1px solid rgba(150, 122, 74, 0.14); }
+.setup-group-name { color: var(--ink); font-size: 0.86rem; font-weight: 600; overflow-wrap: anywhere; }
+.setup-group-number { flex: none; color: var(--ink-faint); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+.setup-group-empty { color: var(--ink-faint); font-size: 0.78rem; }
+.setup-group-unassigned { --tone-bg: rgba(240, 236, 228, 0.7); --tone-line: rgba(150, 122, 74, 0.35); --tone-ink: #6d6154; }
+
+/* Settings column: one row per control, label left, control right. */
+.setup-settings { display: flex; flex-direction: column; min-height: 0; gap: 0.6rem; }
+.setup-settings-scroll { display: grid; gap: 0.55rem; align-content: start; min-height: 0; overflow: auto; padding-right: 0.2rem; }
+/* Pinned foot so the start action is always reachable without scrolling the column. */
+.setup-foot { display: grid; gap: 0.4rem; padding-top: 0.5rem; border-top: 1px solid var(--gold-line); }
+.setup-foot .stage-room-controls { margin-top: 0; }
+
+.setup-subhead { margin: 0.2rem 0 0; color: var(--crimson); font-family: var(--font-display); font-size: 0.98rem; font-weight: 600; }
+.setup-team-admin { display: grid; gap: 0.35rem; }
+.setup-team-admin-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.4rem; }
+.team-admin-row {
+  border: 1px solid var(--gold-line);
+  border-radius: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  background: rgba(255, 255, 255, 0.55);
+}
+.team-admin-row strong { color: var(--ink); }
+.team-admin-row .team-name-input {
+  flex: 1;
+  min-width: 8rem;
+  min-height: 2.3rem;
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  border-radius: 0.45rem;
+  padding: 0 0.55rem;
+  color: var(--ink);
+  background: #fff;
+}
+.team-admin-row .copy-button { min-height: 2.3rem; padding: 0.2rem 0.55rem; font-size: 0.74rem; }
+.setup-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 0.7rem;
+  padding: 0.6rem 0.8rem;
+  background: rgba(255, 255, 255, 0.55);
+}
+.setup-field-label strong { display: block; color: var(--ink); font-size: clamp(0.95rem, 1.1vw, 1.05rem); font-weight: 700; }
+.setup-field-label small { display: block; margin-top: 0.1rem; color: var(--ink-faint); font-size: 0.76rem; }
+
+.setup-stepper { display: inline-flex; align-items: center; gap: 0.4rem; flex: none; }
+.setup-stepper button {
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  flex: none;
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  border-radius: 0.55rem;
+  color: #fdf1dc;
+  font-size: 1.3rem;
+  font-weight: 700;
+  line-height: 1;
+  background: linear-gradient(180deg, #a72333, #7d1522);
+  transition: background 160ms ease, transform 140ms ease;
+}
+@media (hover: hover) { .setup-stepper button:hover:not(:disabled) { background: linear-gradient(180deg, #bd2b3d, #8e1a29); } }
+.setup-stepper button:active:not(:disabled) { transform: translateY(1px); }
+.setup-stepper button:disabled { color: rgba(253, 241, 220, 0.6); background: linear-gradient(180deg, #9a8b8d, #837577); }
+.setup-stepper input {
+  width: 4.4rem;
+  height: 2.6rem;
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  border-radius: 0.55rem;
+  color: var(--ink);
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  background: #fff;
+}
+.setup-stepper input:disabled { color: var(--ink-faint); background: #efeae0; }
+
+.setup-action {
+  flex: none;
+  min-width: 9rem;
+  min-height: 2.75rem;
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  border-radius: 0.6rem;
+  padding: 0 1.1rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  transition: background 160ms ease, transform 140ms ease;
+}
+.setup-action.is-primary { color: #fdf1dc; background: linear-gradient(180deg, #a72333, #7d1522); }
+.setup-action.is-dark { color: #f3e7cc; background: linear-gradient(180deg, #1b2352, #101638); }
+.setup-action:active:not(:disabled) { transform: translateY(1px); }
+.setup-action:disabled { color: rgba(255, 255, 255, 0.65); background: linear-gradient(180deg, #9a938c, #837c75); }
+
+.setup-unit-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; padding-inline: 0.2rem; }
+.setup-unit-row label { color: var(--ink-soft); font-size: 0.82rem; font-weight: 600; }
+.setup-unit-row select {
+  min-height: 2.4rem;
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  border-radius: 0.5rem;
+  padding: 0 0.6rem;
+  color: var(--ink);
+  background: #fff;
+}
+.setup-unit-row small { color: var(--ink-faint); font-size: 0.74rem; }
+
+.setup-warning { margin: 0; color: #9a2b32; font-size: 0.84rem; }
+.setup-start { width: 100%; margin-top: 0.3rem; }
+
+.setup-tips { border: 1px solid rgba(142, 26, 41, 0.28); border-radius: 0.7rem; padding: 0.7rem 0.9rem; background: rgba(251, 234, 236, 0.6); }
+.setup-tips-title { display: flex; align-items: center; gap: 0.5rem; margin: 0; color: var(--crimson); font-family: var(--font-display); font-size: 1rem; font-weight: 600; }
+.setup-tips-title::before { content: ''; width: 1.2rem; height: 1.2rem; background: var(--rose-mark) center/contain no-repeat; }
+.setup-tips ul { margin: 0.4rem 0 0; padding-left: 1.1rem; color: var(--ink-soft); font-size: 0.84rem; line-height: 1.75; }
+
+.setup-grimoire {
+  min-height: 2.6rem;
+  border: 1px solid var(--gold-line);
+  border-radius: 0.6rem;
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.6);
+}
+@media (hover: hover) { .setup-grimoire:hover { background: #fff; border-color: rgba(184, 145, 63, 0.75); } }
+
+/* The captain / team-name panel cannot be removed — its "สรุปผลหัวหน้าทีมตอนนี้", "รีเซ็ตการเลือกตั้ง"
+   and "ตั้งชื่อ" controls are the teacher's only way to clear the checks that gate the start
+   button. On this stage it is restyled to the cream language so it reads as part of the screen
+   rather than a leftover dark panel below the fold. */
+.setup-captain-panel {
+  --ink: #2c2233;
+  --ink-soft: #6d6154;
+  --crimson: #8e1a29;
+  --gold-line: rgba(150, 122, 74, 0.45);
+  border: 1px solid rgba(150, 122, 74, 0.6);
+  border-radius: 1.1rem;
+  background: linear-gradient(180deg, #fbf6ea, #f1e8d6);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--ink);
+  box-shadow: 0 1rem 2.6rem rgba(0, 0, 0, 0.35);
+}
+.setup-captain-panel .eyebrow { color: var(--ink-soft); }
+.setup-captain-panel h2, .setup-captain-panel h3 { color: var(--crimson) !important; }
+.setup-captain-panel p, .setup-captain-panel small, .setup-captain-panel span, .setup-captain-panel li { color: var(--ink-soft); }
+.setup-captain-panel strong { color: var(--ink); }
+.setup-captain-panel input[type='text'], .setup-captain-panel input:not([type]) {
+  border: 1px solid rgba(150, 122, 74, 0.5);
+  color: var(--ink);
+  background: #fff;
+}
+.setup-captain-panel input::placeholder { color: #9a9086; }
+.setup-captain-panel > div, .setup-captain-panel > section {
+  border-color: var(--gold-line);
+  background: rgba(255, 255, 255, 0.5);
+}
+.setup-captain-panel button { border-color: rgba(150, 122, 74, 0.5); color: var(--ink); background: rgba(255, 255, 255, 0.75); }
+.setup-captain-panel button:disabled { color: #9a9086; background: rgba(240, 236, 228, 0.8); }
+
+@media (max-width: 900px) { .setup-stage { grid-template-columns: minmax(0, 1fr); } }
+
+/* The pre-game stages now carry their identity in the topbar, so the dashboard's hero block (page
+   title + tagline) is redundant there and is the difference between one screen and a scroll. It
+   still renders for the scrolling dashboard stages. */
+.teacher-shell-stage .teacher-intro { display: none; }
+
+/* Keep the lobby to a single screen on a laptop or projector by compressing the rhythm rather
+   than scrolling. Touch targets are untouched. */
+@media (min-width: 901px) and (max-height: 960px) {
+  .teacher-shell-stage { padding-top: 0.4rem; }
+  .lobby-stage { margin-top: 0.6rem; }
+  .lobby-command, .lobby-roster { padding: clamp(0.8rem, 1.4vw, 1.2rem); }
+  .lobby-command-title { margin-top: 0.55rem; font-size: clamp(1.5rem, 2.1vw, 2rem); }
+  .lobby-count strong { font-size: clamp(1.9rem, 2.7vw, 2.6rem); }
+  .lobby-helper { margin-top: 0.45rem; line-height: 1.7; }
+  .rose-rule { height: 1.1rem; margin-top: 0.3rem; }
+  .lobby-count-label { margin-top: 0.4rem; }
+  .lobby-count { margin-top: 0.15rem; }
+  .lobby-divider { margin-top: 0.5rem; }
+  .lobby-duration { margin-top: 0.5rem; }
+  .stage-cta { margin-top: 0.5rem; }
+  .lobby-footnote { margin-top: 0.4rem; }
+  .lobby-command .stage-room-controls { margin-top: 0.5rem; }
+  .teacher-room-bar { padding-block: 0.7rem; }
+  .lobby-roster-list { max-height: none; margin-top: 0.8rem; }
+  .lobby-roster-item { padding-block: 0.5rem; }
+}
+
+/* 1280x720 projectors: a second, firmer compression tier. The roster list keeps its own scroll,
+   so a large class still fits without the page itself scrolling. */
+@media (min-width: 901px) and (max-height: 780px) {
+  .stage-badge { padding: 0.3rem 1.1rem; font-size: 0.82rem; }
+  .lobby-command-title { margin-top: 0.5rem; font-size: clamp(1.3rem, 1.9vw, 1.7rem); }
+  .rose-rule { height: 0.9rem; margin-top: 0.3rem; }
+  .lobby-count-label { margin-top: 0.4rem; font-size: 0.85rem; }
+  .lobby-count { margin-top: 0.1rem; }
+  .lobby-count strong { font-size: clamp(1.6rem, 2.2vw, 2.1rem); }
+  .lobby-count svg { width: 1.7em; height: 1.7em; }
+  .lobby-helper { margin-top: 0.45rem; font-size: 0.84rem; line-height: 1.55; }
+  .lobby-divider { margin-top: 0.5rem; }
+  .lobby-duration { margin-top: 0.5rem; }
+  .lobby-duration .stage-duration-input { min-height: 2.9rem; }
+  .lobby-duration small { font-size: 0.68rem; }
+  .stage-cta { margin-top: 0.5rem; min-height: 3.1rem; font-size: 1.05rem; }
+  .lobby-footnote { margin-top: 0.4rem; font-size: 0.75rem; }
+  .lobby-command .stage-room-controls { margin-top: 0.5rem; }
+  .lobby-roster-list { max-height: 100%; }
+  /* The room bar gives up height too — the code stays the largest thing in it. */
+  .teacher-room-bar { gap: 0.9rem; padding: 0.55rem 0.9rem; }
+  .teacher-room-bar small { margin-bottom: 0.1rem; font-size: 0.7rem; }
+  .room-code { font-size: clamp(1.4rem, 3.2vw, 1.9rem); }
+  .room-bar-metric { font-size: 1.15rem; }
+  /* .copy-button keeps its 44px touch target here — it is tapped often on a touchscreen. */
+  .lobby-command, .lobby-roster { padding: 0.7rem; }
+  .lobby-helper { line-height: 1.45; }
+  .lobby-duration small { font-size: 0.64rem; }
+  .lobby-count svg { width: 1.4em; height: 1.4em; }
+  .lobby-count strong { font-size: clamp(1.5rem, 2vw, 1.9rem); }
+  .stage-badge { padding: 0.25rem 1rem; }
+  /* Space comes out of the rhythm, never out of the CTA or the room-level button. */
+  .lobby-helper { margin-top: 0.35rem; font-size: 0.8rem; line-height: 1.4; }
+  .lobby-count-label { margin-top: 0.3rem; font-size: 0.8rem; }
+  .lobby-command-title { margin-top: 0.35rem; font-size: clamp(1.2rem, 1.75vw, 1.55rem); }
+  .rose-rule { margin-top: 0.2rem; }
+  .lobby-divider { margin-top: 0.4rem; }
+  .lobby-duration { margin-top: 0.4rem; }
+  .lobby-duration .stage-duration-input { min-height: 2.7rem; }
+  .stage-cta { margin-top: 0.45rem; min-height: 2.9rem; }
+  .lobby-footnote { margin-top: 0.35rem; font-size: 0.72rem; }
+  .lobby-command .stage-room-controls { margin-top: 0.45rem; }
+  .teacher-room-bar { padding-block: 0.45rem; }
+  .recall-command-hint { margin-top: 0.2rem; font-size: 0.75rem; }
+  .lobby-duration small { margin-top: 0.1rem; }
+  .lobby-stage { margin-top: 0.25rem; gap: 0.7rem; }
+  .lobby-command, .lobby-roster { padding: 0.6rem; }
+  .lobby-roster-title { font-size: 1.1rem; }
+  .lobby-roster-item { padding-block: 0.4rem; }
+  .teacher-topbar { padding-block: 0.3rem; }
+  /* The Recall stage shares this shell, so it gets the same compression — it is meant to be a
+     single viewport too. */
+  .recall-command-view { gap: 0.25rem; padding-block: 0.75rem; }
+  .recall-command-title { font-size: clamp(1.3rem, 2.6vw, 1.75rem); }
+  .recall-command-count { font-size: 1.6rem; }
+  .recall-command-status { font-size: 1rem; }
+  .recall-player-chips { margin-top: 0.6rem; max-height: 6rem; }
+  .recall-start-main-button { margin-top: 0.8rem; }
+}
+
+@media (max-width: 900px) {
+  .lobby-stage { grid-template-columns: minmax(0, 1fr); }
+  .lobby-roster-list { max-height: 22rem; }
+  .teacher-topbar { flex-wrap: wrap; row-gap: 0.4rem; }
+  .teacher-topbar-divider { display: none; }
+}
+
 /* ================= Student Join =================================================
    Two-column composition on the approved Home background: compact brand at top-left, home link at
    top-right, intro copy left, player form right. Deep navy dominant, crimson CTA, restrained gold
@@ -1478,20 +2336,22 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 
 /* ---- header ---- */
+/* Only the home link lives up here now — the title art moved into the left column. */
 .join-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 1rem;
   padding: clamp(1rem, 2.4vh, 1.75rem) clamp(1.25rem, 4vw, 3.5rem);
 }
-.join-brand { display: inline-flex; align-items: center; text-decoration: none; }
+.join-brand { display: block; width: 100%; text-decoration: none; }
 .join-brand img {
   display: block;
-  width: clamp(6.5rem, 10.5vw, 9.5rem);
+  width: min(100%, 30rem);
   height: auto;
   max-width: none;
-  filter: drop-shadow(0 0.4rem 1.4rem rgba(0, 0, 0, 0.55));
+  margin: 0 auto;
+  filter: drop-shadow(0 0.6rem 2.2rem rgba(0, 0, 0, 0.6));
 }
 .join-home-link {
   display: inline-flex;
@@ -1526,31 +2386,43 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 
 /* ---- left intro ---- */
-.join-intro { max-width: 34rem; }
-/* Hairline rule trailing the eyebrow, echoing the reference's thin gold divider. */
+/* The column is centred as a unit under the title art: logo, label, headline and description all
+   share one axis, with a generous step between each. */
+.join-intro {
+  display: grid;
+  justify-items: center;
+  max-width: 36rem;
+  margin: 0 auto;
+  text-align: center;
+}
+/* Gold hairlines flanking the label, echoing the reference's thin divider. */
 .join-eyebrow {
   display: flex;
   align-items: center;
   gap: 1rem;
-  margin: 0;
+  /* The logo asset carries transparent padding below the artwork; the negative step closes that
+     phantom gap so the measured spacing matches what the eye sees. */
+  margin: calc(clamp(1.4rem, 3.4vh, 2.4rem) - 2.4vw) 0 0;
   color: #e0c179;
   font-size: clamp(0.95rem, 1.15vw, 1.15rem);
   font-weight: 600;
   letter-spacing: 0.16em;
 }
+.join-eyebrow::before,
 .join-eyebrow::after {
   content: '';
   flex: 1;
-  max-width: 8rem;
+  max-width: 5rem;
   height: 1px;
-  background: linear-gradient(90deg, rgba(201, 162, 83, 0.55), transparent);
+  background: linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.55), transparent);
 }
 .join-title {
-  margin: clamp(0.9rem, 2.2vh, 1.5rem) 0 0;
+  margin: clamp(1.1rem, 2.6vh, 1.8rem) 0 0;
   color: #f0d9a4;
-  font-size: clamp(2.6rem, 4.6vw, 4.6rem);
-  font-weight: 700;
-  line-height: 1.15;
+  font-size: clamp(2.3rem, 3.9vw, 3.9rem);
+  font-weight: 600;
+  /* Pridi carries tall upper vowel marks; 1.15 clipped them on this size. */
+  line-height: 1.28;
   text-shadow: 0 0.4rem 1.6rem rgba(4, 6, 22, 0.75);
 }
 /* Rose divider: the single floral motif on this screen. */
@@ -1558,17 +2430,17 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   content: '';
   display: block;
   height: 1.5rem;
-  margin-top: clamp(0.9rem, 2vh, 1.4rem);
+  margin-top: clamp(1.1rem, 2.4vh, 1.7rem);
   background:
     linear-gradient(90deg, transparent, rgba(201, 162, 83, 0.5) 22%, transparent 44%) center/100% 1px no-repeat,
     var(--rose-mark) center/1.5rem 1.5rem no-repeat;
 }
 .join-lede {
   max-width: 30rem;
-  margin: clamp(1.1rem, 2.6vh, 1.9rem) 0 0;
+  margin: clamp(1.3rem, 3vh, 2.1rem) 0 0;
   color: #e2d8c9;
-  font-size: clamp(1.05rem, 1.3vw, 1.3rem);
-  line-height: 1.85;
+  font-size: clamp(1.05rem, 1.25vw, 1.24rem);
+  line-height: 1.9;
 }
 
 /* ---- form panel ---- */
@@ -1813,8 +2685,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .join-layout { padding-top: 0.75rem; padding-bottom: 1.25rem; }
   .join-form { padding: clamp(1.1rem, 1.9vw, 1.7rem); }
   .join-form-title { font-size: clamp(1.35rem, 1.7vw, 1.7rem); }
-  .join-brand img { width: clamp(6rem, 8.5vw, 8rem); }
-  .join-title { font-size: clamp(2.2rem, 3.6vw, 3.3rem); }
+  .join-brand img { width: min(100%, 21rem); }
+  .join-title { font-size: clamp(2rem, 3.1vw, 2.9rem); }
   .join-lede { font-size: clamp(1rem, 1.15vw, 1.14rem); line-height: 1.7; }
   .join-field input { min-height: 3.3rem; }
   .join-field-code input { min-height: 3.6rem; }
@@ -1835,13 +2707,57 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 @media (max-width: 640px) {
   .join-header { padding-inline: 1.25rem; }
-  .join-brand img { width: 7rem; }
-  .join-home-link span { display: none; }
-  .join-home-link { padding: 0.5rem; }
+  .join-brand img { width: min(100%, 17rem); }
   .join-form::after { inset: 0.9rem; background-size: 1.2rem 1.2rem; }
   .join-field input { padding-left: 3.6rem; }
   .join-input-shell::after { left: 2.9rem; }
 }
+
+/* ================= Teacher evidence summary (completed round) ====================
+   Compact, dense, read-only. Reuses the dashboard's existing panel/table language rather than
+   introducing a new visual system. */
+.evidence-round-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-top: 0.9rem; }
+.evidence-round-picker > span { color: #a89f93; font-size: 0.8rem; }
+.evidence-round-picker .copy-button.is-selected { border-color: rgba(226, 189, 101, 0.7); color: #ffe9b6; background: rgba(142, 26, 41, 0.5); }
+
+.evidence-summary { display: grid; gap: 0.85rem; }
+.evidence-summary-title { margin: 0; color: #f2d58d; font-family: var(--font-display); font-size: clamp(1.05rem, 1.4vw, 1.3rem); font-weight: 600; }
+.evidence-summary-note { margin: 0; color: #bdb5ac; font-size: 0.85rem; line-height: 1.65; }
+.evidence-block {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.85rem;
+  padding: 0.8rem 0.95rem;
+  background: rgba(6, 7, 25, 0.35);
+}
+.evidence-block-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.6rem;
+  color: #fff7df;
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+.evidence-block-title span { color: #a89f93; font-size: 0.8rem; font-weight: 500; }
+.evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.6rem; margin: 0; }
+.evidence-grid dt { color: #a89f93; font-size: 0.78rem; }
+.evidence-grid dd { margin: 0.15rem 0 0; color: #f2d58d; font-size: clamp(1.1rem, 1.5vw, 1.4rem); font-weight: 700; font-variant-numeric: tabular-nums; }
+.evidence-empty { margin: 0; color: #a89f93; font-size: 0.85rem; }
+.evidence-survey-items { margin: 0.7rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.35rem; }
+.evidence-survey-items li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  padding-top: 0.35rem;
+}
+.evidence-survey-items li:first-child { border-top: 0; padding-top: 0; }
+.evidence-survey-statement { color: #ded6c9; font-size: 0.84rem; line-height: 1.5; }
+.evidence-survey-score { flex: none; color: #f2d58d; font-size: 0.92rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.evidence-survey-score small { margin-left: 0.35rem; color: #8b8377; font-size: 0.72rem; font-weight: 500; }
 
 /* ================= Teacher printable report (PDF via browser print) =================
    Hidden on screen; revealed only while printing. Thai shaping is left entirely to the browser's
@@ -2019,7 +2935,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .grimoire-card-header { position: sticky; top: 0; z-index: 1; flex: none; padding: 1.25rem 3.25rem 1rem 1.5rem; background: linear-gradient(145deg, #201533, #111229); border-bottom: 1px solid rgba(255,255,255,0.08); }
 .grimoire-close-button { position: absolute; top: 0.9rem; right: 0.9rem; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; flex: none; border: 1px solid rgba(255,255,255,0.15); border-radius: 50%; color: #cfc7bb; background: rgba(255,255,255,0.08); font-size: 0.9rem; }
 .grimoire-card-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 1rem 1.5rem max(1.5rem, env(safe-area-inset-bottom)); }
-.grimoire-title { margin-top: 0.3rem; color: #f5d47d; font-family: "Th Sarabun New", "Leelawadee UI", serif; font-size: clamp(1.9rem, 4.5vw, 2.6rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(236,187,83,0.35); }
+.grimoire-title { margin-top: 0.3rem; color: #f5d47d; font-family: var(--font-display); font-size: clamp(1.9rem, 4.5vw, 2.6rem); font-weight: 700; text-shadow: 0 0 1.6rem rgba(236,187,83,0.35); }
 .grimoire-subtitle { margin-top: 0.2rem; color: #d8d1c5; font-size: 0.95rem; }
 .grimoire-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1.5rem; text-align: left; }
 /* Desktop keeps the 2x2 grid; mobile AND iPad portrait (~768-834px logical width, well above the

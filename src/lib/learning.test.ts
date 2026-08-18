@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { questions } from '../data/questions'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
-import { computeClassLearningSummary, computeStudentLearningEvidence } from './learning'
-import type { AnswerRecord, Player, RecallAnswerRecord } from '../types/game'
+import { computeClassRecallSummary, computeStudentRecallResult } from './learning'
+import type { Player, RecallAnswerRecord } from '../types/game'
 
 const makeRecallAnswer = (conceptId: string, isCorrect: boolean): RecallAnswerRecord => ({
   conceptId,
@@ -11,21 +11,12 @@ const makeRecallAnswer = (conceptId: string, isCorrect: boolean): RecallAnswerRe
   answeredAt: 0,
 })
 
-const makeMainAnswer = (questionId: string, isCorrect: boolean): AnswerRecord => ({
-  questionId,
-  selectedChoiceId: isCorrect ? 'x-correct' : 'x-wrong',
-  isCorrect,
-  answeredAt: 0,
-  responseTimeMs: 0,
-})
+type RecallPlayer = Pick<Player, 'recallAnswers'>
 
-type LearningPlayer = Pick<Player, 'recallAnswers' | 'answers'>
-
-const makeLearningPlayer = (recallAnswers: RecallAnswerRecord[], answers: AnswerRecord[]): LearningPlayer => ({ recallAnswers, answers })
+const makeRecallPlayer = (recallAnswers: RecallAnswerRecord[]): RecallPlayer => ({ recallAnswers })
 
 // Data-integrity guard: every Recall item previously had its correct answer in position A, so
-// "tap ก. five times" scored 5/5 and the before-play evidence measured nothing. The positions must
-// stay mixed for Baseline to mean anything.
+// "tap ก. five times" scored 5/5 and the review result measured nothing.
 describe('Story Recall answer positions', () => {
   it('does not place every correct answer in the same choice position', () => {
     const positions = RECALL_QUESTIONS.map((question) => question.choices.findIndex((choice) => choice.id === question.correctChoiceId))
@@ -47,115 +38,86 @@ describe('Story Recall answer positions', () => {
   })
 })
 
-describe('computeStudentLearningEvidence', () => {
-  it('a student who got every Recall and every mapped Main question right has Baseline == In-game Evidence == 100%, Learning Gain 0', () => {
-    const player = makeLearningPlayer(
-      RECALL_QUESTIONS.map((question) => makeRecallAnswer(question.id, true)),
-      RECALL_QUESTIONS.map((question) => makeMainAnswer(question.mappedMainQuestionId, true)),
-    )
-    const evidence = computeStudentLearningEvidence(player)
-    expect(evidence.recallCorrectCount).toBe(5)
-    expect(evidence.mainEvidenceCorrectCount).toBe(5)
-    expect(evidence.baselinePercent).toBe(100)
-    expect(evidence.inGameEvidencePercent).toBe(100)
-    expect(evidence.learningGainPercent).toBe(0)
-    expect(evidence.improvedConceptIds).toEqual([])
-    expect(evidence.stillIncorrectConceptIds).toEqual([])
+describe('computeStudentRecallResult', () => {
+  it('counts only the review answers — a perfect review is correctCount === totalCount', () => {
+    const player = makeRecallPlayer(RECALL_QUESTIONS.map((question) => makeRecallAnswer(question.id, true)))
+    const result = computeStudentRecallResult(player)
+    expect(result.correctCount).toBe(RECALL_QUESTIONS.length)
+    expect(result.totalCount).toBe(RECALL_QUESTIONS.length)
+    expect(result.answeredCount).toBe(RECALL_QUESTIONS.length)
   })
 
-  it('a student who answered nothing at all scores 0/5 on both sides — never crashes on missing records', () => {
-    const player = makeLearningPlayer([], [])
-    const evidence = computeStudentLearningEvidence(player)
-    expect(evidence.recallCorrectCount).toBe(0)
-    expect(evidence.mainEvidenceCorrectCount).toBe(0)
-    expect(evidence.baselinePercent).toBe(0)
-    expect(evidence.inGameEvidencePercent).toBe(0)
-    expect(evidence.learningGainPercent).toBe(0)
-    // Every concept's mapped Main answer is missing (not correct), so every one is "still incorrect".
-    expect(evidence.stillIncorrectConceptIds).toEqual(RECALL_QUESTIONS.map((question) => question.id))
+  it('a student who answered nothing scores 0 and never crashes on missing records', () => {
+    const result = computeStudentRecallResult(makeRecallPlayer([]))
+    expect(result.correctCount).toBe(0)
+    expect(result.answeredCount).toBe(0)
+    expect(result.totalCount).toBe(RECALL_QUESTIONS.length)
   })
 
-  it('a concept wrong at Recall but right at Main counts as improved, positive Learning Gain', () => {
-    const [first, ...rest] = RECALL_QUESTIONS
-    const player = makeLearningPlayer(
-      [makeRecallAnswer(first.id, false), ...rest.map((question) => makeRecallAnswer(question.id, true))],
-      RECALL_QUESTIONS.map((question) => makeMainAnswer(question.mappedMainQuestionId, true)),
-    )
-    const evidence = computeStudentLearningEvidence(player)
-    expect(evidence.recallCorrectCount).toBe(4)
-    expect(evidence.mainEvidenceCorrectCount).toBe(5)
-    expect(evidence.improvedConceptIds).toEqual([first.id])
-    expect(evidence.stillIncorrectConceptIds).toEqual([])
-    expect(evidence.learningGainPercent).toBeCloseTo(20, 5) // (5/5*100) - (4/5*100)
+  it('distinguishes unanswered from answered-incorrectly', () => {
+    const [first, second] = RECALL_QUESTIONS
+    const result = computeStudentRecallResult(makeRecallPlayer([
+      makeRecallAnswer(first.id, true),
+      makeRecallAnswer(second.id, false),
+    ]))
+    expect(result.correctCount).toBe(1)
+    expect(result.answeredCount).toBe(2)
   })
 
-  it('a concept right at Recall but wrong at Main is NOT counted as improved, and IS still incorrect', () => {
-    const [first, ...rest] = RECALL_QUESTIONS
-    const player = makeLearningPlayer(
-      RECALL_QUESTIONS.map((question) => makeRecallAnswer(question.id, true)),
-      [makeMainAnswer(first.mappedMainQuestionId, false), ...rest.map((question) => makeMainAnswer(question.mappedMainQuestionId, true))],
-    )
-    const evidence = computeStudentLearningEvidence(player)
-    expect(evidence.improvedConceptIds).toEqual([])
-    expect(evidence.stillIncorrectConceptIds).toEqual([first.id])
-    expect(evidence.learningGainPercent).toBeCloseTo(-20, 5) // (4/5*100) - (5/5*100)
-  })
-
-  // Explicit guard against the exact things the spec forbids these metrics from ever touching:
-  // this only reads recallAnswers/answers, so a Player-shaped object that had magic/team/boss/
-  // speed/ranking fields set to something extreme would have zero effect on the result (there is
-  // nothing here that could read them even if it wanted to — the function signature itself is
-  // narrowed to Pick<Player, 'recallAnswers' | 'answers'>).
-  it('never reads anything beyond recallAnswers/answers (raw individual correctness only)', () => {
-    const player = makeLearningPlayer(
-      [makeRecallAnswer(RECALL_QUESTIONS[0].id, true)],
-      [makeMainAnswer(RECALL_QUESTIONS[0].mappedMainQuestionId, true)],
-    )
-    const evidence = computeStudentLearningEvidence(player)
-    expect(evidence.recallCorrectCount).toBe(1)
-    expect(evidence.mainEvidenceCorrectCount).toBe(1)
+  // The core guarantee of this milestone: the review result is computed from recallAnswers ALONE.
+  // Main answers are not an input, so no before/after or gain figure can be produced here.
+  it('never reads the main-game answers — recall is not a baseline for anything', () => {
+    const recallAnswers = RECALL_QUESTIONS.map((question) => makeRecallAnswer(question.id, false))
+    const withoutMain = computeStudentRecallResult({ recallAnswers })
+    // A player object carrying main answers cannot change the result: the function's own
+    // parameter type admits only recallAnswers.
+    expect(withoutMain.correctCount).toBe(0)
+    expect(Object.keys(withoutMain)).toEqual(['correctCount', 'totalCount', 'answeredCount'])
   })
 })
 
-describe('computeClassLearningSummary', () => {
-  it('aggregates recall/main correctness per concept across the whole class, and averages to a class baseline/evidence/gain', () => {
+describe('computeClassRecallSummary', () => {
+  it('aggregates review correctness per concept across the class', () => {
     const conceptA = RECALL_QUESTIONS[0]
     const conceptB = RECALL_QUESTIONS[1]
-    // Two students: one gets concept A right (recall+main), the other gets concept A wrong on
-    // both; concept B: neither ever answers it.
-    const players: LearningPlayer[] = [
-      makeLearningPlayer([makeRecallAnswer(conceptA.id, true)], [makeMainAnswer(conceptA.mappedMainQuestionId, true)]),
-      makeLearningPlayer([makeRecallAnswer(conceptA.id, false)], [makeMainAnswer(conceptA.mappedMainQuestionId, false)]),
+    const players: RecallPlayer[] = [
+      makeRecallPlayer([makeRecallAnswer(conceptA.id, true)]),
+      makeRecallPlayer([makeRecallAnswer(conceptA.id, false)]),
     ]
-    const summary = computeClassLearningSummary(players)
-    const conceptASummary = summary.concepts.find((concept) => concept.conceptId === conceptA.id)
-    const conceptBSummary = summary.concepts.find((concept) => concept.conceptId === conceptB.id)
-    expect(conceptASummary).toMatchObject({ recallCorrectCount: 1, mainCorrectCount: 1, totalStudents: 2 })
-    expect(conceptBSummary).toMatchObject({ recallCorrectCount: 0, mainCorrectCount: 0, totalStudents: 2 })
+    const summary = computeClassRecallSummary(players)
+    expect(summary.concepts.find((concept) => concept.conceptId === conceptA.id))
+      .toMatchObject({ recallCorrectCount: 1, totalStudents: 2 })
+    expect(summary.concepts.find((concept) => concept.conceptId === conceptB.id))
+      .toMatchObject({ recallCorrectCount: 0, totalStudents: 2 })
   })
 
-  it('an empty class never crashes — 0% everywhere, no strongest/weakest concept', () => {
-    const summary = computeClassLearningSummary([])
-    expect(summary.baselinePercent).toBe(0)
-    expect(summary.inGameEvidencePercent).toBe(0)
-    expect(summary.learningGainPercent).toBe(0)
+  it('averages correct items per student', () => {
+    const [first, second] = RECALL_QUESTIONS
+    const players: RecallPlayer[] = [
+      makeRecallPlayer([makeRecallAnswer(first.id, true), makeRecallAnswer(second.id, true)]),
+      makeRecallPlayer([makeRecallAnswer(first.id, true)]),
+    ]
+    // 3 correct items across 2 students.
+    expect(computeClassRecallSummary(players).averageCorrectCount).toBeCloseTo(1.5, 5)
+  })
+
+  it('an empty class never crashes — 0 average, no strongest/weakest concept', () => {
+    const summary = computeClassRecallSummary([])
+    expect(summary.averageCorrectCount).toBe(0)
     expect(summary.strongestConceptId).toBeNull()
     expect(summary.weakestConceptId).toBeNull()
   })
 
-  it('identifies the strongest and weakest concept by in-game (Main) evidence accuracy', () => {
-    const [strong, weak, ...restQuestions] = RECALL_QUESTIONS
-    const players: LearningPlayer[] = [
-      makeLearningPlayer(
-        [],
-        [
-          makeMainAnswer(strong.mappedMainQuestionId, true),
-          makeMainAnswer(weak.mappedMainQuestionId, false),
-          ...restQuestions.map((question) => makeMainAnswer(question.mappedMainQuestionId, false)),
-        ],
-      ),
+  it('ranks strongest/weakest by review accuracy alone', () => {
+    const [strong, weak, ...rest] = RECALL_QUESTIONS
+    const players: RecallPlayer[] = [
+      makeRecallPlayer([
+        makeRecallAnswer(strong.id, true),
+        makeRecallAnswer(weak.id, false),
+        ...rest.map((question) => makeRecallAnswer(question.id, false)),
+      ]),
     ]
-    const summary = computeClassLearningSummary(players)
+    const summary = computeClassRecallSummary(players)
     expect(summary.strongestConceptId).toBe(strong.id)
     expect(summary.weakestConceptId).toBe(weak.id)
   })

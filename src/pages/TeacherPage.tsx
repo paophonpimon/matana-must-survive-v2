@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundMusicControls } from '../components/BackgroundMusicControls'
 import { BossResultDetails } from '../components/BossResultDetails'
+import { EvidenceSummaryPanel } from '../components/EvidenceSummaryPanel'
 import { TeacherReportPrintView } from '../components/TeacherReportPrintView'
 import { GrimoireModal } from '../components/GrimoireModal'
-import { BrandHeader, ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
+import { Link } from 'react-router-dom'
+import { ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
@@ -12,7 +14,10 @@ import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, us
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
-import { computeClassLearningSummary, computeStudentLearningEvidence } from '../lib/learning'
+import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
+import { SURVEY_ITEM_COUNT } from '../data/surveyItems'
+import { computeEvidenceSummary, computeEvidenceSummaryFromHistory } from '../lib/evidenceSummary'
+import { computeClassRecallSummary } from '../lib/learning'
 import { downloadLearningWorkbook } from '../lib/learningExport'
 import { buildRoundHistoryEntry } from '../lib/roundHistory'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
@@ -32,7 +37,7 @@ import {
   type Player,
 } from '../types/game'
 
-type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | null
+type ConfirmAction = 'prepare' | 'start' | 'stop' | 'close' | 'startRecall' | null
 
 const formatCountdown = (milliseconds: number): string => {
   const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000))
@@ -50,6 +55,11 @@ const RankEmblem = ({ rank, leading }: { rank: number; leading: boolean }) => (
     </svg>
   </span>
 )
+
+// Number of team colour slots defined in styles.css (.team-tone-0 … .team-tone-11). Teams beyond
+// this count wrap around and reuse a colour — a class of 12 teams is already well past what the
+// room is designed for, and reusing beats running out.
+const TEAM_TONE_COUNT = 12
 
 const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
   players: Player[]
@@ -148,7 +158,7 @@ export const TeacherPage = () => {
   // {questionStartedAt: bossQuestionStartedAt, questionDurationSeconds: bossQuestionDurationSeconds,
   // questionClosedAt: null} object (boss has no early-close).
   const isBossPhase = roomState.data?.phase === 'boss'
-  // Learning Layer: mandatory individual "กู้ความทรงจำมัทนา" phase every round begins in —
+  // Learning Layer: mandatory individual "ทบทวนเรื่องราว" phase every round begins in —
   // completion is purely a count derived from the already-subscribed players list (each
   // player's own recallAnswers, teacher-readable the same way every other player field is).
   // Stage comes off room.phase ('lobby' and 'recall' are distinct values, so no cross-check is
@@ -165,7 +175,20 @@ export const TeacherPage = () => {
   // which is exactly the same set of stages status === 'waiting' already identifies.
   const showRoomControls = isPreGameStage
   const isLobbyPhase = isPreGameStage && roomState.data?.phase === 'lobby'
+  const isPreTestPhase = isPreGameStage && roomState.data?.phase === 'preTest'
+  // Post-test runs while the room is still 'playing', so it is deliberately NOT part of
+  // isPreGameStage (which means status === 'waiting').
+  const isPostTestPhase = roomState.data?.status === 'playing' && roomState.data?.phase === 'postTest'
+  const postTestCompletedCount = playersState.data.filter((player) => player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT).length
+  const isSurveyPhase = roomState.data?.status === 'playing' && roomState.data?.phase === 'survey'
+  const surveyCompletedCount = playersState.data.filter((player) => player.surveyResponses.length >= SURVEY_ITEM_COUNT).length
+  // Completion = answered every item in the bank. Derived from counts only — no answer data.
+  const preTestCompletedCount = playersState.data.filter((player) => player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT).length
+  // Anyone short of a full bank — whether they never started or stopped halfway. This is exactly
+  // the group the pre/post comparison will exclude, which is what the confirmation warns about.
+  const preTestIncompleteCount = playersState.data.length - preTestCompletedCount
   const isRecallPhase = isPreGameStage && roomState.data?.phase === 'recall'
+  const isTeamSetupPhase = isPreGameStage && roomState.data?.phase === 'teamSetup'
   const recallCompletedCount = playersState.data.filter((player) => player.recallAnswers.length >= RECALL_QUESTION_COUNT).length
   // Recall progress is the ROOM's shared timeline, not any student's own answer count.
   const recallQuestionIndex = roomState.data?.recallQuestionIndex ?? 0
@@ -235,20 +258,10 @@ export const TeacherPage = () => {
     [visiblePlayers, roomState.data?.teams, roomState.data?.questionIds, roomState.data?.currentRound, magicEventsState.data],
   )
   const teamStatsById = useMemo(() => new Map(teamStats.map((team) => [team.id, team])), [teamStats])
-  // Learning Layer: raw playersState.data (never visiblePlayers/magic-adjusted/team-scored) —
-  // computeClassLearningSummary only ever reads player.recallAnswers/answers isCorrect, per the
-  // spec's explicit "raw individual knowledge correctness only" requirement.
-  const classLearningSummary = useMemo(() => computeClassLearningSummary(playersState.data), [playersState.data])
-  // Plain class-level counts for the teacher summary, derived from the same per-student raw
-  // correctness the students' own summaries use — no percentages, no team/magic/boss inputs.
-  const classEvidence = useMemo(() => playersState.data.map((player) => computeStudentLearningEvidence(player)), [playersState.data])
-  const classBeforeAverage = classEvidence.length > 0
-    ? classEvidence.reduce((total, entry) => total + entry.recallCorrectCount, 0) / classEvidence.length
-    : 0
-  const classAfterAverage = classEvidence.length > 0
-    ? classEvidence.reduce((total, entry) => total + entry.mainEvidenceCorrectCount, 0) / classEvidence.length
-    : 0
-  const classImprovedStudentCount = classEvidence.filter((entry) => entry.mainEvidenceCorrectCount > entry.recallCorrectCount).length
+  // Story Recall reporting only, from raw playersState.data (never visiblePlayers/magic-adjusted/
+  // team-scored). This is the review activity's own accuracy — it is never paired with the main
+  // game's knowledge score to produce a before/after or gain figure.
+  const classRecallSummary = useMemo(() => computeClassRecallSummary(playersState.data), [playersState.data])
   const currentQuestionStats = useMemo(
     () => computeCurrentQuestionStats(playersState.data, currentQuestionId),
     [playersState.data, currentQuestionId],
@@ -258,6 +271,13 @@ export const TeacherPage = () => {
     [playersState.data, roomState.data?.teams, currentQuestionId],
   )
   const teamNameById = useMemo(() => new Map((roomState.data?.teams ?? []).map((team) => [team.id, team.name])), [roomState.data?.teams])
+  // Stable colour slot per team, taken from the team's position in room.teams. Position is what
+  // "ทีม N" already numbers from, so the colour always matches the name a teacher reads out. The
+  // palette cycles, so any number of teams gets a colour.
+  const teamToneById = useMemo(
+    () => new Map((roomState.data?.teams ?? []).map((team, index) => [team.id, index % TEAM_TONE_COUNT])),
+    [roomState.data?.teams],
+  )
   // Item 6: guardian name (once a captain sets one) replaces the generic "ทีม N" label
   // everywhere on this screen — teamNameById above stays the "ทีม N" fallback source, never
   // itself replaced, so guardianDisplayName always has something to fall back to.
@@ -283,7 +303,11 @@ export const TeacherPage = () => {
     if (!room) return roundHistoryState.data
     const storedIds = new Set(roundHistoryState.data.map((entry) => entry.id))
     const completedAt = room.completedAt ?? Date.now()
-    const currentRoundEntries = playersState.data
+    // A round that has not finished yet has nothing to snapshot: after prepareNextRound the live
+    // players are all zeroed, and deriving from them would add a phantom round of empty rows to
+    // the history list, the export and the round picker.
+    const roundEnded = room.status === 'completed' || room.status === 'closed'
+    const currentRoundEntries = (roundEnded ? playersState.data : [])
       .map((player) => {
         const teamName = player.teamId
           ? displayTeamNameById.get(player.teamId) ?? ''
@@ -294,6 +318,33 @@ export const TeacherPage = () => {
     return [...roundHistoryState.data, ...currentRoundEntries]
       .sort((a, b) => a.round - b.round || a.studentNumber.localeCompare(b.studentNumber))
   }, [roomState.data, roundHistoryState.data, playersState.data, displayTeamNameById])
+  // Every round the teacher can inspect: stored history plus the just-finished round.
+  const availableRounds = useMemo(
+    () => [...new Set(exportEntries.map((entry) => entry.round))].sort((a, b) => b - a),
+    [exportEntries],
+  )
+  // Defaults to the newest available round, and follows it as new rounds land — but a teacher who
+  // picks an older round keeps that choice.
+  const [selectedRound, setSelectedRound] = useState<number | null>(null)
+  const activeRound = selectedRound !== null && availableRounds.includes(selectedRound)
+    ? selectedRound
+    : availableRounds[0] ?? null
+  // Source selection: the CURRENT round may read live players (they are still intact right after
+  // completion); any other round must come from the durable history snapshot. This is what keeps
+  // a past round readable after prepareNextRound wipes the live arrays.
+  const selectedEvidence = useMemo(() => {
+    if (activeRound === null) return null
+    const isCurrentRound = activeRound === roomState.data?.currentRound
+    const historyForRound = exportEntries.filter((entry) => entry.round === activeRound)
+    if (isCurrentRound && playersState.data.length > 0 && historyForRound.length === 0) {
+      return computeEvidenceSummary(playersState.data)
+    }
+    return computeEvidenceSummaryFromHistory(historyForRound)
+  }, [activeRound, exportEntries, playersState.data, roomState.data?.currentRound])
+  // The printed report follows whichever round the teacher SELECTED — printing a past round must
+  // print that round, never quietly fall back to the current one.
+  const printEvidence = selectedEvidence ?? computeEvidenceSummaryFromHistory([])
+  const printRound = activeRound ?? roomState.data?.currentRound ?? 0
   const magicByTeamId = useMemo(() => new Map(magicState.data.map((magic) => [magic.teamId, magic])), [magicState.data])
   const playerNameById = useMemo(() => new Map(playersState.data.map((player) => [player.id, player.displayName])), [playersState.data])
   // Milestone 4.1: only counts progress entries matching the team's CURRENT election attempt —
@@ -551,15 +602,40 @@ export const TeacherPage = () => {
     setAdvancingStageBusy(true)
     setError('')
     void transition()
-      .catch((reason) => setError(friendlyError(reason)))
+      .catch((reason) => {
+        // friendlyError collapses anything unrecognized into one generic connection message, which
+        // is right for the teacher but leaves nothing to debug from. Log the raw reason too, so a
+        // stage transition that fails on a real device is visible in the browser console instead
+        // of only as friendly Thai text.
+        console.error('[matana] stage transition failed', reason)
+        setError(friendlyError(reason))
+      })
       .finally(() => { advancingStageRef.current = false; setAdvancingStageBusy(false) })
   }
-  const handleStartRecall = (): void => {
+  // lobby -> preTest. The pre-test is self-paced with no timer, so nothing about the Recall
+  // duration is chosen here — that control now lives on the pre-test screen, where Recall starts.
+  const handleStartPreTest = (): void => {
     // Kicked off synchronously inside the click, before the async service call — browsers only
     // allow play() from a real user gesture, and awaiting the transition first would lose it.
     backgroundMusic.start()
+    runStageTransition(() => service.startPreTest(roomCode, teacherSessionId))
+  }
+  const handleStartRecall = (): void => {
+    backgroundMusic.start()
     runStageTransition(() => service.startRecall(roomCode, teacherSessionId, recallDurationSeconds))
   }
+  // preTest -> recall. Everyone finished: go straight through. Anyone still unfinished: confirm
+  // first, but never block — a single student must not be able to hold the whole class.
+  const requestStartRecall = (): void => {
+    if (preTestIncompleteCount > 0) {
+      backgroundMusic.start()
+      setConfirmAction('startRecall')
+      return
+    }
+    handleStartRecall()
+  }
+  const handleStartSurvey = (): void => runStageTransition(() => service.startSurvey(roomCode, teacherSessionId))
+  const handleCompleteRound = (): void => runStageTransition(() => service.completeRound(roomCode, teacherSessionId))
   const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
 
   // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
@@ -794,6 +870,8 @@ export const TeacherPage = () => {
         await service.startRoom(roomCode, teacherSessionId, questionDurationSeconds, bossDurationSeconds)
       }
       if (action === 'close') await service.closeRoom(roomCode, teacherSessionId)
+      // Same call the direct (everyone-finished) path makes — the confirmation only gates it.
+      if (action === 'startRecall') await service.startRecall(roomCode, teacherSessionId, recallDurationSeconds)
       setNotice(
         action === 'prepare'
           ? 'เตรียมภารกิจรอบใหม่แล้ว รายชื่อและทีมเดิมยังอยู่ครบ'
@@ -801,7 +879,9 @@ export const TeacherPage = () => {
             ? 'หยุดเกมฉุกเฉินแล้ว ทุกคนกลับสู่ห้องรอและพร้อมเริ่มรอบใหม่'
             : action === 'start'
               ? `เริ่มภารกิจแล้ว ทุกคนมีเวลา ${questionDurationSeconds} วินาทีต่อข้อ`
-              : 'ยุติห้องกิจกรรมแล้ว',
+              : action === 'startRecall'
+                ? 'เริ่มทบทวนเรื่องราวแล้ว'
+                : 'ยุติห้องกิจกรรมแล้ว',
       )
     } catch (reason) {
       setError(friendlyError(reason))
@@ -837,6 +917,13 @@ export const TeacherPage = () => {
       description: 'ผู้เรียนทุกคนจะออกจากภารกิจและไม่สามารถกลับเข้าห้องนี้ได้',
       confirmLabel: 'ยุติห้อง',
     },
+    // Shown only when someone is still unfinished. States the real consequence — those students
+    // leave the pre/post comparison — rather than implying their work is lost, because it is not.
+    startRecall: {
+      title: 'เริ่มทบทวนเรื่องราว?',
+      description: `ยังมีนักเรียน ${preTestIncompleteCount} คนทำแบบทดสอบไม่ครบ ข้อมูลของนักเรียนเหล่านี้จะไม่ถูกนำไปเปรียบเทียบคะแนนก่อน–หลัง ต้องการดำเนินการต่อหรือไม่?`,
+      confirmLabel: 'ดำเนินการต่อ',
+    },
   } as const
 
   // Room-level escape hatch for the two pre-team stage screens. Those screens replace the whole
@@ -853,18 +940,174 @@ export const TeacherPage = () => {
     </div>
   )
 
+  // Stepper helpers for the team-setup screen. They only nudge the same state the number inputs
+  // already write, clamped to the same bounds those inputs declare — validation is unchanged, and
+  // typing a value directly still works.
+  const stepClamped = (raw: string, delta: number, min: number, max: number, fallback: number): string => {
+    const current = Number(raw)
+    const base = Number.isFinite(current) ? current : fallback
+    return String(Math.min(max, Math.max(min, Math.round(base) + delta)))
+  }
+  const adjustTeamCount = (delta: number): void => setTeamCountValue((value) => stepClamped(value, delta, 1, 20, 2))
+  const adjustDuration = (delta: number): void =>
+    setDurationValue((value) => (durationUnit === 'seconds' ? stepClamped(value, delta * 5, 5, 600, 30) : stepClamped(value, delta, 1, 10, 1)))
+  const adjustBossDuration = (delta: number): void =>
+    setBossDurationValue((value) => stepClamped(value, delta * 5, MIN_BOSS_SECONDS_PER_QUESTION, MAX_BOSS_SECONDS_PER_QUESTION, MIN_BOSS_SECONDS_PER_QUESTION))
+
+  // Captain / team-name rows. Built as an element list (not a nested component) so React keeps the
+  // same instances across renders — a nested component would remount these inputs on every
+  // keystroke and steal focus. Rendered either in the dashboard or inside the teamSetup column.
+  const teamAdminRows = (roomState.data?.teams ?? []).map((team) => {
+    const magic = magicByTeamId.get(team.id)
+    const holderName = magic?.magicHolderPlayerId ? playerNameById.get(magic.magicHolderPlayerId) ?? '-' : '-'
+    const memberCount = teamStatsById.get(team.id)?.memberCount ?? 0
+    const votedCount = votedCountByTeam.get(team.id) ?? 0
+    const guardianName = guardianNameById.get(team.id)
+    return (
+      <li key={team.id} className="team-admin-row">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <span className="flex flex-wrap items-baseline gap-x-2">
+            <strong>{guardianName ?? team.name}</strong>
+            {guardianName ? <small>{team.name}</small> : null}
+          </span>
+          {magic?.magicHolderPlayerId ? <span className="magic-badge magic-badge-captain">👑 {holderName}</span> : <span className="text-xs">ยังไม่มีหัวหน้าทีม</span>}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            className="team-name-input"
+            placeholder={guardianName ? 'ตั้งชื่อใหม่ (override)' : 'ตั้งชื่อทีม'}
+            value={nameDrafts[team.id] ?? ''}
+            maxLength={TEAM_GUARDIAN_NAME_MAX_LENGTH}
+            onChange={(event) => setNameDrafts((current) => ({ ...current, [team.id]: event.target.value }))}
+            aria-label={`ตั้งชื่อทีม ${team.name}`}
+          />
+          <button type="button" className="copy-button" onClick={() => void handleOverrideTeamName(team.id)} disabled={busy || !(nameDrafts[team.id] ?? '').trim()}>
+            {guardianName ? 'แก้ไข' : 'ตั้งชื่อ'}
+          </button>
+          {guardianName ? (
+            <button type="button" className="copy-button" onClick={() => void handleResetTeamName(team.id)} disabled={busy}>รีเซ็ตชื่อ</button>
+          ) : null}
+        </div>
+        <small className="mt-1 block">{TEAM_GUARDIAN_NAME_MIN_LENGTH}-{TEAM_GUARDIAN_NAME_MAX_LENGTH} ตัวอักษร ไทย/อังกฤษ/ตัวเลข</small>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          {!magic?.magicHolderPlayerId ? <span>โหวตแล้ว {votedCount}/{memberCount} คน</span> : null}
+          {!magic?.magicHolderPlayerId ? (
+            <button type="button" className="copy-button" onClick={() => void handleFinalizeCaptain(team.id)} disabled={busy || memberCount === 0}>
+              สรุปผลหัวหน้าทีมตอนนี้
+            </button>
+          ) : null}
+          <button type="button" className="copy-button" onClick={() => void handleResetCaptain(team.id)} disabled={busy}>
+            รีเซ็ตการเลือกตั้ง
+          </button>
+        </div>
+      </li>
+    )
+  })
+
+  // Roster grouped by team, used once teams are locked. Presentation only — the grouping reads
+  // player.teamId, it never assigns or reorders team membership. Teams keep room.teams order (the
+  // same order "ทีม N" is numbered by); members sort by student number when numeric, otherwise
+  // they keep their join order.
+  const rosterGroups = (roomState.data?.teams ?? []).map((team, index) => ({
+    id: team.id,
+    name: team.name,
+    guardianName: guardianNameById.get(team.id) ?? null,
+    tone: index % TEAM_TONE_COUNT,
+    members: sortedPlayers
+      .filter((player) => player.teamId === team.id)
+      .slice()
+      .sort((a, b) => {
+        const an = Number(a.studentNumber)
+        const bn = Number(b.studentNumber)
+        if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn
+        return a.joinedAt - b.joinedAt
+      }),
+  }))
+  const unassignedPlayers = sortedPlayers.filter((player) => !player.teamId)
+
+  // Single readiness message for the pinned foot — same conditions, same order, same wording as
+  // the dashboard's chain of hints; only the presentation is collapsed to one line.
+  const warningMessage = !roomState.data
+    ? null
+    : !roomState.data.teamsLocked
+      ? 'ต้องล็อกทีมก่อนจึงจะเริ่มภารกิจได้'
+      : teamsWithoutCaptain.length > 0
+        ? `ยังมี ${teamsWithoutCaptain.length} ทีมที่ยังไม่ได้เลือกหัวหน้าทีม กรุณาให้สมาชิกโหวตหรือสรุปผลก่อนเริ่มภารกิจ`
+        : teamsWithoutName.length > 0
+          ? `ยังมี ${teamsWithoutName.length} ทีมที่ยังไม่ได้ตั้งชื่อทีม กรุณาให้หัวหน้าทีมตั้งชื่อก่อนเริ่มภารกิจ`
+          : teamsWithoutStartingItem.length > 0
+            ? `ยังมี ${teamsWithoutStartingItem.length} ทีมที่ยังไม่ได้เลือกไอเทมเริ่มต้น กรุณาให้หัวหน้าทีมเลือกไอเทมก่อนเริ่มภารกิจ`
+            : null
+
+  // Header stage label. Every string here already exists in the UI's vocabulary for that stage —
+  // the header just surfaces it, it does not invent a parallel naming scheme.
+  const stageHeading = !roomState.data
+    ? { title: 'ศูนย์บัญชาการครู', subtitle: 'ควบคุมภารกิจ' }
+    : isLobbyPhase
+      ? { title: 'ห้องรอครู', subtitle: 'รอนักเรียนเข้าร่วม' }
+      : isPreTestPhase
+        ? { title: 'แบบทดสอบก่อนเรียน', subtitle: 'กิจกรรมรายบุคคล' }
+        : isRecallPhase
+          ? { title: 'ทบทวนเรื่องราว', subtitle: 'กิจกรรมรายบุคคล' }
+        : isTeamSetupPhase
+          ? { title: 'จัดทีมผู้เล่น', subtitle: 'เตรียมความพร้อมก่อนเริ่มภารกิจ' }
+          : isPostTestPhase
+            ? { title: 'แบบทดสอบหลังเรียน', subtitle: 'กิจกรรมรายบุคคล' }
+            : isSurveyPhase
+              ? { title: 'แบบประเมินกิจกรรม', subtitle: 'กิจกรรมรายบุคคล' }
+          : { title: 'ศูนย์บัญชาการ', subtitle: 'ควบคุมภารกิจ' }
+
   const currentDialog = confirmAction ? dialogContent[confirmAction] : null
   const broadcastMode = roomState.data?.status === 'playing'
   const finalMode = roomState.data?.status === 'completed' || roomState.data?.status === 'closed'
+  // The evidence panel is for a round that actually finished. A room that was merely closed may
+  // have been abandoned mid-activity, and its partial numbers would read as real results.
+  const isCompletedRound = roomState.data?.status === 'completed'
   const showIndividualResults = finalMode && resultsTab === 'individual'
 
   return (
-    <ScenePage compact className={broadcastMode ? 'teacher-broadcast-mode' : finalMode ? 'teacher-final-page' : ''}>
-      <BrandHeader backTo="/" />
+    <ScenePage compact className={`${broadcastMode ? 'teacher-broadcast-mode' : finalMode ? 'teacher-final-page' : ''} ${isTeamSetupPhase ? 'teacher-setup-page' : ''}`.trim()}>
+      {/* Teacher-specific header: the approved title art instead of the generic brand mark, the
+          current stage, and a live-subscription indicator. The dot reflects real state — the room
+          snapshot is present and the subscription reported no error — rather than being decorative. */}
+      <header className="teacher-topbar">
+        <Link className="teacher-topbar-brand" to="/" aria-label="มัทนาต้องรอด หน้าแรก">
+          <img src="/assets/home/home-logo.png" alt="" aria-hidden="true" />
+          <span>
+            <strong>มัทนาต้องรอด</strong>
+            <small>เกมวรรณคดีไทย ม.5 มัทนะพาธา</small>
+          </span>
+        </Link>
+
+        <div className="teacher-topbar-stage">
+          <p className="teacher-topbar-title">{stageHeading.title}</p>
+          <p className="teacher-topbar-subtitle">{stageHeading.subtitle}</p>
+        </div>
+
+        <div className="teacher-topbar-actions">
+          {roomState.data ? (
+            <span className={`teacher-live-pill ${roomState.error ? 'is-offline' : ''}`}>
+              <i aria-hidden="true" />
+              <span>
+                <strong>{roomState.error ? 'การเชื่อมต่อขัดข้อง' : 'เชื่อมต่อเรียลไทม์'}</strong>
+                <small>{service.isDemo ? 'โหมดสาธิต' : 'Firebase Realtime'}</small>
+              </span>
+            </span>
+          ) : null}
+          <Link className="teacher-topbar-home" to="/">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+              <path d="M4 10.8 12 4.5l8 6.3" />
+              <path d="M6.3 12.4V19h11.4v-6.6" />
+            </svg>
+            <span>กลับหน้าแรก</span>
+          </Link>
+        </div>
+      </header>
       {/* The pre-team stages render one self-contained screen, so the shell's generous bottom
           padding (sized for the long scrolling dashboard) is trimmed — without it the page
           overflows by exactly that padding on a 768px-tall iPad landscape viewport. */}
-      <div className={`teacher-shell mx-auto w-full max-w-7xl flex-1 px-5 pt-4 sm:px-8 ${isLobbyPhase || isRecallPhase ? 'teacher-shell-stage' : 'pb-10'}`}>
+      <div className={`teacher-shell mx-auto w-full max-w-7xl flex-1 px-5 pt-4 sm:px-8 ${isLobbyPhase || isPreTestPhase || isRecallPhase || isTeamSetupPhase || isPostTestPhase || isSurveyPhase ? 'teacher-shell-stage' : 'pb-10'} ${isTeamSetupPhase ? 'teacher-shell-setup' : ''}`}>
         {/* Compact top branding for the dedicated single-viewport Recall screen: the full hero
             header (big heading + descriptive subtitle) collapses to one line, so branding + room
             bar + Recall view all fit one viewport together with no scrolling. */}
@@ -918,11 +1161,17 @@ export const TeacherPage = () => {
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#b6ab9e]">รหัสห้อง</p>
                 <div className="mt-1 flex items-center gap-3">
                   <strong className="room-code">{roomCode}</strong>
-                  <button className="copy-button" onClick={() => void copyCode()} aria-label="คัดลอกรหัสห้อง">คัดลอก</button>
+                  <button className="copy-button" onClick={() => void copyCode()} aria-label="คัดลอกรหัสห้อง">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <rect x="9" y="9" width="11" height="11" rx="2" />
+                      <path d="M15 5.5A1.5 1.5 0 0 0 13.5 4h-8A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15" />
+                    </svg>
+                    คัดลอก
+                  </button>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-5 sm:flex sm:gap-8">
-                <div><small>สถานะ</small><StatusPill status={roomState.data.status} /></div>
+                <div><small>สถานะห้อง</small><StatusPill status={roomState.data.status} /></div>
                 <div><small>รอบที่</small><strong className="block text-2xl text-[#f2d58d]">{roomState.data.currentRound}</strong></div>
                 {isRecallPhase ? (
                   <div><small>ระยะ</small><strong className="block text-2xl text-[#f2d58d]">ทบทวนเรื่องราว ({recallCompletedCount}/{sortedPlayers.length})</strong></div>
@@ -937,8 +1186,25 @@ export const TeacherPage = () => {
                     <div><small>{revealRemainingMs > 0 ? 'กำลังแสดงผล' : 'เวลาคงเหลือ'}</small><strong className="block text-2xl text-[#f2d58d]">{revealRemainingMs > 0 ? formatCountdown(revealRemainingMs) : formatCountdown(remainingMs)}</strong></div>
                   </>
                 ) : null}
-                <div><small>ผู้เล่นทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{sortedPlayers.length}</strong></div>
-                <div><small>ทีมทั้งหมด</small><strong className="block text-2xl text-[#fff7df]">{roomState.data.teams.length}</strong></div>
+                <div>
+                  <small>ผู้เล่นทั้งหมด</small>
+                  <strong className="room-bar-metric">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <circle cx="9" cy="8.5" r="3.2" /><path d="M2.8 19c0-3.2 2.8-5.2 6.2-5.2s6.2 2 6.2 5.2" />
+                      <path d="M16.2 6.2a3.2 3.2 0 0 1 0 6M17.6 14.2c2.2.6 3.6 2.3 3.6 4.8" />
+                    </svg>
+                    {sortedPlayers.length} คน
+                  </strong>
+                </div>
+                <div>
+                  <small>ทีมทั้งหมด</small>
+                  <strong className="room-bar-metric">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <path d="M12 3.5 19 6v6c0 4-3 7-7 8.5C8 19 5 16 5 12V6z" />
+                    </svg>
+                    {roomState.data.teams.length} ทีม
+                  </strong>
+                </div>
               </div>
             </section>
             ) : null}
@@ -955,22 +1221,110 @@ export const TeacherPage = () => {
                 (team count deliberately isn't offered here; it belongs to the teamSetup stage,
                 two stages later). The teacher decides when enough students have arrived. */}
             {isLobbyPhase ? (
+              <div className="lobby-stage" aria-live="polite">
+                <section className="lobby-command">
+                  <p className="stage-badge">ขั้นที่ 1 · รวมผู้เรียน</p>
+                  <h2 className="lobby-command-title">รอนักเรียนเข้าร่วม</h2>
+                  <div className="rose-rule" aria-hidden="true" />
+
+                  <p className="lobby-count-label">จำนวนนักเรียนที่เข้าร่วม</p>
+                  <p className="lobby-count">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <circle cx="9" cy="8.5" r="3.2" /><path d="M2.8 19c0-3.2 2.8-5.2 6.2-5.2s6.2 2 6.2 5.2" />
+                      <path d="M16.2 6.2a3.2 3.2 0 0 1 0 6M17.6 14.2c2.2.6 3.6 2.3 3.6 4.8" />
+                    </svg>
+                    <strong>{sortedPlayers.length}</strong> คน
+                  </p>
+
+                  <p className="lobby-helper">
+                    แชร์รหัสห้องให้นักเรียนเพื่อเข้าร่วม<br />
+                    รายชื่อนักเรียนจะแสดงขึ้นแบบเรียลไทม์<br />
+                    <span className="lobby-helper-accent">ขั้นนี้ยังไม่ได้จัดทีม</span>
+                  </p>
+
+                  <div className="lobby-divider" aria-hidden="true" />
+
+                  <button
+                    type="button"
+                    className="stage-cta"
+                    onClick={handleStartPreTest}
+                    disabled={advancingStageBusy || sortedPlayers.length === 0}
+                  >
+                    {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบทดสอบก่อนเรียน'}
+                  </button>
+
+                  {sortedPlayers.length === 0 ? (
+                    <p className="recall-command-hint">ต้องมีอย่างน้อย 1 คนจึงจะเริ่มได้</p>
+                  ) : null}
+
+                  <p className="lobby-footnote">
+                    <span className="lobby-footnote-mark" aria-hidden="true">i</span>
+                    แนะนำ: ตรวจสอบรายชื่อนักเรียนทุกคนก่อนเริ่มเกม
+                  </p>
+
+                  <StageRoomControls />
+                </section>
+
+                <section className="lobby-roster">
+                  <h3 className="lobby-roster-title">
+                    นักเรียนที่เข้าร่วม
+                    <span className="lobby-roster-count">{sortedPlayers.length} คน</span>
+                  </h3>
+                  {sortedPlayers.length > 0 ? (
+                    <ul className="lobby-roster-list">
+                      {sortedPlayers.map((player) => (
+                        <li key={player.id} className="lobby-roster-item">
+                          <span className="lobby-roster-avatar" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                              <circle cx="12" cy="9.2" r="3.4" />
+                              <path d="M5.4 19.4c0-3.3 2.9-5.4 6.6-5.4s6.6 2.1 6.6 5.4" />
+                            </svg>
+                          </span>
+                          <span className="lobby-roster-name">{player.displayName}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="lobby-roster-empty">ยังไม่มีนักเรียนเข้าร่วม</p>
+                  )}
+                </section>
+              </div>
+            ) : null}
+
+            {/* Stage 'preTest' — a minimal progress board. Deliberately shows NO answers, no
+                correctness and no scores: the pre-test is a measurement, and a live answer feed
+                would let the room see the test. Only "who is still working" is surfaced, which is
+                all the teacher needs to decide when to move on. */}
+            {isPreTestPhase ? (
               <section className="recall-command-view" aria-live="polite">
-                <p className="eyebrow">ขั้นที่ 1 · รวมผู้เรียน</p>
-                <h2 className="recall-command-title">รอนักเรียนเข้าร่วม</h2>
-                <p className="recall-command-count">{sortedPlayers.length} คน</p>
-                <p className="recall-command-supporting">
-                  ส่งรหัสห้อง <strong className="text-[#f2d58d]">{roomCode}</strong> ให้นักเรียน รายชื่อจะขึ้นที่นี่แบบเรียลไทม์ — ยังไม่ต้องจัดทีมในขั้นนี้
+                <p className="eyebrow">ขั้นที่ 1 · แบบทดสอบก่อนเรียน</p>
+                <h2 className="recall-command-title">แบบทดสอบก่อนเรียน</h2>
+                <p className="recall-command-count">
+                  เสร็จแล้ว {preTestCompletedCount} / {sortedPlayers.length} คน
                 </p>
-                {sortedPlayers.length > 0 ? (
-                  <ul className="recall-player-chips" aria-label="ผู้เข้าร่วม">
-                    {sortedPlayers.map((player) => (
-                      <li key={player.id} className="recall-player-chip"><span>{player.displayName}</span></li>
-                    ))}
-                  </ul>
-                ) : null}
-                {/* Recall timer, chosen before the activity starts and applied to all 5 items.
-                    Same shape as the Main question timer control, just seconds-only. */}
+                <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={preTestCompletedCount}>
+                  <i style={{ width: `${sortedPlayers.length > 0 ? (preTestCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
+                </div>
+
+                {/* Name, answered count and status. Counts only — never any answer content, so
+                    the teacher screen still cannot leak the test itself. */}
+                <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
+                  {sortedPlayers.map((player) => {
+                    const answered = player.preTestAnswers.length
+                    const done = answered >= ASSESSMENT_QUESTION_COUNT
+                    const status = done ? 'เสร็จแล้ว' : answered === 0 ? 'ยังไม่เริ่ม' : 'กำลังทำ'
+                    return (
+                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
+                        <span>{player.displayName}</span>
+                        <b>{answered}/{ASSESSMENT_QUESTION_COUNT}</b>
+                        <span>{status}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+
+                {/* Recall's per-item timer is chosen here, because this screen is where Recall
+                    starts. Same field, same bounds, same validation as before — only relocated. */}
                 <div className="stage-duration-field mt-5">
                   <label htmlFor="recall-duration">เวลาต่อข้อ (ทบทวนเรื่องราว)</label>
                   <div className="stage-duration-input">
@@ -987,19 +1341,328 @@ export const TeacherPage = () => {
                   </div>
                   <small>{MIN_RECALL_SECONDS_PER_ITEM}-{MAX_RECALL_SECONDS_PER_ITEM} วินาที · ใช้กับทั้ง 5 ข้อ</small>
                 </div>
+
+                {/* Always available — one student must never be able to hold the class. If anyone
+                    is still unfinished the teacher is asked to confirm first, and told exactly what
+                    it costs (those students drop out of the pre/post comparison); their saved
+                    answers are still kept, nothing is discarded either way. */}
                 <button
                   type="button"
                   className="primary-button recall-start-main-button mt-5"
-                  onClick={handleStartRecall}
-                  disabled={advancingStageBusy || sortedPlayers.length === 0 || !recallDurationValid}
+                  onClick={requestStartRecall}
+                  disabled={advancingStageBusy || !recallDurationValid}
                 >
                   {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มทบทวนเรื่องราว'}
                 </button>
-                {sortedPlayers.length === 0 ? (
-                  <p className="recall-command-hint">ต้องมีอย่างน้อย 1 คนจึงจะเริ่มได้</p>
+                {preTestIncompleteCount > 0 ? (
+                  <p className="recall-command-hint">ยังมีนักเรียนทำไม่ครบ — เริ่มต่อได้ คำตอบที่บันทึกไว้จะไม่หาย</p>
                 ) : null}
+
                 <StageRoomControls />
               </section>
+            ) : null}
+
+            {/* Stage 'postTest' — the same minimal progress board the pre-test uses. No answers,
+                no correctness, no scores: this is a measurement, and the class must not see the
+                test. The live scoreboard dashboard is suppressed for the same reason. */}
+            {isPostTestPhase ? (
+              <section className="recall-command-view" aria-live="polite">
+                <p className="eyebrow">ขั้นสุดท้าย · แบบทดสอบหลังเรียน</p>
+                <h2 className="recall-command-title">แบบทดสอบหลังเรียน</h2>
+                <p className="recall-command-count">
+                  เสร็จแล้ว {postTestCompletedCount} / {sortedPlayers.length} คน
+                </p>
+                <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={postTestCompletedCount}>
+                  <i style={{ width: `${sortedPlayers.length > 0 ? (postTestCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
+                </div>
+
+                <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
+                  {sortedPlayers.map((player) => {
+                    const done = player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT
+                    return (
+                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
+                        <span>{player.displayName}</span>
+                        <b>{done ? 'เสร็จแล้ว' : 'กำลังทำ'}</b>
+                      </li>
+                    )
+                  })}
+                </ul>
+
+                {/* Ends the round. Every Main/Boss result, team score and winner value is left
+                    exactly as it already is — this only flips status to 'completed'. */}
+                <button
+                  type="button"
+                  className="primary-button recall-start-main-button mt-5"
+                  onClick={handleStartSurvey}
+                  disabled={advancingStageBusy}
+                >
+                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบประเมินกิจกรรม'}
+                </button>
+                {postTestCompletedCount < sortedPlayers.length ? (
+                  <p className="recall-command-hint">ยังมีนักเรียนทำไม่ครบ — สรุปผลได้ คำตอบที่บันทึกไว้จะไม่หาย</p>
+                ) : null}
+
+                <StageRoomControls />
+              </section>
+            ) : null}
+
+            {/* Stage 'survey' — the same minimal progress board. Individual responses are never
+                shown live: this is an opinion survey, and displaying answers to the room would
+                discourage honest ones. */}
+            {isSurveyPhase ? (
+              <section className="recall-command-view" aria-live="polite">
+                <p className="eyebrow">ขั้นสุดท้าย · แบบประเมินกิจกรรม</p>
+                <h2 className="recall-command-title">แบบประเมินกิจกรรม</h2>
+                <p className="recall-command-count">
+                  เสร็จแล้ว {surveyCompletedCount} / {sortedPlayers.length} คน
+                </p>
+                <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={surveyCompletedCount}>
+                  <i style={{ width: `${sortedPlayers.length > 0 ? (surveyCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
+                </div>
+
+                <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
+                  {sortedPlayers.map((player) => {
+                    const done = player.surveyResponses.length >= SURVEY_ITEM_COUNT
+                    return (
+                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
+                        <span>{player.displayName}</span>
+                        <b>{done ? 'เสร็จแล้ว' : 'กำลังทำ'}</b>
+                      </li>
+                    )
+                  })}
+                </ul>
+
+                {/* Ends the round. Snapshots this round's history first (see completeRound), so
+                    pre-test / post-test / survey data is durable the moment this is pressed. */}
+                <button
+                  type="button"
+                  className="primary-button recall-start-main-button mt-5"
+                  onClick={handleCompleteRound}
+                  disabled={advancingStageBusy}
+                >
+                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'สรุปผลกิจกรรม'}
+                </button>
+                {surveyCompletedCount < sortedPlayers.length ? (
+                  <p className="recall-command-hint">ยังมีนักเรียนทำไม่ครบ — สรุปผลได้ คำตอบที่บันทึกไว้จะไม่หาย</p>
+                ) : null}
+
+                <StageRoomControls />
+              </section>
+            ) : null}
+
+            {/* Stage 'teamSetup' — roster on the left, team/timing settings on the right. The
+                settings, the boss timer, the readiness warnings and the start button are all the
+                existing controls, relocated here; the dashboard's duplicate copy of them is
+                suppressed below while this stage is active. */}
+            {isTeamSetupPhase ? (
+              <div className="setup-stage" aria-live="polite">
+                <section className="cream-panel setup-roster">
+                  <h3 className="cream-panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <circle cx="9" cy="8.5" r="3.2" /><path d="M2.8 19c0-3.2 2.8-5.2 6.2-5.2s6.2 2 6.2 5.2" />
+                      <path d="M16.2 6.2a3.2 3.2 0 0 1 0 6M17.6 14.2c2.2.6 3.6 2.3 3.6 4.8" />
+                    </svg>
+                    รายชื่อผู้เข้าร่วม
+                    <span className="cream-count-pill">{sortedPlayers.length} คน</span>
+                  </h3>
+                  {/* Once teams are locked the mixed list is replaced by per-team groups, so the
+                      teacher can never mistake one team's member for another's. Grouping is
+                      presentation only — no assignment logic runs here. */}
+                  {roomState.data.teamsLocked ? (
+                    <div className="setup-groups">
+                      {rosterGroups.map((group) => (
+                        <section key={group.id} className={`setup-group team-tone-${group.tone}`}>
+                          <h4 className="setup-group-head">
+                            <i className="team-tone-dot" aria-hidden="true" />
+                            <span>{group.guardianName ?? group.name}</span>
+                            {group.guardianName ? <small>{group.name}</small> : null}
+                            <span className="setup-group-count">{group.members.length} คน</span>
+                          </h4>
+                          <ul className="setup-group-list">
+                            {group.members.map((player) => (
+                              <li key={player.id}>
+                                <span className="setup-group-name">{player.displayName}</span>
+                                <span className="setup-group-number">เลขที่ {player.studentNumber}</span>
+                              </li>
+                            ))}
+                            {group.members.length === 0 ? <li className="setup-group-empty">ยังไม่มีสมาชิก</li> : null}
+                          </ul>
+                        </section>
+                      ))}
+                      {unassignedPlayers.length > 0 ? (
+                        <section className="setup-group setup-group-unassigned">
+                          <h4 className="setup-group-head">
+                            <span>ยังไม่ได้จัดทีม</span>
+                            <span className="setup-group-count">{unassignedPlayers.length} คน</span>
+                          </h4>
+                          <ul className="setup-group-list">
+                            {unassignedPlayers.map((player) => (
+                              <li key={player.id}>
+                                <span className="setup-group-name">{player.displayName}</span>
+                                <span className="setup-group-number">เลขที่ {player.studentNumber}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </section>
+                      ) : null}
+                    </div>
+                  ) : (
+                  <div className="setup-table-wrap">
+                    <table className="setup-table">
+                      <thead>
+                        <tr><th>ลำดับ</th><th>ชื่อผู้เล่น</th><th>เลขที่นักเรียน</th><th>ทีมที่อยู่</th></tr>
+                      </thead>
+                      <tbody>
+                        {sortedPlayers.map((player, index) => {
+                          const teamName = player.teamId ? teamNameById.get(player.teamId) : null
+                          const tone = player.teamId ? teamToneById.get(player.teamId) : undefined
+                          return (
+                            <tr key={player.id}>
+                              <td><span className="setup-row-index">{index + 1}</span></td>
+                              <td className="setup-row-name">{player.displayName}</td>
+                              <td className="setup-row-number">{player.studentNumber}</td>
+                              <td>
+                                <span className={teamName ? `setup-team-tag is-assigned team-tone-${tone ?? 0}` : 'setup-team-tag'}>
+                                  {/* The dot repeats the colour as a shape, so the team is still
+                                      distinguishable without relying on hue alone. */}
+                                  {teamName ? <i className="team-tone-dot" aria-hidden="true" /> : null}
+                                  {teamName ?? 'ยังไม่ได้จัดทีม'}
+                                </span>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    {sortedPlayers.length === 0 ? <p className="setup-empty">ยังไม่มีนักเรียนเข้าร่วม</p> : null}
+                  </div>
+                  )}
+                  <p className="cream-footnote">
+                    <span className="cream-footnote-mark" aria-hidden="true">i</span>
+                    นักเรียนสามารถเข้าร่วมได้เรื่อย ๆ รายชื่อจะอัปเดตแบบเรียลไทม์
+                  </p>
+                </section>
+
+                <section className="cream-panel setup-settings">
+                  <div className="setup-settings-scroll">
+                  <h3 className="cream-panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3.2" />
+                      <path d="M12 4.2v2M12 17.8v2M4.2 12h2M17.8 12h2M6.5 6.5l1.4 1.4M16.1 16.1l1.4 1.4M17.5 6.5l-1.4 1.4M7.9 16.1l-1.4 1.4" />
+                    </svg>
+                    ตั้งค่าการจัดทีม
+                  </h3>
+
+                  <div className="setup-field">
+                    <div className="setup-field-label">
+                      <strong>จำนวนทีม</strong>
+                      <small>จำนวนทีมที่จะจัดให้นักเรียน</small>
+                    </div>
+                    <div className="setup-stepper">
+                      <button type="button" onClick={() => adjustTeamCount(-1)} disabled={roomState.data.teamsLocked} aria-label="ลดจำนวนทีม">−</button>
+                      <input id="team-count" type="number" min={1} max={20} step="1" value={teamCountValue} onChange={(event) => setTeamCountValue(event.target.value)} disabled={roomState.data.teamsLocked} aria-label="จำนวนทีม" />
+                      <button type="button" onClick={() => adjustTeamCount(1)} disabled={roomState.data.teamsLocked} aria-label="เพิ่มจำนวนทีม">+</button>
+                    </div>
+                  </div>
+
+                  <div className="setup-field">
+                    <div className="setup-field-label">
+                      <strong>สุ่มทีม</strong>
+                      <small>จัดทีมให้นักเรียนแบบสุ่ม</small>
+                    </div>
+                    <button className="setup-action is-primary" onClick={() => void randomizeTeams()} disabled={busy || sortedPlayers.length === 0 || !teamCountValid || roomState.data.teamsLocked}>
+                      สุ่มทีม
+                    </button>
+                  </div>
+
+                  <div className="setup-field">
+                    <div className="setup-field-label">
+                      <strong>ล็อกทีม</strong>
+                      <small>ล็อกทีมที่จัดไว้แล้ว</small>
+                    </div>
+                    <button className="setup-action is-dark" onClick={() => void toggleTeamLock()} disabled={busy || (!roomState.data.teamsLocked && (roomState.data.teams.length === 0 || unassignedCount > 0))}>
+                      {roomState.data.teamsLocked ? 'ปลดล็อกทีม' : 'ล็อกทีม'}
+                    </button>
+                  </div>
+
+                  {!roomState.data.teamsLocked && roomState.data.teams.length > 0 && unassignedCount > 0 ? (
+                    <p className="setup-warning">มีผู้เล่น {unassignedCount} คนยังไม่ได้จัดทีม กรุณาสุ่มทีมอีกครั้งก่อนล็อก</p>
+                  ) : null}
+
+                  <div className="setup-field">
+                    <div className="setup-field-label">
+                      <strong>เวลาต่อคำถาม</strong>
+                      <small>เวลาต่อ 1 คำถาม</small>
+                    </div>
+                    <div className="setup-stepper">
+                      <button type="button" onClick={() => adjustDuration(-1)} aria-label="ลดเวลาต่อคำถาม">−</button>
+                      <input id="question-duration" type="number" min={durationUnit === 'seconds' ? 5 : 1} max={durationUnit === 'seconds' ? 600 : 10} step="1" value={durationValue} onChange={(event) => setDurationValue(event.target.value)} aria-label="เวลาต่อคำถาม" />
+                      <button type="button" onClick={() => adjustDuration(1)} aria-label="เพิ่มเวลาต่อคำถาม">+</button>
+                    </div>
+                  </div>
+                  <div className="setup-unit-row">
+                    <label htmlFor="duration-unit">หน่วยเวลา</label>
+                    <select id="duration-unit" value={durationUnit} onChange={(event) => { const nextUnit = event.target.value as 'seconds' | 'minutes'; setDurationUnit(nextUnit); setDurationValue(nextUnit === 'minutes' ? '1' : '30') }}>
+                      <option value="seconds">วินาที</option>
+                      <option value="minutes">นาที</option>
+                    </select>
+                    <small>5 วินาที ถึง 10 นาที ทุกคนใช้เวลาเท่ากัน</small>
+                  </div>
+
+                  <div className="setup-field">
+                    <div className="setup-field-label">
+                      <strong>เวลาต่อข้อ (ด่านชิงมนตรา)</strong>
+                      <small>{MIN_BOSS_SECONDS_PER_QUESTION}-{MAX_BOSS_SECONDS_PER_QUESTION} วินาที · ใช้กับทั้ง 3 ข้อ</small>
+                    </div>
+                    <div className="setup-stepper">
+                      <button type="button" onClick={() => adjustBossDuration(-1)} aria-label="ลดเวลาด่านชิงมนตรา">−</button>
+                      <input id="boss-duration" type="number" min={MIN_BOSS_SECONDS_PER_QUESTION} max={MAX_BOSS_SECONDS_PER_QUESTION} step="1" value={bossDurationValue} onChange={(event) => setBossDurationValue(event.target.value)} aria-label="เวลาต่อข้อด่านชิงมนตรา" />
+                      <button type="button" onClick={() => adjustBossDuration(1)} aria-label="เพิ่มเวลาด่านชิงมนตรา">+</button>
+                    </div>
+                  </div>
+
+                  {/* Captain election + team naming. Lives inside this column on this stage so
+                      the teacher never has to scroll past the fold to clear the checks that gate
+                      the start button. */}
+                  {roomState.data.teams.length > 0 ? (
+                    <div className="setup-team-admin">
+                      <p className="setup-subhead">หัวหน้าทีมและชื่อทีม</p>
+                      <ul className="setup-team-admin-list">{teamAdminRows}</ul>
+                    </div>
+                  ) : null}
+
+                  {roomState.data.teams.length > 0 ? (
+                    <button type="button" className="setup-grimoire" onClick={() => setGrimoireOpen(true)}>
+                      📜 คัมภีร์มนตรา
+                    </button>
+                  ) : null}
+
+                  <div className="setup-tips">
+                    <p className="setup-tips-title">คำแนะนำสำหรับครู</p>
+                    <ul>
+                      <li>กำหนดจำนวนทีมที่ต้องการ</li>
+                      <li>คลิก “สุ่มทีม” เพื่อจัดทีมให้นักเรียนอัตโนมัติ</li>
+                      <li>เมื่อล็อกทีมแล้ว จะไม่สามารถเปลี่ยนแปลงได้</li>
+                      <li>ตั้งค่าเวลาต่อคำถามสำหรับการเล่นจริง</li>
+                    </ul>
+                  </div>
+                  </div>
+
+                  {/* Pinned foot: the start CTA and the room control stay visible whatever the
+                      column above is scrolled to. */}
+                  <div className="setup-foot">
+                    {warningMessage ? <p className="setup-warning">{warningMessage}</p> : null}
+                    <button
+                      className="stage-cta setup-start"
+                      onClick={requestStart}
+                      disabled={busy || sortedPlayers.length === 0 || !durationValid || !bossDurationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
+                    >
+                      {roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
+                    </button>
+                    <StageRoomControls />
+                  </div>
+                </section>
+              </div>
             ) : null}
 
             {/* Stage 'recall' — one dedicated viewport. Deliberately shows no teams, captain,
@@ -1023,7 +1686,7 @@ export const TeacherPage = () => {
                     <div className="recall-command-progress-bar recall-command-progress-bar-full">
                       <i style={{ width: '100%' }} />
                     </div>
-                    <p className="recall-command-baseline">ก่อนเล่น: <strong>{classLearningSummary.baselinePercent.toFixed(0)}%</strong></p>
+                    <p className="recall-command-baseline">ตอบถูกเฉลี่ย: <strong>{classRecallSummary.averageCorrectCount.toFixed(1)}/{classRecallSummary.totalCount}</strong></p>
                   </>
                 )}
                 {/* Compact per-player progress — the "this is still an individual phase" signal,
@@ -1108,7 +1771,12 @@ export const TeacherPage = () => {
                 single-viewport screen above is the only thing shown, so there is nothing left
                 below it to force scrolling, and no team concept is presented before Recall is
                 done. It returns in full, unchanged, at the 'teamSetup' stage. */}
-            {!isLobbyPhase && !isRecallPhase ? (
+            {/* Every stage with a dedicated single-viewport screen belongs in this list. The
+                three assessment stages were all added AFTER this guard was written, so each one
+                rendered its stage screen with the entire dashboard appended below it — pushing
+                the stage's own CTA below the fold on a projector/tablet, which read as the
+                teacher having no action available at all. */}
+            {!isLobbyPhase && !isPreTestPhase && !isRecallPhase && !isPostTestPhase && !isSurveyPhase ? (
               <>
             {finalMode && teamStats.length > 0 ? (
               <section className="teacher-victory-stage" aria-labelledby="victory-stage-title">
@@ -1150,22 +1818,19 @@ export const TeacherPage = () => {
                 result — this is additional, appended below it, never replacing it. */}
             {finalMode ? (
               <section className="learning-summary-panel glass-panel mt-6 p-5" aria-label="สรุปการเรียนรู้ของห้อง">
-                <p className="eyebrow">สรุปการเรียนรู้</p>
-                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">ก่อนเล่น เทียบกับ หลังเล่น</h2>
-                {/* Same plain counts the students see: average correct-out-of-5 per student
-                    before and after playing, plus how many students improved. No percentage
-                    "gain" figure — it reads as a grade and confuses more than it explains. */}
-                <dl className="learning-summary-grid mt-4">
-                  <div><dt>ก่อนเล่น (เฉลี่ย)</dt><dd>{classBeforeAverage.toFixed(1)}/5</dd></div>
-                  <div><dt>หลังเล่น (เฉลี่ย)</dt><dd>{classAfterAverage.toFixed(1)}/5</dd></div>
-                  <div><dt>เข้าใจเพิ่มขึ้น</dt><dd>{classImprovedStudentCount} คน</dd></div>
-                </dl>
+                <p className="eyebrow">สรุปผลรอบนี้</p>
+                {/* Per-concept review detail only. The class averages that used to sit here were
+                    removed: the "main" figure was overallAverage, which is the magic-adjusted
+                    COMPETITION average, shown under a knowledge-score label — so a team's items
+                    could move a number the teacher read as individual knowledge evidence. The
+                    evidence panel below reports both figures from raw individual data instead,
+                    which also removes the duplicate summary block. */}
+                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">ผลการทบทวน รายหัวข้อ</h2>
                 <div className="learning-summary-concepts mt-4">
-                  {classLearningSummary.concepts.map((concept) => (
+                  {classRecallSummary.concepts.map((concept) => (
                     <div key={concept.conceptId} className="learning-summary-concept-row">
                       <span className="learning-summary-concept-label">{recallQuestionsById.get(concept.conceptId)?.label ?? concept.conceptId}</span>
-                      <span className="learning-summary-concept-stat">ก่อนเล่น {concept.recallCorrectCount}/{concept.totalStudents}</span>
-                      <span className="learning-summary-concept-stat">หลังเล่น {concept.mainCorrectCount}/{concept.totalStudents}</span>
+                      <span className="learning-summary-concept-stat">ตอบถูก {concept.recallCorrectCount}/{concept.totalStudents}</span>
                     </div>
                   ))}
                 </div>
@@ -1179,15 +1844,30 @@ export const TeacherPage = () => {
                     ⬇ ดาวน์โหลด Excel
                   </button>
                 </div>
+                {/* Evidence summary. Descriptive only: it reports what the numbers were, never
+                    that the activity caused them. One classroom, no control group, no
+                    randomisation — no causal wording, and no inferential statistic.
+                    Shown only for a genuinely completed round, never a merely closed room. */}
+                {isCompletedRound && selectedEvidence ? (
+                  <EvidenceSummaryPanel summary={selectedEvidence} title="สรุปหลักฐานการเรียนรู้" />
+                ) : null}
+
+                {/* Ranked by review accuracy alone — which topics the class recalled well and
+                    which they did not. Not a statement about learning or change. */}
                 <p className="mt-3 text-sm text-[#d8d1c5]">
-                  เรื่องที่เข้าใจดีที่สุด: <strong>{classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? classLearningSummary.strongestConceptId : '-'}</strong>
+                  ทบทวนได้ดีที่สุด: <strong>{classRecallSummary.strongestConceptId ? recallQuestionsById.get(classRecallSummary.strongestConceptId)?.label ?? classRecallSummary.strongestConceptId : '-'}</strong>
                   {' · '}
-                  เรื่องที่ควรทบทวน: <strong>{classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? classLearningSummary.weakestConceptId : '-'}</strong>
+                  ทบทวนได้น้อยที่สุด: <strong>{classRecallSummary.weakestConceptId ? recallQuestionsById.get(classRecallSummary.weakestConceptId)?.label ?? classRecallSummary.weakestConceptId : '-'}</strong>
                 </p>
               </section>
             ) : null}
 
-            <div className={`teacher-dashboard mt-6 grid items-start gap-6 ${finalMode ? 'teacher-final-dashboard ' : ''}${broadcastMode ? '' : 'lg:grid-cols-[1.45fr_0.75fr]'}`}>
+            {/* The teamSetup stage renders its own roster and controls above, so the dashboard's
+                copy of both would be a duplicate screen below the fold — it is skipped entirely
+                for that stage. Every other stage still gets the full dashboard. */}
+            {/* Inline style, not the `hidden` attribute: Tailwind's `grid` utility would otherwise
+                win over `[hidden] { display: none }` and the block would stay visible. */}
+            <div style={isTeamSetupPhase || isPostTestPhase || isSurveyPhase ? { display: 'none' } : undefined} className={`teacher-dashboard mt-6 grid items-start gap-6 ${finalMode ? 'teacher-final-dashboard ' : ''}${broadcastMode ? '' : 'lg:grid-cols-[1.45fr_0.75fr]'}`}>
               <section className={`glass-panel teacher-scoreboard overflow-hidden ${broadcastMode ? 'teacher-scoreboard-live' : ''}`}>
                 {/* Item 3: header is centered while playing (LIVE badge sits directly under the
                     title, not pinned top-right) — the close/reveal/advance-now controls used to
@@ -1418,7 +2098,9 @@ export const TeacherPage = () => {
                 <section className="glass-panel p-5">
                   <p className="eyebrow">การควบคุม</p>
                   <div className="mt-4 space-y-3">
-                    {roomState.data.status === 'waiting' ? (
+                    {/* During teamSetup these same controls live on the dedicated stage screen
+                        above, so the dashboard does not render a second copy of them. */}
+                    {roomState.data.status === 'waiting' && !isTeamSetupPhase ? (
                       <>
                         <div className="timer-setting">
                           <label htmlFor="team-count">จำนวนทีม</label>
@@ -1509,7 +2191,9 @@ export const TeacherPage = () => {
                 status or whether any magic event has happened yet (unlike the history log
                 below, which only renders once there's something to show), since it's a pure
                 reference the teacher may want to consult before a single item is ever used. */}
-            {roomState.data.teams.length > 0 ? (
+            {/* On the teamSetup stage this trigger lives inside the settings panel instead, so no
+                lone button floats between sections. */}
+            {roomState.data.teams.length > 0 && !isTeamSetupPhase ? (
               <div className="mt-6 flex justify-end">
                 <button type="button" className="grimoire-trigger-button" onClick={() => setGrimoireOpen(true)}>
                   📜 คัมภีร์มนตรา
@@ -1524,58 +2208,13 @@ export const TeacherPage = () => {
                 equivalent and must stay per item 7), a recent-activity history log, and a small
                 icon legend. Information hierarchy is now: scoreboard = current state, this
                 section = setup controls (waiting) + history (always). */}
-            {roomState.data.teams.length > 0 && roomState.data.status === 'waiting' ? (
+            {/* On the teamSetup stage this panel is rendered inside the settings column instead,
+                so the whole stage stays within one viewport. */}
+            {roomState.data.teams.length > 0 && roomState.data.status === 'waiting' && !isTeamSetupPhase ? (
               <section className="glass-panel mt-6 p-5" aria-label="ตั้งค่าทีม">
                 <p className="eyebrow">ตั้งค่าทีม</p>
                 <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">หัวหน้าทีมและชื่อทีม</h2>
-                <ul className="mt-4 space-y-3">
-                  {roomState.data.teams.map((team) => {
-                    const magic = magicByTeamId.get(team.id)
-                    const holderName = magic?.magicHolderPlayerId ? playerNameById.get(magic.magicHolderPlayerId) ?? '-' : '-'
-                    const memberCount = teamStatsById.get(team.id)?.memberCount ?? 0
-                    const votedCount = votedCountByTeam.get(team.id) ?? 0
-                    const guardianName = guardianNameById.get(team.id)
-                    return (
-                      <li key={team.id} className="border-t border-white/10 pt-3 text-sm first:border-t-0 first:pt-0">
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="flex flex-wrap items-baseline gap-x-2">
-                            <strong className="text-[#fff7df]">{guardianName ?? team.name}</strong>
-                            {guardianName ? <small className="text-[#8b8377]">{team.name}</small> : null}
-                          </span>
-                          {magic?.magicHolderPlayerId ? <span className="magic-badge magic-badge-captain">👑 {holderName}</span> : <span className="text-xs text-[#c0b7ab]">ยังไม่มีหัวหน้าทีม</span>}
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <input
-                            type="text"
-                            className="team-name-input"
-                            placeholder={guardianName ? 'ตั้งชื่อใหม่ (override)' : 'ตั้งชื่อทีม'}
-                            value={nameDrafts[team.id] ?? ''}
-                            maxLength={TEAM_GUARDIAN_NAME_MAX_LENGTH}
-                            onChange={(event) => setNameDrafts((current) => ({ ...current, [team.id]: event.target.value }))}
-                            aria-label={`ตั้งชื่อทีม ${team.name}`}
-                          />
-                          <button type="button" className="copy-button" onClick={() => void handleOverrideTeamName(team.id)} disabled={busy || !(nameDrafts[team.id] ?? '').trim()}>
-                            {guardianName ? 'แก้ไข' : 'ตั้งชื่อ'}
-                          </button>
-                          {guardianName ? (
-                            <button type="button" className="copy-button" onClick={() => void handleResetTeamName(team.id)} disabled={busy}>รีเซ็ตชื่อ</button>
-                          ) : null}
-                        </div>
-                        <small className="mt-1 block text-[#8b8377]">{TEAM_GUARDIAN_NAME_MIN_LENGTH}-{TEAM_GUARDIAN_NAME_MAX_LENGTH} ตัวอักษร ไทย/อังกฤษ/ตัวเลข</small>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#c0b7ab]">
-                          {!magic?.magicHolderPlayerId ? <span>โหวตแล้ว {votedCount}/{memberCount} คน</span> : null}
-                          {!magic?.magicHolderPlayerId ? (
-                            <button type="button" className="copy-button" onClick={() => void handleFinalizeCaptain(team.id)} disabled={busy || memberCount === 0}>
-                              สรุปผลหัวหน้าทีมตอนนี้
-                            </button>
-                          ) : null}
-                          <button type="button" className="copy-button" onClick={() => void handleResetCaptain(team.id)} disabled={busy}>
-                            รีเซ็ตการเลือกตั้ง
-                          </button>
-                        </div>
-                      </li>
-                    )
-                  })}
+                <ul className="mt-4 space-y-3">{teamAdminRows}
                 </ul>
               </section>
             ) : null}
@@ -1601,6 +2240,32 @@ export const TeacherPage = () => {
                     </button>
                   </div>
                 </div>
+                {/* Round picker. Selecting a past round shows its DURABLE evidence below and is
+                    what the print action uses, so a reset round stays fully inspectable. */}
+                {availableRounds.length > 0 ? (
+                  <div className="evidence-round-picker">
+                    <span>เลือกรอบ</span>
+                    {availableRounds.map((round) => (
+                      <button
+                        key={round}
+                        type="button"
+                        className={`copy-button ${round === activeRound ? 'is-selected' : ''}`}
+                        onClick={() => setSelectedRound(round)}
+                      >
+                        รอบที่ {round}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                {activeRound !== null && selectedEvidence ? (
+                  <EvidenceSummaryPanel
+                    summary={selectedEvidence}
+                    title={`สรุปหลักฐานการเรียนรู้ — รอบที่ ${activeRound}`}
+                    sourceNote={activeRound === roomState.data?.currentRound ? 'รอบปัจจุบัน' : 'จากประวัติที่บันทึกไว้'}
+                  />
+                ) : null}
+
                 {historyOpen ? (
                   <div className="learning-history-scroll mt-4">
                     <table className="learning-history-table">
@@ -1610,10 +2275,8 @@ export const TeacherPage = () => {
                           <th>เลขที่</th>
                           <th>รอบ</th>
                           <th>ทีม</th>
-                          <th>ก่อนเล่น</th>
-                          <th>หลังเล่น</th>
-                          <th>ผลการเรียนรู้</th>
-                          <th>คะแนนความรู้</th>
+                          <th>ผลการทบทวน</th>
+                          <th>ผลการเล่นเกมหลัก</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1623,15 +2286,10 @@ export const TeacherPage = () => {
                             <td>{entry.studentNumber}</td>
                             <td>{entry.round}</td>
                             <td>{entry.teamName || '-'}</td>
-                            <td>{entry.beforeCorrectCount}/{RECALL_QUESTION_COUNT}</td>
-                            <td>{entry.afterCorrectCount}/{RECALL_QUESTION_COUNT}</td>
-                            <td>
-                              {entry.afterCorrectCount > entry.beforeCorrectCount
-                                ? <span className="learning-summary-verdict-up">เข้าใจเพิ่มขึ้น {entry.afterCorrectCount - entry.beforeCorrectCount} เรื่อง</span>
-                                : entry.afterCorrectCount < entry.beforeCorrectCount
-                                  ? <span className="learning-summary-verdict-down">ควรทบทวน {entry.beforeCorrectCount - entry.afterCorrectCount} เรื่อง</span>
-                                  : 'คงเดิม'}
-                            </td>
+                            {/* Two standalone results. Rounds recorded before the standalone
+                                recall figure existed fall back to the legacy read-only count so
+                                old history still shows something, never a crash. */}
+                            <td>{entry.recallCorrectCount ?? entry.beforeCorrectCount ?? 0}/{entry.recallTotalCount ?? RECALL_QUESTION_COUNT}</td>
                             <td>{entry.knowledgeScore100}/100</td>
                           </tr>
                         ))}
@@ -1703,14 +2361,13 @@ export const TeacherPage = () => {
       {roomState.data ? (
         <TeacherReportPrintView
           roomCode={roomCode}
-          round={roomState.data.currentRound}
+          round={printRound}
           players={visibleSortedPlayers}
           questionIds={roomState.data.questionIds}
           teamNameById={displayTeamNameById}
-          beforeAverage={classBeforeAverage}
-          afterAverage={classAfterAverage}
-          strongestConceptLabel={classLearningSummary.strongestConceptId ? recallQuestionsById.get(classLearningSummary.strongestConceptId)?.label ?? '-' : '-'}
-          weakestConceptLabel={classLearningSummary.weakestConceptId ? recallQuestionsById.get(classLearningSummary.weakestConceptId)?.label ?? '-' : '-'}
+          evidence={printEvidence}
+          strongestConceptLabel={classRecallSummary.strongestConceptId ? recallQuestionsById.get(classRecallSummary.strongestConceptId)?.label ?? '-' : '-'}
+          weakestConceptLabel={classRecallSummary.weakestConceptId ? recallQuestionsById.get(classRecallSummary.weakestConceptId)?.label ?? '-' : '-'}
         />
       ) : null}
 

@@ -1,5 +1,7 @@
 import { questions, questionsById } from '../data/questions'
 import { bossQuestions } from '../data/bossQuestions'
+import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } from '../data/assessmentQuestions'
+import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
@@ -7,7 +9,7 @@ import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '..
 import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
-import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, RecallAnswerInput } from './gameService'
+import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
@@ -132,6 +134,9 @@ const createPlayer = (
   answers: [],
   bossAnswers: [],
   recallAnswers: [],
+  preTestAnswers: [],
+  postTestAnswers: [],
+  surveyResponses: [],
   submitted: false,
   finishedAt: null,
   elapsedMs: null,
@@ -246,6 +251,10 @@ const normalizeState = (state: DemoState): DemoState => {
       player.bossAnswers ??= []
       // Learning Layer: older saved demo state predates Story Recall entirely.
       player.recallAnswers ??= []
+      // Assessment Layer: older saved demo state predates pre/post-test and the survey entirely.
+      player.preTestAnswers ??= []
+      player.postTestAnswers ??= []
+      player.surveyResponses ??= []
     })
   })
   return state
@@ -634,13 +643,30 @@ export class DemoGameService implements GameService {
   // Story Recall is a pre-team individual learning phase, so the only precondition is that at
   // least one student is present to do it. Idempotent by stage check: a stale/duplicate call
   // once already past 'lobby' is a safe no-op rather than a restart that would wipe progress.
+  // lobby -> preTest. Teacher-only and idempotent: a duplicate click from any stage other than
+  // 'lobby' is a safe no-op, mirroring startRecall/startTeamSetup. Starts no timer — the pre-test
+  // is self-paced, and nothing about it is competitive.
+  async startPreTest(roomCode: string, teacherSessionId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มแบบทดสอบก่อนเรียนได้เฉพาะช่วงห้องรอ')
+    if (roomState.room.phase !== 'lobby') return
+    if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มแบบทดสอบไม่ได้')
+    roomState.room.phase = 'preTest'
+    await writeState(state)
+  }
+
   async startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
     verifyTeacher(roomState.room, teacherSessionId)
     if (roomState.room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มทบทวนเรื่องราวได้เฉพาะช่วงห้องรอ')
-    if (roomState.room.phase !== 'lobby') return
+    // Recall now follows the pre-test, so this is the preTest -> recall step. A stale/duplicate
+    // click from any other stage is a safe no-op, exactly as the lobby guard used to be.
+    if (roomState.room.phase !== 'preTest') return
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มทบทวนเรื่องราวไม่ได้')
     roomState.room.phase = 'recall'
     if (recallQuestionDurationSeconds != null) {
@@ -680,7 +706,7 @@ export class DemoGameService implements GameService {
   // Hands off to the EXISTING team workflow completely unchanged (randomize -> lock -> captain ->
   // guardian name -> starting item -> startRoom), which all already gate on status === 'waiting'
   // and therefore needed no changes at all. Recall answers are untouched here — recallAnswers is
-  // only ever reset on a genuine new round (prepareNextRound/stopRound), so Baseline survives
+  // only ever reset on a genuine new round (prepareNextRound/stopRound), so the review result survives
   // team setup, Main, and Boss for the end-of-game Learning Summary.
   async startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void> {
     const state = await readState()
@@ -741,7 +767,7 @@ export class DemoGameService implements GameService {
       throw new Error('ผู้ใช้:หมดเวลาตอบข้อนี้แล้ว')
     }
     // Countdown expiry: the client submits RECALL_TIMEOUT_CHOICE_ID instead of a real choice, and
-    // the item is persisted as unanswered -> incorrect for Baseline. Handled before
+    // the item is persisted as unanswered -> incorrect in the review result. Handled before
     // evaluateChoice because the sentinel is deliberately not a valid choice id.
     const isTimeout = answer.selectedChoiceId === RECALL_TIMEOUT_CHOICE_ID
     const evaluated = isTimeout ? { valid: true, isCorrect: false } : evaluateChoice(expectedQuestion, answer.selectedChoiceId)
@@ -753,6 +779,125 @@ export class DemoGameService implements GameService {
       answeredAt: Date.now(),
     }
     player.recallAnswers = [...player.recallAnswers, record]
+    await writeState(state)
+  }
+
+  // Assessment Layer (Milestone 1). All three follow saveRecallAnswer's shape: locate the player,
+  // require the room to be in this write's own phase, reject an out-of-order submit via the
+  // expected-index token, then append one record to that write's own array. Nothing here reads or
+  // writes player.score, player.answers, team, magic or boss state.
+  async savePreTestAnswer(roomCode: string, playerId: string, answer: PreTestAnswerInput): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
+    // The bank is the only authority on correctness — never the caller.
+    const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
+    if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+      throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
+    }
+    // Idempotent: the first answer for a question is the one that counts.
+    if (player.preTestAnswers.some((item) => item.questionId === answer.questionId)) return
+    // Sequential: the submitted question must be the next unanswered item, and the caller's
+    // expected index must agree with the server's own count.
+    if (player.preTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+      throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+    }
+    const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
+    if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+    player.preTestAnswers = [...player.preTestAnswers, {
+      questionId: answer.questionId,
+      selectedChoiceId: answer.selectedChoiceId,
+      answeredAt: Date.now(),
+    }]
+    await writeState(state)
+  }
+
+  async savePostTestAnswer(roomCode: string, playerId: string, answer: PostTestAnswerInput): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
+    // The bank is the only authority on correctness — never the caller.
+    const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
+    if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+      throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
+    }
+    // Idempotent: the first answer for a question is the one that counts.
+    if (player.postTestAnswers.some((item) => item.questionId === answer.questionId)) return
+    // Sequential: the submitted question must be the next unanswered item, and the caller's
+    // expected index must agree with the server's own count.
+    if (player.postTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+      throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+    }
+    const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
+    if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+    player.postTestAnswers = [...player.postTestAnswers, {
+      questionId: answer.questionId,
+      selectedChoiceId: answer.selectedChoiceId,
+      answeredAt: Date.now(),
+    }]
+    await writeState(state)
+  }
+
+  async saveSurveyResponse(roomCode: string, playerId: string, response: SurveyResponseInput): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.phase !== 'survey') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบประเมินกิจกรรม')
+    const expectedItem = SURVEY_ITEMS[player.surveyResponses.length]
+    if (player.surveyResponses.length >= SURVEY_ITEM_COUNT || !expectedItem) {
+      throw new Error('ผู้ใช้:ทำแบบประเมินครบทุกข้อแล้ว')
+    }
+    // Idempotent: the first response for an item is the one that counts.
+    if (player.surveyResponses.some((item) => item.itemId === response.itemId)) return
+    // Sequential: the submitted item must be the next unanswered one, and the caller's expected
+    // index must agree with the server's own count.
+    if (player.surveyResponses.length !== response.expectedIndex || expectedItem.id !== response.itemId) {
+      throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+    }
+    // Only the 5 scale points are storable — never an arbitrary value.
+    if (!isValidSurveyValue(response.value)) throw new Error('ผู้ใช้:กรุณาเลือกคำตอบจากตัวเลือกที่กำหนด')
+    player.surveyResponses = [...player.surveyResponses, {
+      itemId: response.itemId,
+      value: response.value,
+      answeredAt: Date.now(),
+    }]
+    await writeState(state)
+  }
+
+  // postTest -> survey. Teacher-only and idempotent: only fires from the post-test stage, so a
+  // stale/duplicate press is a safe no-op. No timer — the survey is self-paced.
+  async startSurvey(roomCode: string, teacherSessionId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'postTest') return
+    roomState.room.phase = 'survey'
+    await writeState(state)
+  }
+
+  // survey -> completed. Teacher-only and idempotent: only fires from the post-test stage, so a
+  // stale/duplicate press is a safe no-op. Sets nothing but the round-ending fields — winner,
+  // scores, teams and every Main/Boss result are left exactly as they already are.
+  async completeRound(roomCode: string, teacherSessionId: string): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'survey') return
+    // Record this round's history HERE, while every player's answers/recall/pre/post/survey
+    // arrays are still intact. The round-reset operations snapshot too, but a teacher may close
+    // the browser after finishing and never run one — snapshotting at completion is what makes
+    // the assessment data durable immediately. Keyed by `${round}-${playerId}`, so the later
+    // snapshots see the id already present and skip it rather than overwriting.
+    snapshotRoundHistory(roomState)
+    roomState.room.status = 'completed'
+    roomState.room.completedAt = Date.now()
     await writeState(state)
   }
 
@@ -804,8 +949,11 @@ export class DemoGameService implements GameService {
 
     const nextQuestionIndex = expectedQuestionIndex + 1
     if (nextQuestionIndex >= roomState.room.questionIds.length) {
-      roomState.room.status = 'completed'
-      roomState.room.completedAt = now
+      // Assessment Layer: finishing Main question 10 no longer ends the round. The room moves to
+      // the post-test with status still 'playing' — completion is now an explicit teacher action
+      // (completeRound). Every Main result below is written exactly as before: scores, submitted,
+      // finishedAt and elapsedMs are untouched, so the eventual result screen is unchanged.
+      roomState.room.phase = 'postTest'
       roomState.room.currentQuestionIndex = roomState.room.questionIds.length
       roomState.room.questionStartedAt = null
       roomState.room.questionClosedAt = null
@@ -1008,6 +1156,9 @@ export class DemoGameService implements GameService {
         answers: [],
         bossAnswers: [],
         recallAnswers: [],
+        preTestAnswers: [],
+        postTestAnswers: [],
+        surveyResponses: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -1065,6 +1216,9 @@ export class DemoGameService implements GameService {
         answers: [],
         bossAnswers: [],
         recallAnswers: [],
+        preTestAnswers: [],
+        postTestAnswers: [],
+        surveyResponses: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,

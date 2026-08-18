@@ -1,9 +1,11 @@
 import { useEffect, useMemo } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
-import { recallQuestionsById } from '../data/recallQuestions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamMagic } from '../hooks/useGameData'
-import { computeStudentLearningEvidence } from '../lib/learning'
+import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
+import { computePostTestResult, computePreTestResult } from '../lib/assessment'
+import { resolveStudentRoute } from '../lib/game'
+import { computeStudentRecallResult } from '../lib/learning'
 import { getPlayerSession } from '../services/sessionStorage'
 import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS, RECALL_SECONDS_PER_ITEM } from '../types/game'
 import type { Player, Room } from '../types/game'
@@ -51,6 +53,9 @@ const previewPlayer: Player = {
   answers: [],
   bossAnswers: [],
   recallAnswers: [],
+  preTestAnswers: [],
+  postTestAnswers: [],
+  surveyResponses: [],
   submitted: true,
   finishedAt: 0,
   elapsedMs: 0,
@@ -77,17 +82,33 @@ export const ResultPage = () => {
   const guardianNamesState = useAllTeamGuardianNames(isPreview ? '' : normalizedCode)
   const guardianNameById = useMemo(() => new Map(guardianNamesState.data.map((entry) => [entry.teamId, entry.name])), [guardianNamesState.data])
   const assignedTeamDisplayName = assignedTeam ? guardianNameById.get(assignedTeam.id) ?? assignedTeam.name : ''
-  // Learning Layer: raw individual correctness only (player.recallAnswers/answers), never
-  // magic/team/boss/speed/ranking — see lib/learning.ts's own doc comment for why.
-  const learningEvidence = useMemo(() => (player ? computeStudentLearningEvidence(player) : null), [player])
+  // Review result only. Never paired with the knowledge score below as a before/after figure.
+  const recallResult = useMemo(() => (player ? computeStudentRecallResult(player) : null), [player])
+  // The student's own before/after, scored from the approved banks. Null unless BOTH tests were
+  // finished, so an incomplete test shows nothing rather than a misleading number.
+  const prePost = useMemo(() => {
+    if (!player) return null
+    const complete = player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT
+      && player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT
+    if (!complete) return null
+    return {
+      pre: computePreTestResult(player.preTestAnswers).correctCount,
+      post: computePostTestResult(player.postTestAnswers).correctCount,
+    }
+  }, [player])
 
+  // Same single source of truth GamePage and LobbyPage use. This page used to hand-roll its own
+  // branch list, whose only route back to /game was `status === 'playing' && !player.submitted` —
+  // so once Main finished and every player was flagged submitted, a student who had already
+  // landed here was stranded on the result screen for the whole post-test and survey, both of
+  // which run under 'playing' with submitted === true. resolveStudentRoute already ranks the
+  // postTest/survey phases above the submitted -> /result fallback; deferring to it is what makes
+  // the three student pages structurally incapable of disagreeing about the current stage.
   useEffect(() => {
-    if (!room || !player) return
-    if (room.status === 'closed') navigate(`/closed/${normalizedCode}`, { replace: true })
-    else if (room.winner) navigate(`/congratulations/${normalizedCode}`, { replace: true })
-    else if (room.status === 'waiting') navigate(`/lobby/${normalizedCode}`, { replace: true })
-    else if (room.status === 'playing' && !player.submitted) navigate(`/game/${normalizedCode}`, { replace: true })
-  }, [navigate, normalizedCode, room, player])
+    if (!room || !player || isPreview) return
+    const destination = resolveStudentRoute(room, player)
+    if (destination !== `/result/${normalizedCode}`) navigate(destination, { replace: true })
+  }, [navigate, normalizedCode, room, player, isPreview])
 
   const score = isPreview ? previewScore : player?.score ?? 0
   const failed = score <= 4
@@ -153,34 +174,24 @@ export const ResultPage = () => {
             {/* Learning Layer: appended below the existing competitive result, never replacing
                 it. Shown for every real (non-preview) result — preview mode has no real recall
                 data to summarize. */}
-            {!isPreview && learningEvidence ? (
-              <section className="learning-summary mt-6" aria-label="สรุปการเรียนรู้ของคุณ">
-                <p className="eyebrow">สรุปการเรียนรู้</p>
-                {/* Plain before/after counts out of 5. The old "+40% / -40%" figure was a
-                    percentage-point difference between two 5-item scores, which reads as a grade
-                    and confuses more than it explains — the counts plus a sentence say the same
-                    thing in classroom language. */}
+            {/* Two independent results, side by side. Recall is a review activity and the main
+                game is a knowledge score — they are never subtracted, ranked against each other,
+                or described as before/after. */}
+            {!isPreview && recallResult ? (
+              <section className="learning-summary mt-6" aria-label="ผลของคุณรอบนี้">
+                <p className="eyebrow">ผลรอบนี้</p>
                 <dl className="learning-summary-grid mt-2">
-                  <div><dt>ก่อนเล่น</dt><dd>{learningEvidence.recallCorrectCount}/5</dd></div>
-                  <div><dt>หลังเล่น</dt><dd>{learningEvidence.mainEvidenceCorrectCount}/5</dd></div>
+                  <div><dt>ผลการทบทวน</dt><dd>{recallResult.correctCount}/{recallResult.totalCount}</dd></div>
+                  <div><dt>คะแนนความรู้</dt><dd>{score}/10</dd></div>
+                  {/* Pre/post appear only when BOTH tests are complete — a partial test has no
+                      comparable score, and showing one alone would invite a false comparison. */}
+                  {prePost ? (
+                    <>
+                      <div><dt>ก่อนเรียน</dt><dd>{prePost.pre}/10</dd></div>
+                      <div><dt>หลังเรียน</dt><dd>{prePost.post}/10</dd></div>
+                    </>
+                  ) : null}
                 </dl>
-                <p className={`learning-summary-verdict ${learningEvidence.mainEvidenceCorrectCount > learningEvidence.recallCorrectCount ? 'learning-summary-verdict-up' : learningEvidence.mainEvidenceCorrectCount < learningEvidence.recallCorrectCount ? 'learning-summary-verdict-down' : ''}`}>
-                  {learningEvidence.mainEvidenceCorrectCount > learningEvidence.recallCorrectCount
-                    ? `เข้าใจเพิ่มขึ้น ${learningEvidence.mainEvidenceCorrectCount - learningEvidence.recallCorrectCount} เรื่อง`
-                    : learningEvidence.mainEvidenceCorrectCount < learningEvidence.recallCorrectCount
-                      ? `ควรทบทวนเพิ่ม ${learningEvidence.recallCorrectCount - learningEvidence.mainEvidenceCorrectCount} เรื่อง`
-                      : 'ผลการเรียนรู้คงเดิม'}
-                </p>
-                {learningEvidence.improvedConceptIds.length > 0 ? (
-                  <p className="learning-summary-note learning-summary-note-positive">
-                    เข้าใจเพิ่มขึ้น: {learningEvidence.improvedConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
-                  </p>
-                ) : null}
-                {learningEvidence.stillIncorrectConceptIds.length > 0 ? (
-                  <p className="learning-summary-note">
-                    ควรทบทวน: {learningEvidence.stillIncorrectConceptIds.map((id) => recallQuestionsById.get(id)?.label ?? id).join(', ')}
-                  </p>
-                ) : null}
               </section>
             ) : null}
 

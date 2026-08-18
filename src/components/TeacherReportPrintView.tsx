@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom'
+import type { EvidenceSummary } from '../lib/evidenceSummary'
 import type { Player } from '../types/game'
 
 interface TeacherReportPrintViewProps {
@@ -7,8 +8,9 @@ interface TeacherReportPrintViewProps {
   players: Player[]
   questionIds: string[]
   teamNameById: Map<string, string>
-  beforeAverage: number
-  afterAverage: number
+  // Computed by computeEvidenceSummaryFromHistory — the same function the on-screen panel and
+  // the spreadsheet use, so the printed numbers cannot disagree with either.
+  evidence: EvidenceSummary
   strongestConceptLabel: string
   weakestConceptLabel: string
 }
@@ -32,8 +34,7 @@ export const TeacherReportPrintView = ({
   players,
   questionIds,
   teamNameById,
-  beforeAverage,
-  afterAverage,
+  evidence,
   strongestConceptLabel,
   weakestConceptLabel,
 }: TeacherReportPrintViewProps) => {
@@ -56,13 +57,99 @@ export const TeacherReportPrintView = ({
         </p>
       </header>
 
-      {/* Compact learning summary above the table, matching the teacher's on-screen wording. */}
+      {/* Evidence summary, matching the teacher's on-screen panel word for word. Descriptive
+          only — it reports what the scores were, never that the activity caused them. */}
+      <h2 className="print-section-title">ก่อนเรียน / หลังเรียน</h2>
+      <p className="print-report-meta">
+        เทียบเฉพาะผู้ทำครบทั้งสองชุด {evidence.prePost.comparedCount} / {evidence.totalStudents} คน
+      </p>
+      {evidence.prePost.comparedCount === 0 ? (
+        <p className="print-report-empty">ยังไม่มีนักเรียนที่ทำครบทั้งสองชุด จึงยังเทียบไม่ได้</p>
+      ) : (
+        <>
+          <dl className="print-report-summary">
+            <div><dt>ก่อนเรียน (เฉลี่ย)</dt><dd>{evidence.prePost.preAverage.toFixed(1)}/{evidence.prePost.totalCount}</dd></div>
+            <div><dt>หลังเรียน (เฉลี่ย)</dt><dd>{evidence.prePost.postAverage.toFixed(1)}/{evidence.prePost.totalCount}</dd></div>
+            <div><dt>ผลต่างเฉลี่ย</dt><dd>{evidence.prePost.averageDifference >= 0 ? '+' : ''}{evidence.prePost.averageDifference.toFixed(1)}</dd></div>
+          </dl>
+          <p className="print-report-meta">
+            คะแนนหลังเรียนสูงกว่าก่อนเรียน {evidence.prePost.improvedCount} คน ({evidence.prePost.improvedPercent.toFixed(0)}%)
+            {' · '}เท่าเดิม {evidence.prePost.unchangedCount} คน
+            {' · '}ต่ำกว่า {evidence.prePost.declinedCount} คน
+          </p>
+        </>
+      )}
+
+      <h2 className="print-section-title">ผลการเล่นเกมหลัก</h2>
       <dl className="print-report-summary">
-        <div><dt>ก่อนเล่นเฉลี่ย</dt><dd>{beforeAverage.toFixed(1)}/5</dd></div>
-        <div><dt>หลังเล่นเฉลี่ย</dt><dd>{afterAverage.toFixed(1)}/5</dd></div>
-        <div><dt>เรื่องที่เข้าใจดีที่สุด</dt><dd>{strongestConceptLabel}</dd></div>
-        <div><dt>เรื่องที่ควรทบทวน</dt><dd>{weakestConceptLabel}</dd></div>
+        <div><dt>คะแนนเฉลี่ย</dt><dd>{evidence.main.averageScore.toFixed(1)}/{evidence.main.totalCount}</dd></div>
+        <div><dt>ทำครบ 10 ข้อ</dt><dd>{evidence.main.completedCount}/{evidence.totalStudents} คน</dd></div>
       </dl>
+
+      {/* Reported on its own. Never compared with Main or with pre/post. */}
+      <h2 className="print-section-title">ผลการทบทวน</h2>
+      <dl className="print-report-summary">
+        <div><dt>คะแนนเฉลี่ย</dt><dd>{evidence.recall.averageCorrect.toFixed(1)}/{evidence.recall.totalCount}</dd></div>
+        <div><dt>ทำครบ 5 ข้อ</dt><dd>{evidence.recall.completedCount}/{evidence.totalStudents} คน</dd></div>
+        <div><dt>ทบทวนได้ดีที่สุด</dt><dd>{strongestConceptLabel}</dd></div>
+        <div><dt>ทบทวนได้น้อยที่สุด</dt><dd>{weakestConceptLabel}</dd></div>
+      </dl>
+
+      <h2 className="print-section-title">แบบประเมินกิจกรรม</h2>
+      <p className="print-report-meta">ทำครบ {evidence.survey.completedCount} / {evidence.totalStudents} คน</p>
+      {evidence.survey.responseCount === 0 ? (
+        <p className="print-report-empty">ยังไม่มีแบบประเมินที่ทำครบทุกข้อ</p>
+      ) : (
+        <>
+          <dl className="print-report-summary">
+            <div><dt>ค่าเฉลี่ยรวม</dt><dd>{evidence.survey.overallAverage.toFixed(2)}/5</dd></div>
+          </dl>
+          <table className="print-report-table print-survey-table">
+            <thead>
+              <tr><th className="print-col-name">ข้อความ</th><th>ค่าเฉลี่ย</th><th>ผู้ตอบ</th></tr>
+            </thead>
+            <tbody>
+              {evidence.survey.items.map((item, index) => (
+                <tr key={item.itemId}>
+                  <td className="print-col-name">{index + 1}. {item.statement}</td>
+                  <td>{item.responseCount === 0 ? '-' : `${item.average.toFixed(2)}/5`}</td>
+                  <td>{item.responseCount}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <h2 className="print-section-title">รายบุคคล</h2>
+      <table className="print-report-table">
+        <thead>
+          <tr>
+            <th className="print-col-name">ชื่อ</th>
+            <th>ก่อนเรียน</th>
+            <th>หลังเรียน</th>
+            <th>ผลต่าง</th>
+            <th>เกมหลัก</th>
+            <th>ทำเกมครบ</th>
+            <th>ประเมินครบ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {evidence.students.map((student) => (
+            <tr key={student.playerId}>
+              <td className="print-col-name">{student.displayName}</td>
+              <td>{student.preScore === null ? '-' : `${student.preScore}/10`}</td>
+              <td>{student.postScore === null ? '-' : `${student.postScore}/10`}</td>
+              <td>{student.difference === null ? '-' : `${student.difference >= 0 ? '+' : ''}${student.difference}`}</td>
+              <td>{student.mainScore}/10</td>
+              <td>{student.mainCompleted ? 'ครบ' : `${student.mainAnsweredCount}/10`}</td>
+              <td>{student.surveyCompleted ? 'ครบ' : `${student.surveyAnsweredCount}/6`}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h2 className="print-section-title">รายละเอียดคำถามหลัก</h2>
 
       <table className="print-report-table">
         <thead>

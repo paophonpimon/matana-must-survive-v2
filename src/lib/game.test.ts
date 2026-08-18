@@ -154,7 +154,7 @@ describe('route resolver', () => {
   // closeRoom only changes status and deliberately leaves phase untouched, so a room closed
   // mid-Recall still carries phase 'recall' — without this precedence a student (and, in the bug
   // this pins, the teacher's own screen) would stay stranded on the Recall screen of a dead room.
-  it('สถานะปิด/จบเกม ต้องมาก่อนระยะ recall เสมอ แม้ห้องจะถูกปิดกลางกู้ความทรงจำ', () => {
+  it('สถานะปิด/จบเกม ต้องมาก่อนระยะ recall เสมอ แม้ห้องจะถูกปิดกลางทบทวนเรื่องราว', () => {
     const recallRoom = { ...room, status: 'waiting', phase: 'recall' } as Room
     expect(resolveStudentRoute(recallRoom, player)).toBe('/game/ABC234')
 

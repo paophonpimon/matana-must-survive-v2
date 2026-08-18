@@ -3,7 +3,7 @@ import { questionsById } from '../data/questions'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
 import { resolveStudentRoute } from '../lib/game'
-import { computeStudentLearningEvidence } from '../lib/learning'
+import { computeStudentRecallResult } from '../lib/learning'
 import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
 import { BOSS_QUESTION_COUNT, BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX, MIN_RECALL_SECONDS_PER_ITEM } from '../types/game'
 import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, MagicEvent, Player, Room, TeamGuardianName, TeamMagicState, TeamRosterSummary } from '../types/game'
@@ -152,6 +152,7 @@ const advanceToTeamSetup = async (
   stopCurrent()
   if (startingPhase !== 'lobby') return
 
+  await service.startPreTest(roomCode, teacherSessionId)
   await service.startRecall(roomCode, teacherSessionId)
 
   const players: { value: Player[] } = { value: [] }
@@ -313,7 +314,7 @@ describe('Demo timed classroom flow', () => {
     // at least one student), so the stage guard is what rejects here — the "no players" check
     // inside randomizeTeams is now unreachable with zero players, by construction.
     await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 1)).rejects.toThrow('ทบทวนเรื่องราว')
-    await expect(service.startRecall(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+    await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
 
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
@@ -438,8 +439,13 @@ describe('Demo timed classroom flow', () => {
     const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
     const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { players.value = value })
     await vi.waitFor(() => {
-      expect(liveRoom.value).toMatchObject({ status: 'completed', currentQuestionIndex: 10, winner: null })
+      expect(liveRoom.value).toMatchObject({ status: 'playing', phase: 'postTest', currentQuestionIndex: 10, winner: null })
       expect(players.value.every((player) => player.submitted && player.status === 'submitted')).toBe(true)
+    })
+    await service.startSurvey(room.roomCode, 'teacher-1')
+    await service.completeRound(room.roomCode, 'teacher-1')
+    await vi.waitFor(() => {
+      expect(liveRoom.value).toMatchObject({ status: 'completed', currentQuestionIndex: 10, winner: null })
     })
     expect(players.value.find((player) => player.id === high.id)?.score).toBe(9)
     expect(players.value.find((player) => player.id === low.id)?.score).toBe(4)
@@ -465,6 +471,8 @@ describe('Demo timed classroom flow', () => {
     })).rejects.toThrow()
     await answerAt(service, room, player, 0, true)
     for (let index = 0; index < 10; index += 1) await advanceQuestionThroughBoss(service, room.roomCode, 'teacher-1', index)
+    await service.startSurvey(room.roomCode, 'teacher-1')
+    await service.completeRound(room.roomCode, 'teacher-1')
     await service.prepareNextRound(room.roomCode, 'teacher-1')
 
     const resetPlayer: { value: Player | null } = { value: null }
@@ -2149,6 +2157,7 @@ describe('Demo timed classroom flow', () => {
       await joinAll(service, room.roomCode, 2)
 
       // Nothing but "at least one student joined" is required.
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -2163,9 +2172,10 @@ describe('Demo timed classroom flow', () => {
     it('2b. starting Recall with nobody in the room is refused, and a duplicate start is a safe no-op', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
-      await expect(service.startRecall(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
 
       await joinAll(service, room.roomCode, 1)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -2173,6 +2183,7 @@ describe('Demo timed classroom flow', () => {
 
       // A stale/duplicate click must never restart Recall (which would be observable as progress
       // being wiped) — it is simply ignored.
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       expect(liveRoom.value?.phase).toBe('recall')
 
@@ -2184,6 +2195,7 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 3)
 
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -2214,6 +2226,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const [alpha, beta] = await joinAll(service, room.roomCode, 2)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
       // Alpha answers every item; Beta silently skips items 1 and 2 — exactly what a student
@@ -2248,8 +2261,8 @@ describe('Demo timed classroom flow', () => {
       expect(liveBeta?.recallAnswers).toHaveLength(3)
       expect(liveBeta?.recallAnswers.map((entry) => entry.conceptId))
         .toEqual(RECALL_QUESTIONS.slice(2).map((question) => question.id))
-      // ...and absence already reads as not-correct in the before-play evidence.
-      expect(computeStudentLearningEvidence(liveBeta as Player).recallCorrectCount).toBe(3)
+      // ...and an unanswered item simply never counts toward the review result.
+      expect(computeStudentRecallResult(liveBeta as Player).correctCount).toBe(3)
       // The slow student never held the room: the sequence finished and team setup is available.
       await service.startTeamSetup(room.roomCode, 'teacher-1')
       await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
@@ -2262,6 +2275,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
 
@@ -2286,6 +2300,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -2327,6 +2342,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 1)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -2362,6 +2378,7 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
 
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1', 25)
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -2389,6 +2406,7 @@ describe('Demo timed classroom flow', () => {
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 1)
 
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1', 0)
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -2402,6 +2420,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
 
@@ -2427,6 +2446,7 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
       await service.startTeamSetup(room.roomCode, 'teacher-1')
@@ -2455,17 +2475,19 @@ describe('Demo timed classroom flow', () => {
       await joinAll(service, room.roomCode, 2)
 
       await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทบทวนเรื่องราว')
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทบทวนเรื่องราว')
     })
 
-    it('8. Recall answers and Baseline survive team setup, Main, and Boss', async () => {
+    it('8. Recall answers and the review result survive team setup, Main, and Boss', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const [alpha] = await joinAll(service, room.roomCode, 1)
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
-      // A deliberately mixed Recall result so Baseline is a distinctive, checkable number: the
+      // A deliberately mixed Recall result so the review score is a distinctive, checkable number: the
       // first item is answered wrong, the rest right, walking the shared timeline as we go.
       const wrongChoice = RECALL_QUESTIONS[0].choices.find((choice) => choice.id !== RECALL_QUESTIONS[0].correctChoiceId)
       for (let index = 0; index < RECALL_QUESTIONS.length; index += 1) {
@@ -2480,8 +2502,8 @@ describe('Demo timed classroom flow', () => {
       const player: { value: Player | null } = { value: null }
       const stopPlayer = service.subscribePlayer(room.roomCode, alpha.id, (value) => { player.value = value })
       await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length))
-      const baselineAfterRecall = computeStudentLearningEvidence(player.value as Player).baselinePercent
-      expect(baselineAfterRecall).toBe(80)
+      const recallCorrectAfterRecall = computeStudentRecallResult(player.value as Player).correctCount
+      expect(recallCorrectAfterRecall).toBe(4)
 
       await service.startTeamSetup(room.roomCode, 'teacher-1')
       await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
@@ -2491,7 +2513,7 @@ describe('Demo timed classroom flow', () => {
 
       // Survives team setup + Main start...
       await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length))
-      expect(computeStudentLearningEvidence(player.value as Player).baselinePercent).toBe(baselineAfterRecall)
+      expect(computeStudentRecallResult(player.value as Player).correctCount).toBe(recallCorrectAfterRecall)
 
       // ...and survives playing through Main into the Boss phase.
       const liveRoom: { value: Room | null } = { value: null }
@@ -2502,7 +2524,7 @@ describe('Demo timed classroom flow', () => {
       }
       await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('boss'))
       expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length)
-      expect(computeStudentLearningEvidence(player.value as Player).baselinePercent).toBe(baselineAfterRecall)
+      expect(computeStudentRecallResult(player.value as Player).correctCount).toBe(recallCorrectAfterRecall)
 
       stopRoom()
       stopPlayer()
@@ -2532,6 +2554,7 @@ describe('Demo timed classroom flow', () => {
       expect(await readStage('lobby')).toBe(`/lobby/${room.roomCode}`)
 
       // Stage recall, partially answered -> the game screen (Recall), progress intact.
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await service.saveRecallAnswer(room.roomCode, alpha.id, {
         conceptId: RECALL_QUESTIONS[0].id,
@@ -2574,6 +2597,7 @@ describe('Demo timed classroom flow', () => {
       expect(alpha.id).not.toBe(beta.id)
       expect(alpha.ownerUid).not.toBe(beta.ownerUid)
 
+      await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       // Only Alpha answers.
       await runRecallSequence(service, room.roomCode, [alpha.id])

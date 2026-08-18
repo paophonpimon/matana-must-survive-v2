@@ -96,9 +96,6 @@ export const JoinPage = () => {
       <div className="join-scrim" aria-hidden="true" />
 
       <header className="join-header">
-        <Link className="join-brand" to="/" aria-label="มัทนาต้องรอด หน้าแรก">
-          <img src="/assets/home/home-logo.png" alt="" aria-hidden="true" />
-        </Link>
         <Link className="join-home-link" to="/">
           <HomeIcon />
           <span>กลับหน้าหลัก</span>
@@ -107,6 +104,11 @@ export const JoinPage = () => {
 
       <div className="join-layout">
         <section className="join-intro">
+          {/* The title art anchors the left column rather than sitting as a small mark in the
+              header, so the column reads as a composed unit instead of loose copy. */}
+          <Link className="join-brand" to="/" aria-label="มัทนาต้องรอด หน้าแรก">
+            <img src="/assets/home/home-logo.png" alt="" aria-hidden="true" />
+          </Link>
           <p className="join-eyebrow">สำหรับผู้เรียน</p>
           <h1 className="join-title">รวมพลังผู้พิทักษ์</h1>
           <p className="join-lede">กรอกชื่อและเลขที่นักเรียนของคุณ แล้วใช้รหัสจากครูเพื่อเข้าสู่ภารกิจเดียวกัน ครูจะจัดทีมให้ในภายหลัง</p>
@@ -175,7 +177,7 @@ export const JoinPage = () => {
             <span>{busy ? 'กำลังเข้าร่วมห้อง...' : 'เข้าสู่ภารกิจ'}</span>
           </button>
 
-          <Link className="join-back-link" to="/">กลับไปเลือกบทบาท</Link>
+          <Link className="join-back-link" to="/">กลับไปหน้าแรก</Link>
         </form>
       </div>
     </main>

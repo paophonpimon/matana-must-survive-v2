@@ -21,6 +21,8 @@ import {
 } from 'firebase/firestore'
 import { questions, questionsById } from '../data/questions'
 import { bossQuestions } from '../data/bossQuestions'
+import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } from '../data/assessmentQuestions'
+import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
 import { getRemainingMilliseconds } from '../lib/gameFlow'
@@ -29,10 +31,11 @@ import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
-import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService, type RecallAnswerInput } from './gameService'
+import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService, type PostTestAnswerInput, type PreTestAnswerInput, type RecallAnswerInput, type SurveyResponseInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
+  GAME_PHASES,
   MAX_BOSS_SECONDS_PER_QUESTION,
   MAX_RECALL_SECONDS_PER_ITEM,
   MIN_BOSS_SECONDS_PER_QUESTION,
@@ -58,7 +61,10 @@ import type {
   MagicItemType,
   Player,
   QueuedMagicEffect,
+  PreTestAnswerRecord,
+  RoundHistoryAssessmentAnswer,
   RecallAnswerRecord,
+  SurveyResponseRecord,
   Room,
   RoundHistoryEntry,
   TeamGuardianName,
@@ -143,6 +149,16 @@ const mapTeamMeta = (value: unknown): TeamMeta => {
   return { id: String(meta.id ?? ''), name: String(meta.name ?? '') }
 }
 
+// A phase this build does not recognize is a real version mismatch — a room written by a newer
+// client, or a stale allow-list here. Falling back silently is what made the preTest bug invisible
+// in the browser, so the fallback now announces itself in the console instead of hiding.
+const mapPhase = (rawPhase: unknown, rawStatus: unknown): GamePhase => {
+  const phase = String(rawPhase)
+  if ((GAME_PHASES as readonly string[]).includes(phase)) return phase as GamePhase
+  if (rawPhase != null) console.warn(`[matana] unrecognized room phase "${phase}" — falling back by status`)
+  return rawStatus === 'playing' ? 'main' : 'lobby'
+}
+
 const mapRoom = (data: DocumentData): Room => ({
   roomCode: String(data.roomCode),
   status: data.status as Room['status'],
@@ -163,9 +179,11 @@ const mapRoom = (data: DocumentData): Room => ({
   teams: Array.isArray(data.teams) ? data.teams.map(mapTeamMeta) : [],
   // Unknown/absent phase falls back by status, so a room written before the stage model existed
   // still resolves to a sane stage instead of silently reading as 'lobby' mid-game.
-  phase: (['lobby', 'recall', 'teamSetup', 'main', 'boss'].includes(String(data.phase))
-    ? data.phase
-    : data.status === 'playing' ? 'main' : 'lobby') as GamePhase,
+  //
+  // The allow-list is GAME_PHASES, not a hand-maintained copy: when this was a literal array it
+  // went stale the moment preTest/postTest/survey were added, so a room whose phase had genuinely
+  // been written as 'preTest' read back as 'lobby' and the whole class appeared not to advance.
+  phase: mapPhase(data.phase, data.status),
   recallQuestionDurationSeconds: Number(data.recallQuestionDurationSeconds ?? RECALL_SECONDS_PER_ITEM),
   recallQuestionIndex: Number(data.recallQuestionIndex ?? 0),
   recallQuestionStartedAt: toMillis(data.recallQuestionStartedAt),
@@ -196,6 +214,21 @@ const mapRecallAnswerRecord = (answer: Record<string, unknown>): RecallAnswerRec
   answeredAt: toMillis(answer.answeredAt) ?? Number(answer.answeredAt ?? Date.now()),
 })
 
+// Assessment Layer: pre/post-test records. Same lean shape as mapRecallAnswerRecord (no
+// responseTimeMs — neither test is speed-scored) but keyed by questionId.
+const mapAssessmentAnswerRecord = (answer: Record<string, unknown>): PreTestAnswerRecord => ({
+  questionId: String(answer.questionId),
+  selectedChoiceId: String(answer.selectedChoiceId),
+  answeredAt: toMillis(answer.answeredAt) ?? Number(answer.answeredAt ?? Date.now()),
+})
+
+// No correctness field is read here at all — a survey response has no right answer.
+const mapSurveyResponseRecord = (response: Record<string, unknown>): SurveyResponseRecord => ({
+  itemId: String(response.itemId),
+  value: String(response.value ?? ''),
+  answeredAt: toMillis(response.answeredAt) ?? Number(response.answeredAt ?? Date.now()),
+})
+
 const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): Player => {
   const data = snapshot.data()
   return {
@@ -210,6 +243,11 @@ const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string;
     answers: Array.isArray(data.answers) ? data.answers.map(mapAnswerRecordLike) : [],
     bossAnswers: Array.isArray(data.bossAnswers) ? data.bossAnswers.map(mapAnswerRecordLike) : [],
     recallAnswers: Array.isArray(data.recallAnswers) ? data.recallAnswers.map(mapRecallAnswerRecord) : [],
+    // Assessment Layer: absent on every player document written before this milestone, so an
+    // empty array is the correct read — never a missing-field error.
+    preTestAnswers: Array.isArray(data.preTestAnswers) ? data.preTestAnswers.map(mapAssessmentAnswerRecord) : [],
+    postTestAnswers: Array.isArray(data.postTestAnswers) ? data.postTestAnswers.map(mapAssessmentAnswerRecord) : [],
+    surveyResponses: Array.isArray(data.surveyResponses) ? data.surveyResponses.map(mapSurveyResponseRecord) : [],
     submitted: Boolean(data.submitted),
     finishedAt: toMillis(data.finishedAt),
     elapsedMs: data.elapsedMs == null ? null : Number(data.elapsedMs),
@@ -348,6 +386,11 @@ const clampRecallDuration = (seconds: number): number =>
 const clampBossDuration = (seconds: number): number =>
   Math.max(MIN_BOSS_SECONDS_PER_QUESTION, Math.min(MAX_BOSS_SECONDS_PER_QUESTION, Math.round(seconds)))
 
+const mapHistoryAssessmentAnswer = (entry: DocumentData): RoundHistoryAssessmentAnswer => ({
+  questionId: String(entry.questionId ?? ''),
+  selectedChoiceId: String(entry.selectedChoiceId ?? ''),
+})
+
 const mapRoundHistoryEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string; data(): DocumentData }): RoundHistoryEntry => {
   const data = snapshot.data()
   const asStringArray = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : [])
@@ -359,24 +402,52 @@ const mapRoundHistoryEntry = (snapshot: QueryDocumentSnapshot<DocumentData> | { 
     studentNumber: String(data.studentNumber ?? ''),
     teamId: data.teamId == null ? null : String(data.teamId),
     teamName: String(data.teamName ?? ''),
-    beforeCorrectCount: Number(data.beforeCorrectCount ?? 0),
-    afterCorrectCount: Number(data.afterCorrectCount ?? 0),
-    improvedCount: Number(data.improvedCount ?? 0),
-    reviewCount: Number(data.reviewCount ?? 0),
-    improvedConceptIds: asStringArray(data.improvedConceptIds),
-    reviewConceptIds: asStringArray(data.reviewConceptIds),
-    conceptResults: Array.isArray(data.conceptResults)
-      ? data.conceptResults.map((entry: DocumentData) => ({
-        conceptId: String(entry.conceptId ?? ''),
-        beforeCorrect: Boolean(entry.beforeCorrect),
-        afterCorrect: Boolean(entry.afterCorrect),
-      }))
-      : [],
+    // LEGACY Recall-vs-Main fields: mapped ONLY when the stored document actually has them.
+    // Coercing an absent field to 0/[] would fabricate the old shape on documents that never had
+    // it, which is exactly what "new records must not present legacy learning evidence" forbids.
+    ...(data.beforeCorrectCount === undefined ? {} : { beforeCorrectCount: Number(data.beforeCorrectCount) }),
+    ...(data.afterCorrectCount === undefined ? {} : { afterCorrectCount: Number(data.afterCorrectCount) }),
+    ...(data.improvedCount === undefined ? {} : { improvedCount: Number(data.improvedCount) }),
+    ...(data.reviewCount === undefined ? {} : { reviewCount: Number(data.reviewCount) }),
+    ...(data.improvedConceptIds === undefined ? {} : { improvedConceptIds: asStringArray(data.improvedConceptIds) }),
+    ...(data.reviewConceptIds === undefined ? {} : { reviewConceptIds: asStringArray(data.reviewConceptIds) }),
+    ...(Array.isArray(data.conceptResults)
+      ? {
+        conceptResults: data.conceptResults.map((entry: DocumentData) => ({
+          conceptId: String(entry.conceptId ?? ''),
+          beforeCorrect: Boolean(entry.beforeCorrect),
+          afterCorrect: Boolean(entry.afterCorrect),
+        })),
+      }
+      : {}),
+    // Standalone Story Recall result — absent on rounds recorded before it existed, so it stays
+    // absent rather than being coerced into an empty/zero shape that would read as a real result.
+    ...(data.recallCorrectCount === undefined ? {} : { recallCorrectCount: Number(data.recallCorrectCount) }),
+    ...(data.recallTotalCount === undefined ? {} : { recallTotalCount: Number(data.recallTotalCount) }),
+    ...(Array.isArray(data.recallResults)
+      ? {
+        recallResults: data.recallResults.map((entry: DocumentData) => ({
+          conceptId: String(entry.conceptId ?? ''),
+          isCorrect: Boolean(entry.isCorrect),
+          answered: Boolean(entry.answered),
+        })),
+      }
+      : {}),
     knowledgeScore: Number(data.knowledgeScore ?? 0),
     knowledgeScore100: Number(data.knowledgeScore100 ?? 0),
     mainAnswers: Array.isArray(data.mainAnswers)
       ? data.mainAnswers.map((entry: DocumentData) => ({ questionId: String(entry.questionId ?? ''), isCorrect: Boolean(entry.isCorrect) }))
       : [],
+    // Assessment Layer — likewise absent on rounds recorded before it existed.
+    ...(data.preTestCorrectCount === undefined ? {} : { preTestCorrectCount: Number(data.preTestCorrectCount) }),
+    ...(data.preTestTotalCount === undefined ? {} : { preTestTotalCount: Number(data.preTestTotalCount) }),
+    ...(Array.isArray(data.preTestAnswers) ? { preTestAnswers: data.preTestAnswers.map(mapHistoryAssessmentAnswer) } : {}),
+    ...(data.postTestCorrectCount === undefined ? {} : { postTestCorrectCount: Number(data.postTestCorrectCount) }),
+    ...(data.postTestTotalCount === undefined ? {} : { postTestTotalCount: Number(data.postTestTotalCount) }),
+    ...(Array.isArray(data.postTestAnswers) ? { postTestAnswers: data.postTestAnswers.map(mapHistoryAssessmentAnswer) } : {}),
+    ...(Array.isArray(data.surveyResponses)
+      ? { surveyResponses: data.surveyResponses.map((entry: DocumentData) => ({ itemId: String(entry.itemId ?? ''), value: String(entry.value ?? '') })) }
+      : {}),
     completedAt: Number(data.completedAt ?? 0),
   }
 }
@@ -720,6 +791,9 @@ export class FirebaseGameService implements GameService {
           answers: [],
           bossAnswers: [],
           recallAnswers: [],
+          preTestAnswers: [],
+          postTestAnswers: [],
+          surveyResponses: [],
           submitted: false,
           finishedAt: null,
           elapsedMs: null,
@@ -879,6 +953,24 @@ export class FirebaseGameService implements GameService {
   // Story Recall is a pre-team individual learning phase, so the only precondition is that at
   // least one student is present. Idempotent by stage check: a stale/duplicate call once already
   // past 'lobby' is a safe no-op rather than a restart that would wipe progress.
+  // lobby -> preTest. Teacher-only and idempotent: a duplicate click from any stage other than
+  // 'lobby' is a safe no-op, mirroring startRecall/startTeamSetup. Starts no timer — the pre-test
+  // is self-paced, and nothing about it is competitive.
+  async startPreTest(roomCode: string, teacherSessionId: string): Promise<void> {
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มแบบทดสอบไม่ได้')
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มแบบทดสอบก่อนเรียนได้เฉพาะช่วงห้องรอ')
+      if (room.phase !== 'lobby') return
+      transaction.update(roomRef, { phase: 'preTest' })
+    })
+  }
+
   async startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void> {
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มทบทวนเรื่องราวไม่ได้')
@@ -889,7 +981,9 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มทบทวนเรื่องราวได้เฉพาะช่วงห้องรอ')
-      if (room.phase !== 'lobby') return
+      // Recall now follows the pre-test, so this is the preTest -> recall step. A stale/duplicate
+      // click from any other stage is a safe no-op, exactly as the lobby guard used to be.
+      if (room.phase !== 'preTest') return
       transaction.update(roomRef, {
         phase: 'recall',
         ...(recallQuestionDurationSeconds == null ? {} : { recallQuestionDurationSeconds: clampRecallDuration(recallQuestionDurationSeconds) }),
@@ -931,7 +1025,7 @@ export class FirebaseGameService implements GameService {
   // Hands off to the EXISTING team workflow completely unchanged (randomize -> lock -> captain ->
   // guardian name -> starting item -> startRoom), which all already gate on status === 'waiting'
   // and therefore needed no changes at all. Recall answers are untouched here — recallAnswers is
-  // only ever reset on a genuine new round (prepareNextRound/stopRound), so Baseline survives
+  // only ever reset on a genuine new round (prepareNextRound/stopRound), so the review result survives
   // team setup, Main, and Boss for the end-of-game Learning Summary.
   async startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void> {
     const roomRef = doc(db, 'rooms', roomCode)
@@ -996,7 +1090,7 @@ export class FirebaseGameService implements GameService {
         throw new Error('ผู้ใช้:หมดเวลาตอบข้อนี้แล้ว')
       }
       // Countdown expiry: the client submits RECALL_TIMEOUT_CHOICE_ID instead of a real choice,
-      // and the item is persisted as unanswered -> incorrect for Baseline. Handled before
+      // and the item is persisted as unanswered -> incorrect in the review result. Handled before
       // evaluateChoice because the sentinel is deliberately not a valid choice id.
       const isTimeout = answer.selectedChoiceId === RECALL_TIMEOUT_CHOICE_ID
       const evaluated = isTimeout ? { valid: true, isCorrect: false } : evaluateChoice(expectedQuestion, answer.selectedChoiceId)
@@ -1010,6 +1104,152 @@ export class FirebaseGameService implements GameService {
       const recallAnswers = [...player.recallAnswers, record]
       transaction.update(playerRef, { recallAnswers })
     })
+  }
+
+  // Assessment Layer (Milestone 1). Each mirrors saveRecallAnswer's transaction shape: read room +
+  // player together, require this write's own phase, reject an out-of-order submit, then update
+  // exactly one field. The single-field update is what lets firestore.rules validate these with a
+  // hasOnly() check per phase, the same way the recall/main/boss branches already work.
+  //
+  // Correctness arrives from the caller here rather than being evaluated server-side, because no
+  // assessment question bank exists yet in this milestone. Once the banks land, these should
+  // evaluate against them the way saveRecallAnswer uses evaluateChoice — see the report.
+  async savePreTestAnswer(roomCode: string, playerId: string, answer: PreTestAnswerInput): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
+      // The bank is the only authority on correctness — never the caller.
+      const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
+      if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+        throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
+      }
+      // Idempotent: the first answer for a question is the one that counts.
+      if (player.preTestAnswers.some((item) => item.questionId === answer.questionId)) return
+      // Sequential: the submitted question must be the next unanswered item, and the caller's
+      // expected index must agree with the server's own count.
+      if (player.preTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+        throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+      }
+      const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
+      if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+      const preTestAnswers = [...player.preTestAnswers, {
+        questionId: answer.questionId,
+        selectedChoiceId: answer.selectedChoiceId,
+        answeredAt: Date.now(),
+      }]
+      transaction.update(playerRef, { preTestAnswers })
+    })
+  }
+
+  async savePostTestAnswer(roomCode: string, playerId: string, answer: PostTestAnswerInput): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
+      // The bank is the only authority on correctness — never the caller.
+      const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
+      if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+        throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
+      }
+      // Idempotent: the first answer for a question is the one that counts.
+      if (player.postTestAnswers.some((item) => item.questionId === answer.questionId)) return
+      // Sequential: the submitted question must be the next unanswered item, and the caller's
+      // expected index must agree with the server's own count.
+      if (player.postTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+        throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+      }
+      const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
+      if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+      const postTestAnswers = [...player.postTestAnswers, {
+        questionId: answer.questionId,
+        selectedChoiceId: answer.selectedChoiceId,
+        answeredAt: Date.now(),
+      }]
+      transaction.update(playerRef, { postTestAnswers })
+    })
+  }
+
+  async saveSurveyResponse(roomCode: string, playerId: string, response: SurveyResponseInput): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.phase !== 'survey') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบประเมินกิจกรรม')
+      const expectedItem = SURVEY_ITEMS[player.surveyResponses.length]
+      if (player.surveyResponses.length >= SURVEY_ITEM_COUNT || !expectedItem) {
+        throw new Error('ผู้ใช้:ทำแบบประเมินครบทุกข้อแล้ว')
+      }
+      // Idempotent: the first response for an item is the one that counts.
+      if (player.surveyResponses.some((item) => item.itemId === response.itemId)) return
+      // Sequential: the submitted item must be the next unanswered one, and the caller's expected
+      // index must agree with the server's own count.
+      if (player.surveyResponses.length !== response.expectedIndex || expectedItem.id !== response.itemId) {
+        throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
+      }
+      // Only the 5 scale points are storable — never an arbitrary value.
+      if (!isValidSurveyValue(response.value)) throw new Error('ผู้ใช้:กรุณาเลือกคำตอบจากตัวเลือกที่กำหนด')
+      const surveyResponses = [...player.surveyResponses, {
+        itemId: response.itemId,
+        value: response.value,
+        answeredAt: Date.now(),
+      }]
+      transaction.update(playerRef, { surveyResponses })
+    })
+  }
+
+  // postTest -> survey. Teacher-only and idempotent: only fires from the post-test stage, so a
+  // stale/duplicate press is a safe no-op. No timer — the survey is self-paced.
+  async startSurvey(roomCode: string, teacherSessionId: string): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'playing' || room.phase !== 'postTest') return
+      transaction.update(roomRef, { phase: 'survey' })
+    })
+  }
+
+  // survey -> completed. Teacher-only and idempotent: only fires from the post-test stage, so a
+  // stale/duplicate press is a safe no-op. Sets nothing but the round-ending fields — winner,
+  // scores, teams and every Main/Boss result are left exactly as they already are.
+  async completeRound(roomCode: string, teacherSessionId: string): Promise<void> {
+    // Captured out of the transaction so the history snapshot below can read the round/team
+    // labels this round is being completed on.
+    let completingRoom: Room | null = null
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'playing' || room.phase !== 'survey') return
+      completingRoom = room
+      transaction.update(roomRef, { status: 'completed', completedAt: serverTimestamp() })
+    })
+    if (!completingRoom) return
+    // Record this round's history immediately, while every player's answers/recall/pre/post/
+    // survey arrays are still intact. The round-reset operations snapshot too, but a teacher may
+    // close the browser after finishing and never run one — snapshotting at completion is what
+    // makes the assessment data durable right away. The deterministic `${round}-${playerId}` id
+    // means those later snapshots skip an already-recorded round rather than overwriting it.
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    const batch = writeBatch(db)
+    await queueRoundHistorySnapshot(batch, roomCode, completingRoom, playerSnapshots)
+    await batch.commit()
   }
 
   async advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void> {
@@ -1068,9 +1308,11 @@ export class FirebaseGameService implements GameService {
 
       const nextQuestionIndex = expectedQuestionIndex + 1
       if (nextQuestionIndex >= room.questionIds.length) {
+        // Assessment Layer: finishing Main question 10 no longer ends the round. The room moves
+        // to the post-test with status still 'playing' — completion is now an explicit teacher
+        // action (completeRound). The player writes below are unchanged.
         transaction.update(roomRef, {
-          status: 'completed',
-          completedAt: serverTimestamp(),
+          phase: 'postTest',
           currentQuestionIndex: room.questionIds.length,
           questionStartedAt: null,
           questionClosedAt: null,
@@ -1337,6 +1579,9 @@ export class FirebaseGameService implements GameService {
         answers: [],
         bossAnswers: [],
         recallAnswers: [],
+        preTestAnswers: [],
+        postTestAnswers: [],
+        surveyResponses: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,
@@ -1382,6 +1627,9 @@ export class FirebaseGameService implements GameService {
         answers: [],
         bossAnswers: [],
         recallAnswers: [],
+        preTestAnswers: [],
+        postTestAnswers: [],
+        surveyResponses: [],
         submitted: false,
         finishedAt: null,
         elapsedMs: null,

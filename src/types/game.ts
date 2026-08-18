@@ -60,7 +60,7 @@ export interface BossAnswerRecord {
   responseTimeMs: number
 }
 
-// Learning Layer: "กู้ความทรงจำมัทนา" (Story Recall) — a mandatory, individual, non-competitive
+// Learning Layer: "ทบทวนเรื่องราว" (Story Recall) — a mandatory, individual, non-competitive
 // phase before Main. Deliberately the leanest possible record: no responseTimeMs (Recall is
 // never speed-scored), no team/score fields at all — this is what makes "no competitive points,
 // no team-score impact, no speed scoring" true by construction, the same way BossAnswerRecord's
@@ -72,6 +72,50 @@ export interface RecallAnswerRecord {
   conceptId: string
   selectedChoiceId: string
   isCorrect: boolean
+  answeredAt: number
+}
+
+// Assessment Layer (Milestone 1 — data foundation only, not yet wired into the flow).
+//
+// Pre-test and post-test are INDIVIDUAL and NON-COMPETITIVE measurements of the same construct,
+// taken before and after play. They are deliberately their own record types and their own arrays
+// on Player — never merged into player.answers/score — which is what makes "pre/post never affect
+// game score, team score, boss, magic, ranking or speed" true by construction, exactly the way
+// BossAnswerRecord's separation already guarantees it for boss answers.
+//
+// Note these are NOT Story Recall. Recall ("ทบทวนเรื่องราว") stays a review activity and must
+// never be read as the "before" half of a learning gain — the pre-test is the only valid baseline.
+//
+// responseTimeMs is deliberately absent: neither test is ever speed-scored.
+//
+// Correctness is deliberately NOT stored. These records hold only what the student actually did —
+// which question, which choice, when. Every score is derived from the approved question bank
+// (data/assessmentQuestions.ts) at the moment it is needed. A stored isCorrect would be a second
+// copy of the answer key living in a student-writable document, which can drift from the bank and
+// which a client that bypassed the service could set freely; deriving instead makes the bank the
+// single authority by construction.
+export interface PreTestAnswerRecord {
+  questionId: string
+  selectedChoiceId: string
+  answeredAt: number
+}
+
+// Same shape as PreTestAnswerRecord but a separate type and a separate array, so a post-test
+// answer can never be written into the pre-test baseline (or vice versa) by an accidental
+// assignment — the two halves of the comparison must stay independently attributable.
+export interface PostTestAnswerRecord {
+  questionId: string
+  selectedChoiceId: string
+  answeredAt: number
+}
+
+// Survey responses carry NO correctness field at all. There is nothing here for a scoring path to
+// read even by mistake, which is what keeps survey data structurally outside knowledge scoring.
+// `value` holds the chosen option id (or free-text answer) for the item — interpretation belongs
+// to the survey definition, not to this record.
+export interface SurveyResponseRecord {
+  itemId: string
+  value: string
   answeredAt: number
 }
 
@@ -126,16 +170,31 @@ export interface TeamMeta {
 // captain election, guardian naming, starting-item choice) and every `status === 'playing'` gate
 // (saveAnswer, magic activation, broadcast mode) keeps working untouched, so this refactor adds
 // stages without re-auditing the competitive rules that were already stable.
-export type GamePhase = 'lobby' | 'recall' | 'teamSetup' | 'main' | 'boss'
+//
+// Assessment Layer (Milestone 1): 'preTest', 'postTest' and 'survey' are declared here so the
+// data model and the security rules can be built against them, but NOTHING transitions into them
+// yet — no service method writes these values and resolveStudentRoute does not branch on them, so
+// the production flow (lobby -> recall -> teamSetup -> main -> boss -> main) is unchanged. The
+// intended future order is:
+//
+//   lobby -> preTest -> recall -> teamSetup -> main -> boss -> main -> postTest -> survey
+//
+// preTest sits BEFORE recall on purpose: the pre-test is the measurement baseline, Recall is a
+// review activity, and the two must never be conflated.
+export const GAME_PHASES = ['lobby', 'preTest', 'recall', 'teamSetup', 'main', 'boss', 'postTest', 'survey'] as const
+// Derived from the runtime list rather than declared separately, so a phase can never exist in the
+// type but be missing from the list a persistence layer validates against — which is exactly the
+// bug that made a real Firestore room write phase 'preTest' and then read it back as 'lobby'.
+export type GamePhase = (typeof GAME_PHASES)[number]
 
 export const BOSS_QUESTION_COUNT = 3
 // Learning Layer: fixed count of Story Recall questions/concepts every round — see
 // data/recallQuestions.ts for the actual content and lib/learning.ts for how this denominator
-// is used in the Baseline/In-game Evidence/Learning Gain formulas.
+// is used when reporting the review result (ผลการทบทวน).
 export const RECALL_QUESTION_COUNT = 5
 // Story Recall per-item countdown. One constant, deliberately not teacher-configurable yet.
 // Purely a pacing device for the individual learning phase: on expiry the item is persisted as
-// unanswered/incorrect for Baseline, and it can never influence competitive scoring (Recall
+// unanswered/incorrect in the review result, and it can never influence competitive scoring (Recall
 // writes only ever touch player.recallAnswers — see RecallAnswerRecord).
 export const RECALL_SECONDS_PER_ITEM = 15
 // Bounds for the teacher-configurable Recall timer, mirroring the Main question timer's own
@@ -145,7 +204,7 @@ export const MAX_RECALL_SECONDS_PER_ITEM = 120
 export const MIN_BOSS_SECONDS_PER_QUESTION = 3
 export const MAX_BOSS_SECONDS_PER_QUESTION = 60
 // Sentinel selectedChoiceId persisted when a Recall item's countdown expires with no answer.
-// Deliberately not a real choice id, so Baseline counts it as incorrect while staying
+// Deliberately not a real choice id, so the review result counts it as incorrect while staying
 // distinguishable from a genuine wrong pick in the stored record.
 export const RECALL_TIMEOUT_CHOICE_ID = '__timeout__'
 export const DEFAULT_BOSS_QUESTION_DURATION_SECONDS = 8
@@ -232,6 +291,13 @@ export interface Player {
   // enables). Never read by knowledge-score, competition-score, or any team-facing computation —
   // Learning Evidence (lib/learning.ts) is the only consumer, and only ever reads raw isCorrect.
   recallAnswers: RecallAnswerRecord[]
+  // Assessment Layer: round-scoped exactly like answers/bossAnswers/recallAnswers — initialized to
+  // [] on player creation and cleared by every round reset, so a round's assessment data can never
+  // bleed into the next round. Never read by knowledge-score, competition-score, boss, magic,
+  // ranking or any team-facing computation.
+  preTestAnswers: PreTestAnswerRecord[]
+  postTestAnswers: PostTestAnswerRecord[]
+  surveyResponses: SurveyResponseRecord[]
   submitted: boolean
   finishedAt: number | null
   elapsedMs: number | null
@@ -435,12 +501,37 @@ export interface TeamGuardianName {
 // The doc id is deterministic (`${round}-${playerId}`), which is what makes snapshotting
 // idempotent: re-running the same round's snapshot targets the same id and is skipped rather than
 // duplicated.
+// LEGACY — READ-ONLY. Recall answer vs the mapped main answer, as recorded by the removed
+// Recall-vs-Main comparison. Retained only so documents already written under the old model keep
+// parsing. Nothing produces this shape any more.
 export interface RoundHistoryConceptResult {
   conceptId: string
-  // Correct in the pre-play review phase.
+  // Correct in the pre-play review phase (Story Recall).
   beforeCorrect: boolean
   // Correct on the mapped main question during play.
   afterCorrect: boolean
+}
+
+// Assessment Layer: the RAW selected answers for a finished round — no correctness field. Per-item
+// correctness is re-derived from the question bank by whatever reads this, so history can never
+// disagree with the bank.
+export interface RoundHistoryAssessmentAnswer {
+  questionId: string
+  selectedChoiceId: string
+}
+
+export interface RoundHistorySurveyResponse {
+  itemId: string
+  value: string
+}
+
+// Durable per-item Story Recall detail. Independent review data — it is never paired with a main
+// question, and carries no "after" counterpart. `answered` stays separate from `isCorrect` so an
+// item the student never reached is distinguishable from one answered incorrectly.
+export interface RoundHistoryRecallResult {
+  conceptId: string
+  isCorrect: boolean
+  answered: boolean
 }
 
 export interface RoundHistoryEntry {
@@ -453,13 +544,34 @@ export interface RoundHistoryEntry {
   // The guardian name if the team set one, otherwise the generic "ทีม N" label — resolved at
   // snapshot time so history stays readable even after teams are re-randomized or renamed.
   teamName: string
-  beforeCorrectCount: number
-  afterCorrectCount: number
-  improvedCount: number
-  reviewCount: number
-  improvedConceptIds: string[]
-  reviewConceptIds: string[]
-  conceptResults: RoundHistoryConceptResult[]
+  // LEGACY — READ-ONLY. Written only by rounds recorded before the Recall-vs-Main comparison was
+  // removed. New snapshots never populate these: pairing a review activity against the main game
+  // is not a learning measurement, and nothing derives new meaning from them. They stay declared
+  // (and optional) purely so historical documents keep parsing and exporting.
+  beforeCorrectCount?: number
+  afterCorrectCount?: number
+  improvedCount?: number
+  reviewCount?: number
+  improvedConceptIds?: string[]
+  reviewConceptIds?: string[]
+  conceptResults?: RoundHistoryConceptResult[]
+  // Story Recall result, recorded independently of the main game — never subtracted from or
+  // compared against knowledgeScore below. Optional because rounds recorded before this change
+  // have no standalone recall figure. recallResults is the durable per-item detail behind the
+  // counts; also optional, since rounds recorded before it existed have none.
+  recallCorrectCount?: number
+  recallTotalCount?: number
+  recallResults?: RoundHistoryRecallResult[]
+  // Assessment Layer. Optional because history documents written before this milestone have none
+  // of it — a reader must treat "absent" as "this round predates the assessment layer", never as
+  // a zero score. Counts are raw correct-answer counts over that test's own item count.
+  preTestCorrectCount?: number
+  preTestTotalCount?: number
+  preTestAnswers?: RoundHistoryAssessmentAnswer[]
+  postTestCorrectCount?: number
+  postTestTotalCount?: number
+  postTestAnswers?: RoundHistoryAssessmentAnswer[]
+  surveyResponses?: RoundHistorySurveyResponse[]
   // Raw main-question knowledge score, stored both as the canonical /10 count and the /100
   // display figure, so exports never have to re-derive (and can't drift from) the shown value.
   knowledgeScore: number

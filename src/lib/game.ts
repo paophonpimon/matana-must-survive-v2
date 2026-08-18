@@ -119,7 +119,18 @@ export const resolveStudentRoute = (room: Room, player: Player): string => {
   if (room.status === 'closed') return `/closed/${base}`
   if (room.winner) return `/congratulations/${base}`
   if (room.status === 'completed') return `/result/${base}`
+  // Pre-test and Recall both run while the room is still 'waiting', so each needs its own branch
+  // ahead of the waiting -> lobby fallback below, or a student would be sent back to the lobby
+  // while the activity is live. Terminal statuses above still outrank both.
+  if (room.phase === 'preTest') return `/game/${base}`
   if (room.phase === 'recall') return `/game/${base}`
+  // Post-test runs AFTER Main with status still 'playing' and every player already flagged
+  // submitted, so this branch must sit above the submitted -> /result fallback below, or a
+  // student would be bounced to the result screen before taking the test.
+  if (room.phase === 'postTest') return `/game/${base}`
+  // The survey is the last student-facing step before the round completes, and runs under the
+  // same 'playing' + submitted conditions as the post-test.
+  if (room.phase === 'survey') return `/game/${base}`
   if (room.status === 'waiting') return `/lobby/${base}`
   if (player.submitted) return `/result/${base}`
   return `/game/${base}`

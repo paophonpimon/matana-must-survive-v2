@@ -31,6 +31,34 @@ export interface BossAnswerInput {
   expectedBossIndex: number
 }
 
+// Assessment Layer. Deliberately shaped like RecallAnswerInput: an `expected*Index` token makes a
+// duplicate/stale submit a safe no-op rather than a double-write, the same idempotency pattern
+// every other answer path here already uses. No responseTimeMs — neither test is ever
+// speed-scored.
+//
+// Note there is NO isCorrect field. Correctness is derived by the service from the question bank
+// (data/assessmentQuestions.ts) via evaluateChoice, exactly as saveRecallAnswer and saveAnswer
+// already do — a client cannot report its own score.
+export interface PreTestAnswerInput {
+  questionId: string
+  selectedChoiceId: string
+  expectedIndex: number
+}
+
+export interface PostTestAnswerInput {
+  questionId: string
+  selectedChoiceId: string
+  expectedIndex: number
+}
+
+// No correctness field: a survey item has no right answer, so there is nothing for a scoring path
+// to read even accidentally.
+export interface SurveyResponseInput {
+  itemId: string
+  value: string
+  expectedIndex: number
+}
+
 export interface GameService {
   readonly isDemo: boolean
   readonly demoRoomCode?: string
@@ -53,6 +81,9 @@ export interface GameService {
   // Recall or rewinds team setup). startRoom then takes teamSetup -> main.
   // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
   // room keeps its current (default) Recall duration.
+  // lobby -> preTest. Teacher-only, no-op unless the room is still in 'lobby'.
+  startPreTest(roomCode: string, teacherSessionId: string): Promise<void>
+  // preTest -> recall. Same teacher-only, stage-guarded shape; a stale click is a safe no-op.
   startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void>
   // Room-synchronized Recall advance, mirroring advanceQuestion: expectedRecallIndex makes a
   // duplicate timer callback a safe no-op instead of a skipped question.
@@ -60,6 +91,13 @@ export interface GameService {
   // Refused until the shared Recall sequence has run all 5 questions.
   startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
   saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
+  // Assessment Layer (Milestone 1): data-foundation writes. Each one requires the room to be in
+  // its own matching phase and appends exactly one record to its own round-scoped array, using
+  // the same expected-index guard Recall/Main already use. Nothing calls these yet — no UI and no
+  // transition into 'preTest'/'postTest'/'survey' exists in this milestone.
+  savePreTestAnswer(roomCode: string, playerId: string, answer: PreTestAnswerInput): Promise<void>
+  savePostTestAnswer(roomCode: string, playerId: string, answer: PostTestAnswerInput): Promise<void>
+  saveSurveyResponse(roomCode: string, playerId: string, response: SurveyResponseInput): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   saveBossAnswer(roomCode: string, playerId: string, answer: BossAnswerInput): Promise<void>
@@ -71,6 +109,11 @@ export interface GameService {
   // expectedRound is the same idempotent "expected token" shape as advanceQuestion/
   // advanceBossQuestion's expected-index guards, so a stale/duplicate call is a safe no-op.
   continueAfterBoss(roomCode: string, teacherSessionId: string, expectedRound: number): Promise<void>
+  // postTest -> survey. Teacher-only; no-op unless the room is in the post-test stage.
+  startSurvey(roomCode: string, teacherSessionId: string): Promise<void>
+  // survey -> completed. Teacher-only; no-op unless the room is in the survey stage. Snapshots
+  // this round's history before completing, so assessment data is durable immediately.
+  completeRound(roomCode: string, teacherSessionId: string): Promise<void>
   stopRound(roomCode: string, teacherSessionId: string): Promise<void>
   prepareNextRound(roomCode: string, teacherSessionId: string): Promise<void>
   closeRoom(roomCode: string, teacherSessionId: string): Promise<void>

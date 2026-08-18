@@ -22,6 +22,9 @@ const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
   answers: [],
   bossAnswers: [],
   recallAnswers: [],
+  preTestAnswers: [],
+  postTestAnswers: [],
+  surveyResponses: [],
   submitted: false,
   finishedAt: null,
   elapsedMs: null,
@@ -42,8 +45,8 @@ const makeLearner = (id: string, score: number): Player => makePlayer({
     isCorrect: index < 1,
     answeredAt: 0,
   })),
-  answers: RECALL_QUESTIONS.map((question, index) => ({
-    questionId: question.mappedMainQuestionId,
+  answers: RECALL_QUESTIONS.map((_question, index) => ({
+    questionId: `main-${String(index + 1).padStart(2, "0")}`,
     selectedChoiceId: 'x',
     isCorrect: index < 3,
     answeredAt: 0,
@@ -70,8 +73,7 @@ describe('round history snapshots', () => {
 
     const recorded = store['1-01']
     expect(recorded).toBeDefined()
-    expect(recorded.beforeCorrectCount).toBe(1)
-    expect(recorded.afterCorrectCount).toBe(3)
+    expect(recorded.recallCorrectCount).toBe(1)
     expect(recorded.knowledgeScore100).toBe(70)
 
     // prepareNextRound's reset: answers/recallAnswers/score all wiped on the live player doc.
@@ -80,8 +82,7 @@ describe('round history snapshots', () => {
     players[0].score = 0
 
     // The snapshot is a separate, immutable record — resetting the player cannot reach it.
-    expect(store['1-01'].beforeCorrectCount).toBe(1)
-    expect(store['1-01'].afterCorrectCount).toBe(3)
+    expect(store['1-01'].recallCorrectCount).toBe(1)
     expect(store['1-01'].knowledgeScore100).toBe(70)
     expect(store['1-01'].mainAnswers).toHaveLength(RECALL_QUESTIONS.length)
   })
@@ -101,8 +102,7 @@ describe('round history snapshots', () => {
     snapshotInto(store, players, 1)
 
     expect(Object.keys(store)).toHaveLength(1)
-    expect(store['1-01'].beforeCorrectCount).toBe(1)
-    expect(store['1-01'].afterCorrectCount).toBe(3)
+    expect(store['1-01'].recallCorrectCount).toBe(1)
     expect(store['1-01'].knowledgeScore100).toBe(70)
 
     // A genuinely new round is a different id, so it records normally alongside round 1.
@@ -126,9 +126,8 @@ describe('round history snapshots', () => {
 
     const summary = readXlsxEntry(workbook, 'xl/worksheets/sheet1.xml') ?? ''
     // Plain classroom headings only — no internal terminology leaks into the file.
-    expect(summary).toContain('ก่อนเล่น')
-    expect(summary).toContain('หลังเล่น')
-    expect(summary).toContain('คะแนนความรู้ /100')
+    expect(summary).toContain('ผลการทบทวน')
+    expect(summary).toContain('ผลการเล่นเกมหลัก /100')
     expect(summary).not.toContain('Baseline')
     expect(summary).not.toContain('Learning Gain')
     // Three rows of data (2 students in round 1, 1 in round 2) plus the header row.
@@ -143,10 +142,9 @@ describe('round history snapshots', () => {
     expect(perQuestion).toContain('ผิด')
 
     const classSheet = readXlsxEntry(workbook, 'xl/worksheets/sheet3.xml') ?? ''
-    // Round 1 has 2 students, round 2 has 1 — and every learner here scores 1 before / 3 after.
+    // Round 1 has 2 students, round 2 has 1 — and every learner here gets 1 review item right.
     expect(classSheet).toContain('<v>1</v>')
     expect(classSheet).toContain('<v>2</v>')
-    expect(classSheet).toContain('<v>3</v>')
   })
 
   // The teacher can export the moment a round ends, before any snapshot has been written (those
