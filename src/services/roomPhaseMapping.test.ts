@@ -9,7 +9,7 @@ import { GAME_PHASES } from '../types/game'
 describe('room phase mapping', () => {
   it('GAME_PHASES covers every phase the flow can write, in order', () => {
     expect([...GAME_PHASES]).toEqual([
-      'lobby', 'preTest', 'recall', 'teamSetup', 'main', 'boss', 'postTest', 'survey',
+      'lobby', 'teamSetup', 'preTest', 'recall', 'main', 'boss', 'postTest', 'survey',
     ])
   })
 

@@ -44,6 +44,22 @@ describe('Teacher pre-test stage', () => {
     const stopRoom = service.subscribeRoom(code, (value) => { liveRoom.value = value })
     const stopPlayers = service.subscribePlayers(code, (value) => { players.value = value })
 
+    // Team setup now runs BEFORE the pre-test — startPreTest is gated on phase === 'teamSetup'
+    // plus full team readiness, so it must be complete here first.
+    await service.startTeamSetup(code, 'teacher-1')
+    await service.randomizeTeams(code, 'teacher-1', 1)
+    await service.lockTeams(code, 'teacher-1')
+    await vi.waitFor(() => expect(liveRoom.value?.teamsLocked).toBe(true))
+    const teamId = (liveRoom.value as Room).teams[0].id
+    await service.finalizeCaptainElection(code, 'teacher-1', teamId)
+    const magic: { value: Array<{ teamId: string; magicHolderPlayerId: string | null }> } = { value: [] }
+    const stopMagic = service.subscribeAllTeamMagic(code, (value) => { magic.value = value })
+    await vi.waitFor(() => expect(magic.value[0]?.magicHolderPlayerId).toBeTruthy())
+    const captainId = magic.value[0].magicHolderPlayerId as string
+    await service.setTeamGuardianName(code, teamId, captainId, 'ทีมกุหลาบ')
+    await service.chooseStartingItem(code, teamId, captainId, 'power_surge')
+    stopMagic()
+
     await service.startPreTest(code, 'teacher-1')
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('preTest'))
 

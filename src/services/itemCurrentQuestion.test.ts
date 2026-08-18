@@ -46,11 +46,6 @@ describe('current-question item effects', () => {
     const stopPlayers = service.subscribePlayers(code, (value) => { players.value = value })
     await vi.waitFor(() => expect(players.value).toHaveLength(2))
 
-    await service.startPreTest(code, 'teacher-1')
-    await service.startRecall(code, 'teacher-1')
-    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
-      await service.advanceRecallQuestion(code, 'teacher-1', index)
-    }
     await service.startTeamSetup(code, 'teacher-1')
     // One team per student, so "a teammate answered" can be controlled precisely.
     await service.randomizeTeams(code, 'teacher-1', 2)
@@ -67,6 +62,11 @@ describe('current-question item effects', () => {
       await service.chooseStartingItem(code, team.id, captainOf.get(team.id) as string, startingItem)
     }
 
+    await service.startPreTest(code, 'teacher-1')
+    await service.startRecall(code, 'teacher-1')
+    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
+      await service.advanceRecallQuestion(code, 'teacher-1', index)
+    }
     await service.startRoom(code, 'teacher-1', 30)
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
 

@@ -111,11 +111,11 @@ export const LobbyPage = () => {
             <section className="lobby-panel w-full text-center" aria-live="polite">
               <p className="eyebrow">ห้อง {normalizedCode} · รอบที่ {room.currentRound}</p>
               <div className="waiting-rings mx-auto mt-7" aria-hidden="true"><span /><i>ม</i></div>
-              {/* Stage 'lobby' comes BEFORE Story Recall and before any team exists, so the copy
-                  must promise the Recall activity — not the mission/teams, which are still two
+              {/* Stage 'lobby' comes BEFORE team setup and before any team exists, so the copy
+                  must promise team formation — not the mission itself, which is still three
                   stages away. Stage 'teamSetup' keeps the original mission-facing copy. */}
               <h1 className="mt-7 text-3xl font-semibold sm:text-4xl">
-                {room.phase === 'lobby' ? 'รอเริ่มทบทวนเรื่องราว' : 'รอครูเริ่มภารกิจ'}
+                {room.phase === 'lobby' ? 'รอครูเริ่มจัดทีม' : 'รอครูเริ่มภารกิจ'}
               </h1>
               <p className="mx-auto mt-3 max-w-md text-[#d8d1c5]">
                 {room.phase === 'lobby'
@@ -130,10 +130,10 @@ export const LobbyPage = () => {
               <div className="mt-7 flex items-center justify-center gap-2 text-sm text-[#c6baa7]"><span className="pulse-dot" aria-hidden="true" />กำลังฟังสัญญาณจากครูแบบ realtime</div>
             </section>
 
-            {/* No team exists at all before Story Recall — showing a "ทีมของคุณ / รอครูจัดทีม"
-                panel during the pre-Recall lobby would present team assignment as imminent when
-                it is actually two stages away. The whole team + magic area only appears once the
-                room has reached 'teamSetup'. */}
+            {/* No team exists at all before team setup — showing a "ทีมของคุณ / รอครูจัดทีม"
+                panel during the pre-teamSetup lobby would present team assignment as imminent
+                before the teacher has even started it. The whole team + magic area only appears
+                once the room has reached 'teamSetup'. */}
             {room.phase === 'lobby' ? null : (
             <>
             <section className="glass-panel mt-5 p-5 text-center" aria-live="polite">

@@ -43,11 +43,6 @@ describe('Magic item eligibility across the boss transition', () => {
     const stopPlayers = service.subscribePlayers(code, (value) => { players.value = value })
     await vi.waitFor(() => expect(players.value).toHaveLength(2))
 
-    await service.startPreTest(code, 'teacher-1')
-    await service.startRecall(code, 'teacher-1')
-    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
-      await service.advanceRecallQuestion(code, 'teacher-1', index)
-    }
     await service.startTeamSetup(code, 'teacher-1')
     await service.randomizeTeams(code, 'teacher-1', 2)
     await service.lockTeams(code, 'teacher-1')
@@ -62,6 +57,11 @@ describe('Magic item eligibility across the boss transition', () => {
       await service.chooseStartingItem(code, team.id, captainOf.get(team.id) as string, 'power_surge')
     }
 
+    await service.startPreTest(code, 'teacher-1')
+    await service.startRecall(code, 'teacher-1')
+    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
+      await service.advanceRecallQuestion(code, 'teacher-1', index)
+    }
     await service.startRoom(code, 'teacher-1', 30)
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
 
@@ -111,11 +111,6 @@ describe('Magic item eligibility across the boss transition', () => {
     const stopRoom = service.subscribeRoom(code, (value) => { liveRoom.value = value })
     await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
 
-    await service.startPreTest(code, 'teacher-1')
-    await service.startRecall(code, 'teacher-1')
-    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
-      await service.advanceRecallQuestion(code, 'teacher-1', index)
-    }
     await service.startTeamSetup(code, 'teacher-1')
     await service.randomizeTeams(code, 'teacher-1', 2)
     await service.lockTeams(code, 'teacher-1')
@@ -130,6 +125,11 @@ describe('Magic item eligibility across the boss transition', () => {
       await service.chooseStartingItem(code, team.id, captainOf.get(team.id) as string, 'power_surge')
     }
 
+    await service.startPreTest(code, 'teacher-1')
+    await service.startRecall(code, 'teacher-1')
+    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
+      await service.advanceRecallQuestion(code, 'teacher-1', index)
+    }
     await service.startRoom(code, 'teacher-1', 30)
     for (let index = 0; index <= BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {
       await service.advanceQuestion(code, 'teacher-1', index)
@@ -178,11 +178,6 @@ describe('Magic item eligibility across the boss transition', () => {
     const stopRoom = service.subscribeRoom(code, (value) => { liveRoom.value = value })
     await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
 
-    await service.startPreTest(code, 'teacher-1')
-    await service.startRecall(code, 'teacher-1')
-    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
-      await service.advanceRecallQuestion(code, 'teacher-1', index)
-    }
     await service.startTeamSetup(code, 'teacher-1')
     await service.randomizeTeams(code, 'teacher-1', 2)
     await service.lockTeams(code, 'teacher-1')
@@ -200,6 +195,11 @@ describe('Magic item eligibility across the boss transition', () => {
     const captainId = captainOf.get(teamId) as string
     const magicOf = (): TeamMagicState => magic.value.find((entry) => entry.teamId === teamId) as TeamMagicState
 
+    await service.startPreTest(code, 'teacher-1')
+    await service.startRecall(code, 'teacher-1')
+    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
+      await service.advanceRecallQuestion(code, 'teacher-1', index)
+    }
     await service.startRoom(code, 'teacher-1', 30)
     // Advance to Main Q5 (index 4) — the last question before the boss.
     for (let index = 0; index < BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {

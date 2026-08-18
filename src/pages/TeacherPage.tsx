@@ -617,8 +617,9 @@ export const TeacherPage = () => {
       })
       .finally(() => { advancingStageRef.current = false; setAdvancingStageBusy(false) })
   }
-  // lobby -> preTest. The pre-test is self-paced with no timer, so nothing about the Recall
-  // duration is chosen here — that control now lives on the pre-test screen, where Recall starts.
+  // teamSetup -> preTest, once team setup (randomize/lock/captain/name/item) is complete. The
+  // pre-test is self-paced with no timer, so nothing about the Recall duration is chosen here —
+  // that control lives on the pre-test screen, where Recall starts.
   const handleStartPreTest = (): void => {
     // Kicked off synchronously inside the click, before the async service call — browsers only
     // allow play() from a real user gesture, and awaiting the transition first would lose it.
@@ -659,6 +660,7 @@ export const TeacherPage = () => {
     runStageTransition(() => service.startPostTest(roomCode, teacherSessionId, assessmentSecondsPerQuestion))
   const handleStartSurvey = (): void => runStageTransition(() => service.startSurvey(roomCode, teacherSessionId))
   const handleCompleteRound = (): void => runStageTransition(() => service.completeRound(roomCode, teacherSessionId))
+  // lobby -> teamSetup, once enough students have joined.
   const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
 
   // Item 7 (+ follow-up fix): teacher-side dramatic spell-event overlay — watches the same
@@ -1236,7 +1238,7 @@ export const TeacherPage = () => {
                 classLearningSummary) — no new Recall scoring or data logic. */}
             {/* Stage 'lobby' — students join as individuals, no team concept is presented at all
                 (team count deliberately isn't offered here; it belongs to the teamSetup stage,
-                two stages later). The teacher decides when enough students have arrived. */}
+                the very next one). The teacher decides when enough students have arrived. */}
             {isLobbyPhase ? (
               <div className="lobby-stage" aria-live="polite">
                 <section className="lobby-command">
@@ -1288,10 +1290,10 @@ export const TeacherPage = () => {
                   <button
                     type="button"
                     className="stage-cta"
-                    onClick={handleStartPreTest}
+                    onClick={handleStartTeamSetup}
                     disabled={advancingStageBusy || sortedPlayers.length === 0 || !assessmentDurationValid || !recallDurationValid}
                   >
-                    {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบทดสอบก่อนเรียน'}
+                    {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มจัดทีมผู้เล่น'}
                   </button>
 
                   {sortedPlayers.length === 0 ? (
@@ -1637,15 +1639,17 @@ export const TeacherPage = () => {
                   </div>
 
                   {/* Pinned foot: the start CTA and the room control stay visible whatever the
-                      column above is scrolled to. */}
+                      column above is scrolled to. This CTA now leaves team setup for the
+                      pre-test, not for Main directly — Main's own timer/readiness gate has moved
+                      to the Recall stage screen below, the step that now sits right before it. */}
                   <div className="setup-foot">
                     {warningMessage ? <p className="setup-warning">{warningMessage}</p> : null}
                     <button
                       className="stage-cta setup-start"
-                      onClick={requestStart}
-                      disabled={busy || sortedPlayers.length === 0 || !durationValid || !bossDurationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
+                      onClick={handleStartPreTest}
+                      disabled={busy || advancingStageBusy || sortedPlayers.length === 0 || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
                     >
-                      {roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
+                      {busy || advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบทดสอบก่อนเรียน'}
                     </button>
                     <StageRoomControls />
                   </div>
@@ -1653,8 +1657,10 @@ export const TeacherPage = () => {
               </div>
             ) : null}
 
-            {/* Stage 'recall' — one dedicated viewport. Deliberately shows no teams, captain,
-                magic, team scores, or Main controls: none of those concepts exist yet. */}
+            {/* Stage 'recall' — one dedicated viewport. Team, captain and item state already
+                exist by this point (team setup ran before the pre-test) but are deliberately not
+                surfaced here — this screen stays focused on individual recall progress, with no
+                team-management surface, so there is no second decision point for teams. */}
             {isRecallPhase ? (
               <section className="recall-command-view" aria-live="polite">
                 <p className="eyebrow">ขั้นที่ 2 · กิจกรรมรายบุคคล</p>
@@ -1693,18 +1699,20 @@ export const TeacherPage = () => {
                 {/* Gated on the SHARED sequence finishing all 5 questions — not on every student
                     having personally answered. The room advances on its own timer, so this
                     unlocks the moment the last question's reveal ends, regardless of who
-                    answered what. */}
+                    answered what. This is also where Main's own timer/readiness gate now lives —
+                    team setup already completed before the pre-test, so nothing left to check
+                    here but the duration settings and the Recall sequence itself. */}
                 <button
                   type="button"
                   className="primary-button recall-start-main-button mt-6"
-                  onClick={handleStartTeamSetup}
-                  disabled={advancingStageBusy || sortedPlayers.length === 0 || !recallSequenceFinished}
+                  onClick={requestStart}
+                  disabled={busy || sortedPlayers.length === 0 || !recallSequenceFinished || !durationValid || !bossDurationValid || !roomState.data.teamsLocked || teamsWithoutCaptain.length > 0 || teamsWithoutName.length > 0 || teamsWithoutStartingItem.length > 0}
                 >
-                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'จัดทีมและเตรียมเกม'}
+                  {busy ? 'กำลังดำเนินการ...' : roomState.data.currentRound === 1 ? 'เริ่มภารกิจพร้อมจับเวลา' : 'เริ่มรอบใหม่พร้อมจับเวลา'}
                 </button>
                 {!recallSequenceFinished ? (
                   <p className="recall-command-hint">
-                    กำลังทำข้อ {Math.min(recallQuestionIndex + 1, RECALL_QUESTION_COUNT)} จาก {RECALL_QUESTION_COUNT} — จัดทีมได้เมื่อครบทุกข้อ
+                    กำลังทำข้อ {Math.min(recallQuestionIndex + 1, RECALL_QUESTION_COUNT)} จาก {RECALL_QUESTION_COUNT} — เริ่มภารกิจได้เมื่อครบทุกข้อ
                   </p>
                 ) : null}
                 <StageRoomControls />
@@ -1755,10 +1763,10 @@ export const TeacherPage = () => {
             ) : null}
 
             {/* The entire normal dashboard body (podium, learning summary, scoreboard, team
-                setup, magic history) is hidden during the two pre-team stages — the dedicated
+                setup, magic history) is hidden during the pre-test/recall stages — the dedicated
                 single-viewport screen above is the only thing shown, so there is nothing left
-                below it to force scrolling, and no team concept is presented before Recall is
-                done. It returns in full, unchanged, at the 'teamSetup' stage. */}
+                below it to force scrolling. It returns in full, unchanged, at the 'teamSetup'
+                stage, which now runs BEFORE the pre-test/recall stages hidden here. */}
             {/* Every stage with a dedicated single-viewport screen belongs in this list. The
                 three assessment stages were all added AFTER this guard was written, so each one
                 rendered its stage screen with the entire dashboard appended below it — pushing

@@ -323,13 +323,15 @@ service cloud.firestore {
               // Starting-item choice: the team's first pick (inventory untouched -> exactly one
               // entry) OR a captain changing an already-chosen pick to a different one (exactly
               // one entry -> exactly one entry, of any type combination) — choseExactlyOneItem
-              // covers both shapes. Only while waiting+locked (which also makes this permanently
-              // unreachable once the mission actually starts), holder/team identity untouched.
+              // covers both shapes. Only during the dedicated team-setup stage, while
+              // waiting+locked (which also makes this permanently unreachable once Pre-test,
+              // Recall or the mission itself starts), holder/team identity untouched.
               choseExactlyOneItem(resource.data.inventory, request.resource.data.inventory)
               && request.resource.data.magicHolderPlayerId == resource.data.magicHolderPlayerId
               && request.resource.data.teamId == resource.data.teamId
               && room(roomCode).status == 'waiting'
               && room(roomCode).teamsLocked == true
+              && room(roomCode).phase == 'teamSetup'
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['inventory'])
             )
             ||
@@ -484,6 +486,7 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly(['teamId', 'targetPlayerId', 'electionAttempt', 'votedAt'])
           && room(roomCode).status == 'waiting'
           && room(roomCode).teamsLocked == true
+          && room(roomCode).phase == 'teamSetup'
           && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
           && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(request.resource.data.targetPlayerId)).data.teamId
           && request.resource.data.electionAttempt == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.captainElectionAttempt
@@ -504,6 +507,7 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly(['teamId', 'electionAttempt', 'votedAt'])
           && room(roomCode).status == 'waiting'
           && room(roomCode).teamsLocked == true
+          && room(roomCode).phase == 'teamSetup'
           && request.resource.data.teamId == get(/databases/$(database)/documents/rooms/$(roomCode)/players/$(playerId)).data.teamId
           && request.resource.data.electionAttempt == get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.captainElectionAttempt
           && get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(request.resource.data.teamId)).data.magicHolderPlayerId == null
@@ -542,6 +546,7 @@ service cloud.firestore {
           signedIn()
           && room(roomCode).status == 'waiting'
           && room(roomCode).teamsLocked == true
+          && room(roomCode).phase == 'teamSetup'
           && isPlayerOwner(roomCode, get(/databases/$(database)/documents/rooms/$(roomCode)/magic/$(teamId)).data.magicHolderPlayerId)
           && request.resource.data.keys().hasOnly(['teamId', 'name', 'updatedAt', 'updatedByPlayerId'])
           && request.resource.data.teamId == teamId

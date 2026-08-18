@@ -154,34 +154,28 @@ export interface TeamMeta {
 // The single source of truth for which stage of a round the room is in. Teacher and student
 // both resolve their screen from this one field — nothing infers a stage from status.
 //
-//   lobby  -> recall -> teamSetup -> main -> boss -> main -> (completed)
+//   lobby -> teamSetup -> preTest -> recall -> main -> boss -> main -> postTest -> survey
 //
-// Story Recall is a PRE-TEAM individual learning phase: it runs before any team exists, so
-// 'lobby' and 'recall' both precede team assignment entirely. This is why 'lobby' exists as its
-// own value rather than being folded into 'recall' — a freshly created room and an actively
-// running Recall are genuinely different stages, and collapsing them (as an earlier iteration
-// did) makes it impossible for the teacher UI to tell "waiting for students to join" apart from
-// "Recall is underway", and impossible for a student's client to know whether to show the
-// waiting lobby or the Recall questions.
+// teamSetup sits BEFORE preTest and recall on purpose: teams, captains, names and starting items
+// are all decided once, up front, and then persist unchanged through both individual activities
+// into Main — no second team-management interruption. This is why 'lobby' exists as its own value
+// rather than being folded into 'teamSetup' — a freshly created room and an actively running team
+// setup are genuinely different stages, and collapsing them makes it impossible for the teacher UI
+// to tell "waiting for students to join" apart from "team setup is underway". preTest sits BEFORE
+// recall on purpose too: the pre-test is the measurement baseline, Recall is a review activity,
+// and the two must never be conflated.
 //
-// room.status remains orthogonal and unchanged in meaning: 'waiting' spans lobby/recall/teamSetup
-// (nothing competitive is running yet), and flips to 'playing' only when Main actually starts.
-// That split is deliberate — every pre-existing `status === 'waiting'` gate (team randomize/lock,
-// captain election, guardian naming, starting-item choice) and every `status === 'playing'` gate
-// (saveAnswer, magic activation, broadcast mode) keeps working untouched, so this refactor adds
-// stages without re-auditing the competitive rules that were already stable.
+// room.status remains orthogonal and unchanged in meaning: 'waiting' spans
+// lobby/teamSetup/preTest/recall (nothing competitive is running yet), and flips to 'playing' only
+// when Main actually starts. That split is deliberate — every pre-existing `status === 'waiting'`
+// gate (team randomize/lock, captain election, guardian naming, starting-item choice) and every
+// `status === 'playing'` gate (saveAnswer, magic activation, broadcast mode) keeps working
+// untouched.
 //
-// Assessment Layer (Milestone 1): 'preTest', 'postTest' and 'survey' are declared here so the
-// data model and the security rules can be built against them, but NOTHING transitions into them
-// yet — no service method writes these values and resolveStudentRoute does not branch on them, so
-// the production flow (lobby -> recall -> teamSetup -> main -> boss -> main) is unchanged. The
-// intended future order is:
-//
-//   lobby -> preTest -> recall -> teamSetup -> main -> boss -> main -> postTest -> survey
-//
-// preTest sits BEFORE recall on purpose: the pre-test is the measurement baseline, Recall is a
-// review activity, and the two must never be conflated.
-export const GAME_PHASES = ['lobby', 'preTest', 'recall', 'teamSetup', 'main', 'boss', 'postTest', 'survey'] as const
+// preTest, postTest and survey are the Assessment Layer (Milestone 1): postTest and survey run
+// after Main/Boss with the room still 'playing', which is what lets a student answer them without
+// the room's competitive status ever changing.
+export const GAME_PHASES = ['lobby', 'teamSetup', 'preTest', 'recall', 'main', 'boss', 'postTest', 'survey'] as const
 // Derived from the runtime list rather than declared separately, so a phase can never exist in the
 // type but be missing from the list a persistence layer validates against — which is exactly the
 // bug that made a real Firestore room write phase 'preTest' and then read it back as 'lobby'.
@@ -266,7 +260,7 @@ export interface Room {
   // shared start timestamp, so every student sees the same item at the same moment and advances
   // together. These — never a player's own recallAnswers.length — are the source of truth for
   // "which Recall question is live". recallQuestionIndex reaching RECALL_QUESTION_COUNT means the
-  // whole sequence has finished, which is the gate the teacher's "จัดทีมและเตรียมเกม" waits on.
+  // whole sequence has finished, which is the gate the teacher's "เริ่มภารกิจพร้อมจับเวลา" waits on.
   recallQuestionIndex: number
   recallQuestionStartedAt: number | null
   // Assessment Layer timing: seconds allowed for EACH question, shared by the pre-test and the

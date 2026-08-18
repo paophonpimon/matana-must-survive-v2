@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PRE_TEST_QUESTIONS } from '../data/assessmentQuestions'
 import { questionsById } from '../data/questions'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, mainQuestionTiming } from '../lib/gameFlow'
@@ -129,17 +130,11 @@ const chooseAllStartingItems = async (service: DemoGameService, roomCode: string
   stop()
 }
 
-// Story Recall is now a PRE-TEAM stage: every round runs lobby -> recall -> teamSetup -> main,
-// and teams cannot be created until the room reaches 'teamSetup'. Every pre-existing test that
-// jumps straight to randomizeTeams therefore needs this first — it runs the whole pre-team
-// sequence (start Recall, have every currently-joined player answer all RECALL_QUESTIONS.length
-// items, then hand off to team setup) and leaves the room in exactly the state randomizeTeams
-// used to be called in. Answer choice doesn't matter: correctness has no bearing on being ALLOWED
-// to finish Recall or proceed.
-// Idempotent, because several tests call randomizeTeams more than once (re-randomize before
-// lock) and each of those call sites is prefixed with this helper: once the room has already
-// reached teamSetup there is nothing left to advance, and re-running the Recall answers would
-// throw now that the stage has moved on.
+// Team Setup is now reached directly from the lobby — every round runs lobby -> teamSetup ->
+// preTest -> recall -> main. Every pre-existing test that jumps straight to randomizeTeams
+// therefore needs this first. Idempotent, because several tests call randomizeTeams more than
+// once (re-randomize before lock) and each of those call sites is prefixed with this helper: once
+// the room has already left 'lobby' there is nothing left to advance.
 const advanceToTeamSetup = async (
   service: DemoGameService,
   roomCode: string,
@@ -151,6 +146,29 @@ const advanceToTeamSetup = async (
   const startingPhase = current.value?.phase
   stopCurrent()
   if (startingPhase !== 'lobby') return
+
+  await service.startTeamSetup(roomCode, teacherSessionId)
+  const room: { value: Room | null } = { value: null }
+  const stopRoom = service.subscribeRoom(roomCode, (value) => { room.value = value })
+  await vi.waitFor(() => expect(room.value?.phase).toBe('teamSetup'))
+  stopRoom()
+}
+
+// Team setup now happens BEFORE the pre-test and Recall, not after — every pre-existing test that
+// completes team formation (randomize/lock/captain/item/name) and then calls startRoom directly
+// needs this in between, to walk the individual pre-test/recall stages that now sit in the way.
+// Idempotent: a no-op once the room has already left 'teamSetup'.
+const advanceThroughPreTestAndRecall = async (
+  service: DemoGameService,
+  roomCode: string,
+  teacherSessionId = 'teacher-1',
+): Promise<void> => {
+  const current: { value: Room | null } = { value: null }
+  const stopCurrent = service.subscribeRoom(roomCode, (value) => { current.value = value })
+  await vi.waitFor(() => expect(current.value).not.toBeNull())
+  const startingPhase = current.value?.phase
+  stopCurrent()
+  if (startingPhase !== 'teamSetup') return
 
   await service.startPreTest(roomCode, teacherSessionId)
   await service.startRecall(roomCode, teacherSessionId)
@@ -173,12 +191,6 @@ const advanceToTeamSetup = async (
     await service.advanceRecallQuestion(roomCode, teacherSessionId, index)
   }
   stopPlayers()
-
-  await service.startTeamSetup(roomCode, teacherSessionId)
-  const room: { value: Room | null } = { value: null }
-  const stopRoom = service.subscribeRoom(roomCode, (value) => { room.value = value })
-  await vi.waitFor(() => expect(room.value?.phase).toBe('teamSetup'))
-  stopRoom()
 }
 
 describe('Demo timed classroom flow', () => {
@@ -262,11 +274,12 @@ describe('Demo timed classroom flow', () => {
     expect([...counts.values()].sort()).toEqual([2, 3])
     stopPlayers()
 
-    // Cannot start until locked.
-    await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('กรุณาล็อกทีมก่อนเริ่มภารกิจ')
+    // Cannot leave team setup until locked — startPreTest is now the readiness gate, since team
+    // setup completes BEFORE the pre-test rather than immediately before Main.
+    await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('กรุณาล็อกทีมก่อนเริ่มภารกิจ')
     await service.lockTeams(room.roomCode, 'teacher-1')
-    // Milestone 4.1: captains must be elected before startRoom even looks at starting items.
-    await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+    // Milestone 4.1: captains must be elected before startPreTest even looks at starting items.
+    await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
     const magicForElection: { value: TeamMagicState[] } = { value: [] }
     const stopMagicForElection = service.subscribeAllTeamMagic(room.roomCode, (value) => { magicForElection.value = value })
     await vi.waitFor(() => expect(magicForElection.value.length).toBeGreaterThan(0))
@@ -274,8 +287,10 @@ describe('Demo timed classroom flow', () => {
       await service.finalizeCaptainElection(room.roomCode, 'teacher-1', team.teamId)
     }
     stopMagicForElection()
-    await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
+    await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 30)
     const liveRoom: { value: Room | null } = { value: null }
     const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -289,9 +304,9 @@ describe('Demo timed classroom flow', () => {
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Gamma', studentNumber: '03' }, 'owner-3')
+    await advanceToTeamSetup(service, room.roomCode)
     await expect(service.lockTeams(room.roomCode, 'teacher-1')).rejects.toThrow('กรุณาสุ่มทีมก่อนล็อกทีม')
 
-    await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 3)).rejects.toThrow('ปลดล็อกทีมก่อนสุ่มใหม่')
@@ -310,11 +325,12 @@ describe('Demo timed classroom flow', () => {
   it('randomizeTeams rejects zero players and a team count larger than the player count', async () => {
     const service = new DemoGameService()
     const room = await service.createRoom('teacher-1')
-    // An empty room can never reach the team-setup stage in the first place (Story Recall needs
-    // at least one student), so the stage guard is what rejects here — the "no players" check
-    // inside randomizeTeams is now unreachable with zero players, by construction.
-    await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 1)).rejects.toThrow('ทบทวนเรื่องราว')
-    await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+    // An empty room can never reach the team-setup stage in the first place (opening it needs at
+    // least one student), so the stage guard is what rejects here — the "no players" check inside
+    // randomizeTeams is now unreachable with zero players, by construction.
+    await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 1)).rejects.toThrow('จัดทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
+    // startTeamSetup is the lobby-exit gate now, and it is what actually rejects an empty room.
+    await expect(service.startTeamSetup(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
 
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
     await service.joinRoom({ roomCode: room.roomCode, displayName: 'Beta', studentNumber: '02' }, 'owner-2')
@@ -374,6 +390,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 60)
 
     await answerAt(service, room, first, 0, true)
@@ -406,6 +423,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 5)
     const liveRoom: { value: Room | null } = { value: null }
     const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -430,6 +448,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 60)
 
     for (let index = 0; index < room.questionIds.length; index += 1) {
@@ -465,6 +484,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 30)
     const firstQuestion = questionsById.get(room.questionIds[0])
     if (!firstQuestion) throw new Error('Missing first question')
@@ -499,6 +519,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
     await service.lockTeams(room.roomCode, 'teacher-1')
     await chooseAllStartingItems(service, room.roomCode)
+    await advanceThroughPreTestAndRecall(service, room.roomCode)
     await service.startRoom(room.roomCode, 'teacher-1', 30)
     await answerAt(service, room, player, 0, true)
     await expect(service.stopRound(room.roomCode, 'wrong-teacher')).rejects.toThrow()
@@ -633,6 +654,7 @@ describe('Demo timed classroom flow', () => {
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       await service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge')
@@ -659,6 +681,7 @@ describe('Demo timed classroom flow', () => {
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'score_seal')
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'score_seal')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       await expect(service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-1'))
@@ -712,6 +735,7 @@ describe('Demo timed classroom flow', () => {
       await service.chooseStartingItem(room.roomCode, team3, holder3, 'power_surge')
 
       await chooseAllStartingItems(service, room.roomCode) // no-op: all three already chosen
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       // Both activated right at the start of question 1 (index 0), so both target question
       // index 1 (question 2) — activation is playing-only now, always currentQuestionIndex + 1.
@@ -774,6 +798,7 @@ describe('Demo timed classroom flow', () => {
       const holder2 = await getHolderId(service, room.roomCode, 'team-2')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'score_seal')
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'rose_shield')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holder1, 'score_seal', 'team-2')
 
@@ -816,6 +841,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 5)
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -859,6 +885,7 @@ describe('Demo timed classroom flow', () => {
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'score_seal', 'team-2')
 
@@ -1043,7 +1070,8 @@ describe('Demo timed classroom flow', () => {
       await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+      // startPreTest is the readiness gate now — team setup completes BEFORE the pre-test.
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
     })
 
     it('the elected captain — and only the elected captain — becomes the team\'s magic holder', async () => {
@@ -1073,6 +1101,8 @@ describe('Demo timed classroom flow', () => {
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       expect(holderId).toBe(p1.id)
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.stopRound(room.roomCode, 'teacher-1')
 
@@ -1080,11 +1110,11 @@ describe('Demo timed classroom flow', () => {
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => expect(magic.value?.magicHolderPlayerId).toBeNull())
       expect(magic.value?.captainElectionAttempt).toBeGreaterThan(1)
-      // A new round restarts the whole pre-game sequence at 'lobby', so Recall runs again before
-      // the captain gate is even reachable.
+      // A new round restarts the whole pre-game sequence at 'lobby', so team setup runs again
+      // before the captain gate is even reachable.
       await advanceToTeamSetup(service, room.roomCode)
       // No captain -> starting the next round is blocked again until a fresh election finishes.
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 60)).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
       stop()
     })
   })
@@ -1169,7 +1199,7 @@ describe('Demo timed classroom flow', () => {
       expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('มังกรเงิน')
     })
 
-    it('teacher reset clears the name and blocks startRoom again until it is renamed', async () => {
+    it('teacher reset clears the name and blocks startPreTest again until it is renamed', async () => {
       const service = new DemoGameService()
       const { room, holder1, holder2 } = await setUpTwoTeamRoom(service)
       await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
@@ -1178,16 +1208,17 @@ describe('Demo timed classroom flow', () => {
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'power_surge')
 
       // Reset team-1's name only — teacher-authorized regardless of captain/room state — and
-      // confirm startRoom is blocked again on the name check specifically (captain + item are
-      // still both satisfied for every team, isolating what's actually under test here).
+      // confirm startPreTest (the readiness gate now that team setup completes BEFORE the
+      // pre-test) is blocked again on the name check specifically (captain + item are still both
+      // satisfied for every team, isolating what's actually under test here).
       await service.resetTeamGuardianName(room.roomCode, 'teacher-1', 'team-1')
       const names = await readNames(service, room.roomCode)
       expect(names.find((entry) => entry.teamId === 'team-1')).toBeUndefined()
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
 
       // Renaming it clears the block.
       await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทองใหม่')
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).resolves.not.toThrow()
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).resolves.not.toThrow()
     })
 
     it('teacher override sets a team name directly, regardless of captain state', async () => {
@@ -1198,14 +1229,14 @@ describe('Demo timed classroom flow', () => {
       expect(names.find((entry) => entry.teamId === 'team-1')?.name).toBe('ชื่อที่ครูตั้ง')
     })
 
-    it('startRoom rejects when any team has not been named, even with a captain and starting item', async () => {
+    it('startPreTest rejects when any team has not been named, even with a captain and starting item', async () => {
       const service = new DemoGameService()
       const { room, holder1, holder2 } = await setUpTwoTeamRoom(service)
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
       await service.chooseStartingItem(room.roomCode, 'team-2', holder2, 'power_surge')
       await service.setTeamGuardianName(room.roomCode, 'team-1', holder1, 'มังกรทอง')
       // team-2 deliberately left unnamed.
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
+      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
     })
 
     it('display fallback: a team has no guardian-name entry until one is submitted', async () => {
@@ -1253,6 +1284,7 @@ describe('Demo timed classroom flow', () => {
       const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => expect(magic.value?.inventory.rose_shield.available).toBe(1))
 
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
@@ -1311,6 +1343,7 @@ describe('Demo timed classroom flow', () => {
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => expect(magic.value?.inventory.illusion.available).toBe(1))
 
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       for (let index = 0; index < BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX; index += 1) {
         await answerAt(service, room, p1, index, true)
@@ -1352,6 +1385,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets question index 0
 
@@ -1387,6 +1421,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion')
 
@@ -1414,6 +1449,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 0
 
@@ -1449,6 +1485,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 1
 
@@ -1492,6 +1529,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // leaves a queued effect
 
@@ -1515,6 +1553,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       // Question 1 is answered with no item in play, then the item is activated on question 2 —
       // effects land on the question in progress, so leaving index 1 resolves it.
@@ -1545,6 +1584,7 @@ describe('Demo timed classroom flow', () => {
       // setup and Main become reachable.
       await advanceToTeamSetup(service, room.roomCode)
       await chooseAllStartingItems(service, room.roomCode) // no item gets activated this round
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
       // Round 2 has a freshly-selected questionIds array — answerAt must use the LIVE room,
@@ -1580,6 +1620,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -1598,6 +1639,7 @@ describe('Demo timed classroom flow', () => {
       // setup and Main become reachable.
       await advanceToTeamSetup(service, room.roomCode)
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await vi.waitFor(() => expect(liveRoom.value?.currentRound).toBe(2))
 
@@ -1643,6 +1685,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       const progress: { value: AnswerProgressEntry[] } = { value: [] }
@@ -1662,6 +1705,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       // Effects land on the question in progress, so reach index 1 first and activate there —
       // leaving index 1 is then the advance whose write is made to fail below.
@@ -1800,10 +1844,11 @@ describe('Demo timed classroom flow', () => {
       const holderId = magicBefore.value[0].magicHolderPlayerId as string
       stopBefore()
 
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       await expect(service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'score_seal'))
-        .rejects.toThrow('เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+        .rejects.toThrow('เลือกไอเทมเริ่มต้นได้เฉพาะช่วงจัดทีมหลังล็อกทีมแล้ว')
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
@@ -1836,6 +1881,7 @@ describe('Demo timed classroom flow', () => {
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -1865,6 +1911,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       // Only p1 has answered — closing early must be rejected.
@@ -1895,6 +1942,7 @@ describe('Demo timed classroom flow', () => {
       await chooseAllStartingItems(service, room.roomCode)
       // A long duration — if the deadline math ignored questionClosedAt, this question would
       // still legitimately accept answers for another ~59 seconds.
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await answerAt(service, room, p1, 0, true)
       await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
@@ -1924,6 +1972,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await answerAt(service, room, p1, 0, true)
       await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
@@ -1947,6 +1996,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await answerAt(service, room, p1, 0, true)
       await service.closeQuestionEarly(room.roomCode, 'teacher-1', 0)
@@ -1974,6 +2024,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 5)
       await answerAt(service, room, p1, 0, true)
 
@@ -2009,6 +2060,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       // One subscription, opened before any transition and never torn down or replaced — exactly
@@ -2105,10 +2157,11 @@ describe('Demo timed classroom flow', () => {
     })
   })
 
-  // Pre-game orchestration: Story Recall is a PRE-TEAM individual learning phase. The stage
-  // machine is lobby -> recall -> teamSetup -> main -> boss, carried entirely by room.phase, and
-  // these tests pin every transition plus the "no teams exist before Recall" guarantee.
-  describe('Pre-game orchestration: lobby -> recall -> teamSetup', () => {
+  // Pre-game orchestration: team setup runs BEFORE the pre-test and Recall, both of which stay
+  // individual, non-competitive stages. The stage machine is lobby -> teamSetup -> preTest ->
+  // recall -> main -> boss, carried entirely by room.phase, and these tests pin every transition
+  // plus the "no team-management interruption after team setup" guarantee.
+  describe('Pre-game orchestration: lobby -> teamSetup -> preTest -> recall', () => {
     const joinAll = async (service: DemoGameService, roomCode: string, count: number): Promise<Player[]> => {
       const players: Player[] = []
       for (let index = 0; index < count; index += 1) {
@@ -2137,6 +2190,14 @@ describe('Demo timed classroom flow', () => {
       }
     }
 
+    // Runs the whole team-setup workflow (randomize -> lock -> elect captain -> name -> item),
+    // leaving the room fully ready for startPreTest. Assumes startTeamSetup already ran.
+    const completeTeamSetup = async (service: DemoGameService, roomCode: string, teamCount = 1): Promise<void> => {
+      await service.randomizeTeams(roomCode, 'teacher-1', teamCount)
+      await service.lockTeams(roomCode, 'teacher-1')
+      await chooseAllStartingItems(service, roomCode)
+    }
+
     it('1. a fresh room has joined players but zero teams, and starts in stage lobby', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
@@ -2158,89 +2219,75 @@ describe('Demo timed classroom flow', () => {
       expect(livePlayers.value.every((player) => player.teamId === null)).toBe(true)
       expect(players).toHaveLength(3)
 
-      // And team creation is refused outright while still pre-Recall — the guarantee is
+      // And team creation is refused outright while still in the lobby — the guarantee is
       // structural, not merely a hidden button.
-      await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 2)).rejects.toThrow('ทบทวนเรื่องราว')
+      await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 2)).rejects.toThrow('จัดทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
 
       stopRoom()
       stopPlayers()
     })
 
-    it('2. the teacher can start Recall with no teams, captain, item, or team name in place', async () => {
+    it('2. the teacher can start Team Setup with no captain, item, or team name in place', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 2)
 
       // Nothing but "at least one student joined" is required.
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
       expect(liveRoom.value?.status).toBe('waiting')
       expect(liveRoom.value?.teams).toEqual([])
 
       stopRoom()
     })
 
-    it('2b. starting Recall with nobody in the room is refused, and a duplicate start is a safe no-op', async () => {
+    it('2b. starting Team Setup with nobody in the room is refused, and a duplicate start is a safe no-op', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
-      await expect(service.startPreTest(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
+      await expect(service.startTeamSetup(room.roomCode, 'teacher-1')).rejects.toThrow('ยังไม่มีผู้เล่นเข้าร่วม')
 
       await joinAll(service, room.roomCode, 1)
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
 
-      // A stale/duplicate click must never restart Recall (which would be observable as progress
-      // being wiped) — it is simply ignored.
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
-      expect(liveRoom.value?.phase).toBe('recall')
+      // A stale/duplicate click must never restart team setup — it is simply ignored.
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      expect(liveRoom.value?.phase).toBe('teamSetup')
 
       stopRoom()
     })
 
-    it('3. all joined students enter Recall together from the single teacher action', async () => {
+    it('3. all joined students see the team-setup screen from the single teacher action', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 3)
 
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
 
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
 
-      // Every student resolves to the game screen off the same room state — one action, one
-      // stage, no per-student gate.
+      // Every student resolves to the lobby/team-setup screen off the same room state — one
+      // action, one stage, no per-student gate.
       for (const player of players) {
-        expect(resolveStudentRoute(liveRoom.value as Room, player)).toBe(`/game/${room.roomCode}`)
-        // ...and each can actually answer immediately.
-        await service.saveRecallAnswer(room.roomCode, player.id, {
-          conceptId: RECALL_QUESTIONS[0].id,
-          selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
-          expectedRecallIndex: 0,
-        })
+        expect(resolveStudentRoute(liveRoom.value as Room, player)).toBe(`/lobby/${room.roomCode}`)
       }
 
-      const livePlayers: { value: Player[] } = { value: [] }
-      const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
-      await vi.waitFor(() => expect(livePlayers.value.every((player) => player.recallAnswers.length === 1)).toBe(true))
-
       stopRoom()
-      stopPlayers()
     })
 
-    it('4. a student who never answers an item does not block the room, and the missed concept stays absent (counting as not correct)', async () => {
+    it('4. a student who never answers a Recall item does not block the room, and the missed concept stays absent (counting as not correct)', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const [alpha, beta] = await joinAll(service, room.roomCode, 2)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
@@ -2278,77 +2325,69 @@ describe('Demo timed classroom flow', () => {
         .toEqual(RECALL_QUESTIONS.slice(2).map((question) => question.id))
       // ...and an unanswered item simply never counts toward the review result.
       expect(computeStudentRecallResult(liveBeta as Player).correctCount).toBe(3)
-      // The slow student never held the room: the sequence finished and team setup is available.
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
+      // The slow student never held the room: the shared sequence finished on its own timeline,
+      // and Main is now free to start.
+      await service.startRoom(room.roomCode, 'teacher-1', 30)
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
 
       stopRoom()
       stopPlayers()
     })
 
-    it('5. completing Recall creates and assigns no teams whatsoever', async () => {
+    it("5. team assignments from team setup survive Recall untouched — Recall never creates or reassigns teams", async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
+
+      const liveRoom: { value: Room | null } = { value: null }
+      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
+      await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
+      const teamsBeforeRecall = liveRoom.value?.teams
+      const teamsLockedBeforeRecall = liveRoom.value?.teamsLocked
+
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
 
-      const liveRoom: { value: Room | null } = { value: null }
-      const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
       const livePlayers: { value: Player[] } = { value: [] }
       const stopPlayers = service.subscribePlayers(room.roomCode, (value) => { livePlayers.value = value })
-      await vi.waitFor(() => expect(livePlayers.value).toHaveLength(2))
       await vi.waitFor(() => expect(livePlayers.value.every((player) => player.recallAnswers.length === RECALL_QUESTIONS.length)).toBe(true))
-      await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
 
       expect(liveRoom.value?.phase).toBe('recall')
-      expect(liveRoom.value?.teams).toEqual([])
-      expect(liveRoom.value?.teamCount).toBe(0)
-      expect(livePlayers.value.every((player) => player.teamId === null)).toBe(true)
+      expect(liveRoom.value?.teams).toEqual(teamsBeforeRecall)
+      expect(liveRoom.value?.teamsLocked).toBe(teamsLockedBeforeRecall)
+      expect(livePlayers.value.every((player) => player.teamId != null)).toBe(true)
 
       stopRoom()
       stopPlayers()
     })
 
-    it('Team Setup cannot start until the shared Recall sequence has finished all 5 questions', async () => {
+    it('Recall cannot be answered before the pre-test opens it, and stays closed until then', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
 
+      // Still in teamSetup: Recall has neither opened nor accepts answers.
+      await expect(service.saveRecallAnswer(room.roomCode, players[0].id, {
+        conceptId: RECALL_QUESTIONS[0].id,
+        selectedChoiceId: RECALL_QUESTIONS[0].correctChoiceId,
+        expectedRecallIndex: 0,
+      })).rejects.toThrow('ไม่ได้อยู่ในช่วงทบทวนเรื่องราว')
+      // A stale/duplicate startRecall call before the pre-test has even opened is a no-op, not a
+      // skip-ahead.
+      await service.startRecall(room.roomCode, 'teacher-1')
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      await vi.waitFor(() => expect(liveRoom.value?.recallQuestionIndex).toBe(0))
+      await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
+      expect(liveRoom.value?.phase).toBe('teamSetup')
 
-      // Blocked at the very first question...
-      await expect(service.startTeamSetup(room.roomCode, 'teacher-1')).rejects.toThrow('ให้ครบทั้ง 5 ข้อ')
-      await expect(service.randomizeTeams(room.roomCode, 'teacher-1', 2)).rejects.toThrow('ทบทวนเรื่องราว')
-
-      // ...and still blocked partway through, even with everyone having answered so far. The gate
-      // is the shared timeline, not how many answers exist.
-      for (let index = 0; index < RECALL_QUESTIONS.length - 1; index += 1) {
-        for (const player of players) {
-          await service.saveRecallAnswer(room.roomCode, player.id, {
-            conceptId: RECALL_QUESTIONS[index].id,
-            selectedChoiceId: RECALL_QUESTIONS[index].correctChoiceId,
-            expectedRecallIndex: index,
-          })
-        }
-        await service.advanceRecallQuestion(room.roomCode, 'teacher-1', index)
-      }
-      await vi.waitFor(() => expect(liveRoom.value?.recallQuestionIndex).toBe(RECALL_QUESTIONS.length - 1))
-      await expect(service.startTeamSetup(room.roomCode, 'teacher-1')).rejects.toThrow('ให้ครบทั้ง 5 ข้อ')
-      expect(liveRoom.value?.phase).toBe('recall')
-
-      // Once the final question's window closes the sequence is done and the gate opens — note
-      // that NOBODY answered the last item, proving the gate is the timeline, not the answers.
-      await service.advanceRecallQuestion(room.roomCode, 'teacher-1', RECALL_QUESTIONS.length - 1)
-      await vi.waitFor(() => expect(liveRoom.value?.recallQuestionIndex).toBe(RECALL_QUESTIONS.length))
-      expect(liveRoom.value?.recallQuestionStartedAt).toBeNull()
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
+      await service.startPreTest(room.roomCode, 'teacher-1')
+      await service.startRecall(room.roomCode, 'teacher-1')
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
 
       stopRoom()
     })
@@ -2357,6 +2396,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 1)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
@@ -2387,11 +2428,12 @@ describe('Demo timed classroom flow', () => {
       stopRoom()
     })
 
-
     it('persists the teacher-chosen Recall and Boss durations on the room', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
 
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1', 25)
@@ -2401,10 +2443,6 @@ describe('Demo timed classroom flow', () => {
       expect(liveRoom.value?.recallQuestionDurationSeconds).toBe(25)
 
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
-      await service.lockTeams(room.roomCode, 'teacher-1')
-      await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 30, 12)
 
       await vi.waitFor(() => expect(liveRoom.value?.status).toBe('playing'))
@@ -2420,6 +2458,8 @@ describe('Demo timed classroom flow', () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 1)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
 
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1', 0)
@@ -2431,22 +2471,24 @@ describe('Demo timed classroom flow', () => {
       stopRoom()
     })
 
-    it('6. the teacher transitions Recall -> teamSetup, and a duplicate call is a safe no-op', async () => {
+    it('6. the teacher transitions Recall -> Main, and Recall closes for good once left', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
 
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await service.startRoom(room.roomCode, 'teacher-1', 30)
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('teamSetup'))
-      expect(liveRoom.value?.status).toBe('waiting')
+      await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
+      expect(liveRoom.value?.status).toBe('playing')
 
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      expect(liveRoom.value?.phase).toBe('teamSetup')
+      // A stale/duplicate startRoom call once already playing is a safe no-op-turned-rejection.
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ภารกิจกำลังดำเนินอยู่แล้ว')
       // Recall is closed once past that stage.
       await expect(service.saveRecallAnswer(room.roomCode, players[0].id, {
         conceptId: RECALL_QUESTIONS[0].id,
@@ -2457,19 +2499,19 @@ describe('Demo timed classroom flow', () => {
       stopRoom()
     })
 
-    it('7. the existing team setup workflow runs unchanged after Recall, and Main starts from it', async () => {
+    it('7. the existing team setup workflow runs unchanged before the pre-test, and Main starts after Recall', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const players = await joinAll(service, room.roomCode, 2)
-      await service.startPreTest(room.roomCode, 'teacher-1')
-      await service.startRecall(room.roomCode, 'teacher-1')
-      await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
       await service.startTeamSetup(room.roomCode, 'teacher-1')
 
       // The stable, pre-existing sequence — untouched by this refactor.
       await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await service.startPreTest(room.roomCode, 'teacher-1')
+      await service.startRecall(room.roomCode, 'teacher-1')
+      await runRecallSequence(service, room.roomCode, players.map((player) => player.id))
       await service.startRoom(room.roomCode, 'teacher-1', 30)
 
       const liveRoom: { value: Room | null } = { value: null }
@@ -2484,21 +2526,28 @@ describe('Demo timed classroom flow', () => {
       stopRoom()
     })
 
-    it('7b. Main cannot be started while still in lobby or recall, however complete team setup looks', async () => {
+    it('7b. Main cannot be started while still in lobby, teamSetup, preTest or recall, however complete team setup looks', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await joinAll(service, room.roomCode, 2)
 
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทบทวนเรื่องราว')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('แบบทดสอบก่อนเรียนและทบทวนเรื่องราว')
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('แบบทดสอบก่อนเรียนและทบทวนเรื่องราว')
+      await completeTeamSetup(service, room.roomCode, 1)
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('แบบทดสอบก่อนเรียนและทบทวนเรื่องราว')
       await service.startPreTest(room.roomCode, 'teacher-1')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('แบบทดสอบก่อนเรียนและทบทวนเรื่องราว')
       await service.startRecall(room.roomCode, 'teacher-1')
-      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทบทวนเรื่องราว')
+      await expect(service.startRoom(room.roomCode, 'teacher-1', 30)).rejects.toThrow('ทบทวนเรื่องราวให้ครบทั้ง 5 ข้อ')
     })
 
-    it('8. Recall answers and the review result survive team setup, Main, and Boss', async () => {
+    it('8. Recall answers and the review result survive Main and Boss', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const [alpha] = await joinAll(service, room.roomCode, 1)
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
 
@@ -2520,13 +2569,9 @@ describe('Demo timed classroom flow', () => {
       const recallCorrectAfterRecall = computeStudentRecallResult(player.value as Player).correctCount
       expect(recallCorrectAfterRecall).toBe(4)
 
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
-      await service.lockTeams(room.roomCode, 'teacher-1')
-      await chooseAllStartingItems(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 30)
 
-      // Survives team setup + Main start...
+      // Survives Main start...
       await vi.waitFor(() => expect(player.value?.recallAnswers).toHaveLength(RECALL_QUESTIONS.length))
       expect(computeStudentRecallResult(player.value as Player).correctCount).toBe(recallCorrectAfterRecall)
 
@@ -2545,7 +2590,7 @@ describe('Demo timed classroom flow', () => {
       stopPlayer()
     })
 
-    it('9. refresh (a fresh subscription) restores the right stage in lobby, Recall, Recall-complete, and teamSetup', async () => {
+    it('9. refresh (a fresh subscription) restores the right stage in lobby, teamSetup, preTest, and Recall', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       const [alpha] = await joinAll(service, room.roomCode, 1)
@@ -2568,8 +2613,21 @@ describe('Demo timed classroom flow', () => {
       // Stage lobby -> the waiting lobby.
       expect(await readStage('lobby')).toBe(`/lobby/${room.roomCode}`)
 
-      // Stage recall, partially answered -> the game screen (Recall), progress intact.
+      // Stage teamSetup -> still the lobby, which is where team setup is presented.
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      expect(await readStage('teamSetup')).toBe(`/lobby/${room.roomCode}`)
+      await completeTeamSetup(service, room.roomCode, 1)
+
+      // Stage preTest -> the game screen.
       await service.startPreTest(room.roomCode, 'teacher-1')
+      expect(await readStage('preTest')).toBe(`/game/${room.roomCode}`)
+      await service.savePreTestAnswer(room.roomCode, alpha.id, {
+        questionId: PRE_TEST_QUESTIONS[0].id,
+        selectedChoiceId: PRE_TEST_QUESTIONS[0].correctChoiceId,
+        expectedIndex: 0,
+      })
+
+      // Stage recall, partially answered -> the game screen (Recall), progress intact.
       await service.startRecall(room.roomCode, 'teacher-1')
       await service.saveRecallAnswer(room.roomCode, alpha.id, {
         conceptId: RECALL_QUESTIONS[0].id,
@@ -2594,10 +2652,6 @@ describe('Demo timed classroom flow', () => {
         await service.advanceRecallQuestion(room.roomCode, 'teacher-1', index)
       }
       expect(await readStage('recall')).toBe(`/game/${room.roomCode}`)
-
-      // Stage teamSetup -> back to the lobby, which is where team setup is presented.
-      await service.startTeamSetup(room.roomCode, 'teacher-1')
-      expect(await readStage('teamSetup')).toBe(`/lobby/${room.roomCode}`)
     })
 
     it('10. two students in the same room keep separate identities and separate Recall progress', async () => {
@@ -2612,6 +2666,8 @@ describe('Demo timed classroom flow', () => {
       expect(alpha.id).not.toBe(beta.id)
       expect(alpha.ownerUid).not.toBe(beta.ownerUid)
 
+      await service.startTeamSetup(room.roomCode, 'teacher-1')
+      await completeTeamSetup(service, room.roomCode, 1)
       await service.startPreTest(room.roomCode, 'teacher-1')
       await service.startRecall(room.roomCode, 'teacher-1')
       // Only Alpha answers.
@@ -2756,6 +2812,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       const progress: { value: AnswerProgressEntry[] } = { value: [] }
@@ -2782,6 +2839,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 2)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       // 2 players over 2 teams always splits one-each, but *which* label ("team-1" vs
@@ -2813,6 +2871,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
 
       const progress: { value: AnswerProgressEntry[] } = { value: [] }
@@ -2853,6 +2912,7 @@ describe('Demo timed classroom flow', () => {
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       await chooseAllStartingItems(service, room.roomCode)
+      await advanceThroughPreTestAndRecall(service, room.roomCode)
       await service.startRoom(room.roomCode, 'teacher-1', 60)
       await answerAt(service, room, p1, 0, true)
 

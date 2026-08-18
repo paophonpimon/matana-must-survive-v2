@@ -957,10 +957,18 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status === 'playing') throw new Error('ผู้ใช้:ภารกิจกำลังดำเนินอยู่แล้ว')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:กรุณาเตรียมภารกิจรอบใหม่ก่อนเริ่ม')
-      // Main can only start from the team-setup stage — i.e. Story Recall has already run this
-      // round. This is the gate that makes "Recall before team setup, Main after it" structural
-      // rather than merely the order the teacher happens to click things in.
-      if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำทบทวนเรื่องราวและจัดทีมให้เสร็จก่อนเริ่มเกมหลัก')
+      // Main can only start once Recall's shared timeline has finished this round — team setup,
+      // Pre-test and Recall have all already run by this point (in that order). This is the gate
+      // that makes "Recall happens directly before Main, with no second team-management
+      // interruption in between" structural rather than merely the order the teacher clicks things.
+      if (room.phase !== 'recall') throw new Error('ผู้ใช้:กรุณาทำแบบทดสอบก่อนเรียนและทบทวนเรื่องราวให้เสร็จก่อนเริ่มเกมหลัก')
+      if (room.recallQuestionIndex < RECALL_QUESTION_COUNT) {
+        throw new Error('ผู้ใช้:ต้องทำทบทวนเรื่องราวให้ครบทั้ง 5 ข้อก่อนเริ่มเกมหลัก')
+      }
+      // Team readiness (locked, captain, item, name) is the teamSetup -> preTest gate now (see
+      // startPreTest below) — re-checked here too as a defensive backstop, since a teacher can
+      // still reset/override a team's guardian name at any time (resetTeamGuardianName/
+      // overrideTeamGuardianName carry no phase restriction by design).
       if (!room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
       transaction.update(roomRef, {
         status: 'playing',
@@ -980,17 +988,35 @@ export class FirebaseGameService implements GameService {
     await batch.commit()
   }
 
-  // Pre-game stage 1 -> 2: 'lobby' -> 'recall'. Teacher-only, fired by "เริ่มทบทวนเรื่องราว" once
-  // enough students have joined. Deliberately requires NO teams, captain, item, or team name —
-  // Story Recall is a pre-team individual learning phase, so the only precondition is that at
-  // least one student is present. Idempotent by stage check: a stale/duplicate call once already
-  // past 'lobby' is a safe no-op rather than a restart that would wipe progress.
-  // lobby -> preTest. Teacher-only and idempotent: a duplicate click from any stage other than
-  // 'lobby' is a safe no-op, mirroring startRecall/startTeamSetup. Starts no timer — the pre-test
-  // is self-paced, and nothing about it is competitive.
+  // Pre-game stage 2 -> 3: 'teamSetup' -> 'preTest'. Teacher-only, fired once team setup
+  // (randomize -> lock -> captain -> guardian name -> starting item) is complete. This is the
+  // readiness gate that used to live on startRoom, moved here since team setup now completes
+  // BEFORE the pre-test rather than immediately before Main — the class must never enter the
+  // individual assessment phase with an unfinished team. Idempotent by stage check: a
+  // stale/duplicate call once already past 'teamSetup' is a safe no-op.
   async startPreTest(roomCode: string, teacherSessionId: string, assessmentSecondsPerQuestion?: number): Promise<void> {
-    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
-    if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มแบบทดสอบไม่ได้')
+    const roomSnapshotForMagicCheck = await getDoc(doc(db, 'rooms', roomCode))
+    if (!roomSnapshotForMagicCheck.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    const roomForMagicCheck = mapRoom(roomSnapshotForMagicCheck.data())
+    // Milestone 4.1: every team must have finished electing a captain, chosen a starting item,
+    // and been given a guardian name before the class may leave team setup — chooseStartingItem/
+    // castCaptainVote/setTeamGuardianName are all holder-gated AND phase-gated to 'teamSetup' (see
+    // the matching rules changes), so once this check passes none of the three can silently
+    // un-set themselves during the pre-test or recall that follow. Checked outside the
+    // transaction (best-effort, matching startRoom's equivalent checks), since reading whole
+    // collections isn't possible from inside a Firestore transaction.
+    const magicSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'magic'))
+    const magicByTeamId = new Map(magicSnapshots.docs.map((document) => [document.id, mapTeamMagic(document)]))
+    const teamsWithoutCaptain = roomForMagicCheck.teams.filter((team) => magicByTeamId.get(team.id)?.magicHolderPlayerId == null)
+    if (teamsWithoutCaptain.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกหัวหน้าทีมก่อนเริ่มภารกิจ')
+    const teamsWithoutStartingItem = roomForMagicCheck.teams.filter((team) => !hasAnyMagicItem(magicByTeamId.get(team.id)?.inventory ?? createEmptyMagicInventory()))
+    if (teamsWithoutStartingItem.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องเลือกไอเทมเริ่มต้นก่อนเริ่มภารกิจ')
+    const teamNameSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'teamNames'))
+    const teamIdsWithName = new Set(
+      teamNameSnapshots.docs.map((document) => mapTeamGuardianName(document)).filter((entry) => entry.name.trim().length > 0).map((entry) => entry.teamId),
+    )
+    const teamsWithoutName = roomForMagicCheck.teams.filter((team) => !teamIdsWithName.has(team.id))
+    if (teamsWithoutName.length > 0) throw new Error('ผู้ใช้:ทุกทีมต้องตั้งชื่อทีมก่อนเริ่มภารกิจ')
     const roomRef = doc(db, 'rooms', roomCode)
     await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(roomRef)
@@ -998,7 +1024,8 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มแบบทดสอบก่อนเรียนได้เฉพาะช่วงห้องรอ')
-      if (room.phase !== 'lobby') return
+      if (room.phase !== 'teamSetup') return
+      if (!room.teamsLocked) throw new Error('ผู้ใช้:กรุณาล็อกทีมก่อนเริ่มภารกิจ')
       // preTestStartedAt is offset by the phase-intro cutscene so the budget does not tick while
       // the intro plays, and is written server-side so a refresh cannot reset or extend it.
       transaction.update(roomRef, {
@@ -1059,13 +1086,17 @@ export class FirebaseGameService implements GameService {
     })
   }
 
-  // Pre-game stage 2 -> 3: 'recall' -> 'teamSetup'. Teacher-only, fired by "จัดทีมและเตรียมเกม".
-  // Hands off to the EXISTING team workflow completely unchanged (randomize -> lock -> captain ->
-  // guardian name -> starting item -> startRoom), which all already gate on status === 'waiting'
-  // and therefore needed no changes at all. Recall answers are untouched here — recallAnswers is
-  // only ever reset on a genuine new round (prepareNextRound/stopRound), so the review result survives
-  // team setup, Main, and Boss for the end-of-game Learning Summary.
+  // Pre-game stage 1 -> 2: 'lobby' -> 'teamSetup'. Teacher-only, fired once enough students have
+  // joined. Hands off to the EXISTING team workflow completely unchanged (randomize -> lock ->
+  // captain -> guardian name -> starting item), which all already gate on status === 'waiting'
+  // and therefore needed no changes at all — only their phase check now requires 'teamSetup'
+  // (see randomizeTeams/lockTeams/chooseStartingItem/castCaptainVote/setTeamGuardianName below),
+  // which is what makes "no second team-management interruption" after Pre-test/Recall true by
+  // construction. Idempotent by stage check: a stale/duplicate call once already past 'lobby' is
+  // a safe no-op rather than a restart that would wipe progress.
   async startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void> {
+    const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+    if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังจัดทีมไม่ได้')
     const roomRef = doc(db, 'rooms', roomCode)
     await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(roomRef)
@@ -1073,12 +1104,7 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
-      if (room.phase !== 'recall') return
-      // The gate is the shared Recall timeline finishing all 5 questions — NOT whether every
-      // student personally answered them.
-      if (room.recallQuestionIndex < RECALL_QUESTION_COUNT) {
-        throw new Error('ผู้ใช้:ต้องทำทบทวนเรื่องราวให้ครบทั้ง 5 ข้อก่อนจัดทีม')
-      }
+      if (room.phase !== 'lobby') return
       transaction.update(roomRef, { phase: 'teamSetup' })
     })
   }
@@ -1816,9 +1842,10 @@ export class FirebaseGameService implements GameService {
     const room = mapRoom(roomSnapshot.data())
     if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
     if (room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
-    // Teams may only be created once Story Recall is finished — this is what makes "no teams
-    // exist before/during Recall" a structural guarantee rather than a UI convention.
-    if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:กรุณาทำทบทวนเรื่องราวให้เสร็จก่อนจัดทีม')
+    // Teams may only be created during the dedicated team-setup stage — this is what makes "no
+    // team-management interruption during Pre-test/Recall" a structural guarantee, not a UI
+    // convention.
+    if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
     if (room.teamsLocked) throw new Error('ผู้ใช้:กรุณาปลดล็อกทีมก่อนสุ่มใหม่')
 
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
@@ -1869,6 +1896,7 @@ export class FirebaseGameService implements GameService {
       if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
       if (room.teams.length === 0) throw new Error('ผู้ใช้:กรุณาสุ่มทีมก่อนล็อกทีม')
       transaction.update(roomRef, { teamsLocked: true })
     })
@@ -1921,6 +1949,7 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(snapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:ปลดล็อกทีมได้เฉพาะช่วงห้องรอ')
+      if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:ปลดล็อกทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
       transaction.update(roomRef, { teamsLocked: false })
     })
   }
@@ -2008,8 +2037,8 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(roomSnapshot.data())
       const magic = mapTeamMagic(magicSnapshot)
       if (magic.magicHolderPlayerId !== playerId) throw new Error('ผู้ใช้:คุณไม่ใช่ผู้ถือคทาเวทมนตร์ของทีมนี้')
-      if (room.status !== 'waiting' || !room.teamsLocked) {
-        throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      if (room.status !== 'waiting' || !room.teamsLocked || room.phase !== 'teamSetup') {
+        throw new Error('ผู้ใช้:เลือกไอเทมเริ่มต้นได้เฉพาะช่วงจัดทีมหลังล็อกทีมแล้ว')
       }
       const nextInventory: MagicInventory = createEmptyMagicInventory()
       nextInventory[itemType] = { available: 1, consumed: 0 }
@@ -2179,8 +2208,8 @@ export class FirebaseGameService implements GameService {
       if (!roomSnapshot.exists() || !voterSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
       const room = mapRoom(roomSnapshot.data())
       const voter = mapPlayer(voterSnapshot)
-      if (room.status !== 'waiting' || !room.teamsLocked) {
-        throw new Error('ผู้ใช้:โหวตหัวหน้าทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      if (room.status !== 'waiting' || !room.teamsLocked || room.phase !== 'teamSetup') {
+        throw new Error('ผู้ใช้:โหวตหัวหน้าทีมได้เฉพาะช่วงจัดทีมหลังล็อกทีมแล้ว')
       }
       if (!voter.teamId) throw new Error('ผู้ใช้:คุณยังไม่ได้อยู่ในทีมใด')
       // Self-voting is allowed — targetPlayerId === playerId simply passes the same rules-layer
@@ -2265,6 +2294,10 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(roomSnapshot.data())
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:รีเซ็ตการเลือกตั้งหัวหน้าทีมได้เฉพาะก่อนเริ่มภารกิจ')
+      // Restricted to the team-setup stage: once the class has moved on to Pre-test/Recall, a
+      // captain reset must never silently re-open (magicHolderPlayerId is part of what "persists
+      // unchanged through Pre -> Recall -> Main" promises).
+      if (room.phase !== 'teamSetup') throw new Error('ผู้ใช้:รีเซ็ตการเลือกตั้งหัวหน้าทีมได้เฉพาะช่วงจัดทีมเท่านั้น')
       if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
       const magic = mapTeamMagic(magicSnapshot)
       transaction.update(magicRef, { magicHolderPlayerId: null, captainElectionAttempt: magic.captainElectionAttempt + 1 })
@@ -2349,8 +2382,8 @@ export class FirebaseGameService implements GameService {
       const [roomSnapshot, magicSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(magicRef)])
       if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
       const room = mapRoom(roomSnapshot.data())
-      if (room.status !== 'waiting' || !room.teamsLocked) {
-        throw new Error('ผู้ใช้:ตั้งชื่อทีมได้เฉพาะช่วงห้องรอหลังล็อกทีมแล้ว')
+      if (room.status !== 'waiting' || !room.teamsLocked || room.phase !== 'teamSetup') {
+        throw new Error('ผู้ใช้:ตั้งชื่อทีมได้เฉพาะช่วงจัดทีมหลังล็อกทีมแล้ว')
       }
       if (!magicSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลทีมนี้')
       const magic = mapTeamMagic(magicSnapshot)

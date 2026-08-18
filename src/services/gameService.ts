@@ -72,24 +72,24 @@ export interface GameService {
   // bossQuestionDurationSeconds is optional so existing callers keep working; when omitted the
   // room's current boss duration is left as-is.
   startRoom(roomCode: string, teacherSessionId: string, questionDurationSeconds: number, bossQuestionDurationSeconds?: number): Promise<void>
-  // Learning Layer: startRoom now begins each round in phase 'recall' (individual, no timer) —
-  // this is the only method that ever moves it to 'main' (currentQuestionIndex 0, timer started),
-  // and only ever fired by the teacher's "เริ่ม Main" button, mirroring continueAfterBoss's
-  // teacher-only, expected-token-guarded shape exactly (a stale/duplicate call is a safe no-op).
-  // Pre-game stage transitions. lobby -> recall -> teamSetup, both teacher-only and both
-  // no-ops when the room is already past that stage (so a stale/duplicate click never restarts
-  // Recall or rewinds team setup). startRoom then takes teamSetup -> main.
-  // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
-  // room keeps its current (default) Recall duration.
-  // lobby -> preTest. Teacher-only, no-op unless the room is still in 'lobby'.
+  // Pre-game stage transitions, in order: lobby -> teamSetup -> preTest -> recall -> (startRoom)
+  // -> main. Each is teacher-only and a no-op when the room is already past that stage, so a
+  // stale/duplicate click never restarts an activity or rewinds team setup.
+  // lobby -> teamSetup. No-op unless the room is still in 'lobby'.
+  startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
+  // teamSetup -> preTest. Refused until team setup is fully complete (locked, every team has a
+  // captain, a starting item and a guardian name) — the same readiness startRoom used to check
+  // immediately before Main, now checked here instead since Main is two stages further away.
+  // assessmentDurationSeconds is optional so existing callers keep working; when omitted the room
+  // keeps its current (default) assessment duration.
   startPreTest(roomCode: string, teacherSessionId: string, assessmentDurationSeconds?: number): Promise<void>
   // preTest -> recall. Same teacher-only, stage-guarded shape; a stale click is a safe no-op.
+  // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
+  // room keeps its current (default) Recall duration.
   startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void>
   // Room-synchronized Recall advance, mirroring advanceQuestion: expectedRecallIndex makes a
   // duplicate timer callback a safe no-op instead of a skipped question.
   advanceRecallQuestion(roomCode: string, teacherSessionId: string, expectedRecallIndex: number): Promise<void>
-  // Refused until the shared Recall sequence has run all 5 questions.
-  startTeamSetup(roomCode: string, teacherSessionId: string): Promise<void>
   saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
   // Assessment Layer (Milestone 1): data-foundation writes. Each one requires the room to be in
   // its own matching phase and appends exactly one record to its own round-scoped array, using

@@ -11,7 +11,7 @@ import type { Player, Room, RoundHistoryEntry } from '../types/game'
 import { DemoGameService } from './demoService'
 
 // End-to-end QA of the whole approved flow against the real service:
-//   lobby -> preTest -> recall -> teamSetup -> main -> boss -> main -> postTest -> survey
+//   lobby -> teamSetup -> preTest -> recall -> main -> boss -> main -> postTest -> survey
 //   -> completed -> history -> next round
 //
 // Exercised through the public service API only — no internal state pokes — so it verifies what
@@ -29,6 +29,28 @@ class MemoryStorage implements Storage {
 
 const wrongChoiceOf = (question: { choices: Array<{ id: string }>; correctChoiceId: string }): string =>
   question.choices.find((choice) => choice.id !== question.correctChoiceId)?.id ?? ''
+
+// Team setup now runs BEFORE the pre-test — startPreTest is gated on phase === 'teamSetup' plus
+// full team readiness, so any test that only cares about assessment behavior still needs a
+// minimal, real team set up first. One team, everyone in it.
+const completeMinimalTeamSetup = async (service: DemoGameService, code: string): Promise<void> => {
+  await service.startTeamSetup(code, 'teacher-1')
+  await service.randomizeTeams(code, 'teacher-1', 1)
+  await service.lockTeams(code, 'teacher-1')
+  const liveRoom: { value: Room | null } = { value: null }
+  const stopRoom = service.subscribeRoom(code, (value) => { liveRoom.value = value })
+  await vi.waitFor(() => expect(liveRoom.value?.teamsLocked).toBe(true))
+  const teamId = (liveRoom.value as Room).teams[0].id
+  await service.finalizeCaptainElection(code, 'teacher-1', teamId)
+  const magic: { value: Array<{ teamId: string; magicHolderPlayerId: string | null }> } = { value: [] }
+  const stopMagic = service.subscribeAllTeamMagic(code, (value) => { magic.value = value })
+  await vi.waitFor(() => expect(magic.value[0]?.magicHolderPlayerId).toBeTruthy())
+  const captainId = magic.value[0].magicHolderPlayerId as string
+  await service.setTeamGuardianName(code, teamId, captainId, 'ทีมกุหลาบ')
+  await service.chooseStartingItem(code, teamId, captainId, 'power_surge')
+  stopMagic()
+  stopRoom()
+}
 
 describe('Full system flow QA', () => {
   beforeEach(() => {
@@ -61,7 +83,22 @@ describe('Full system flow QA', () => {
     const stopHistory = service.subscribeRoundHistory(code, (value) => { history.value = value })
     await vi.waitFor(() => expect(livePlayers.value).toHaveLength(3))
 
-    // --- 2. PRE-TEST ---
+    // --- 2. TEAM SETUP (now runs BEFORE the pre-test) ---
+    await service.startTeamSetup(code, 'teacher-1')
+    await service.randomizeTeams(code, 'teacher-1', 1)
+    await service.lockTeams(code, 'teacher-1')
+    const teamId = (liveRoom.value as Room).teams[0].id
+    await service.finalizeCaptainElection(code, 'teacher-1', teamId)
+    await vi.waitFor(() => expect(liveRoom.value?.teamsLocked).toBe(true))
+    const magic: { value: Array<{ teamId: string; magicHolderPlayerId: string | null }> } = { value: [] }
+    const stopMagic = service.subscribeAllTeamMagic(code, (value) => { magic.value = value })
+    await vi.waitFor(() => expect(magic.value[0]?.magicHolderPlayerId).toBeTruthy())
+    const captainId = magic.value[0].magicHolderPlayerId as string
+    await service.setTeamGuardianName(code, teamId, captainId, 'ทีมกุหลาบ')
+    await service.chooseStartingItem(code, teamId, captainId, 'power_surge')
+    stopMagic()
+
+    // --- 3. PRE-TEST ---
     await service.startPreTest(code, 'teacher-1')
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('preTest'))
     // Students stay in the game flow during the pre-test.
@@ -102,7 +139,7 @@ describe('Full system flow QA', () => {
       expect(livePlayers.value.find((p) => p.id === gamma.id)?.preTestAnswers).toHaveLength(4)
     })
 
-    // --- 3. RECALL (teacher continues with Gamma unfinished) ---
+    // --- 4. RECALL (teacher continues with Gamma unfinished) ---
     await service.startRecall(code, 'teacher-1')
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('recall'))
     for (let index = 0; index < RECALL_QUESTIONS.length; index += 1) {
@@ -116,25 +153,12 @@ describe('Full system flow QA', () => {
       }
       await service.advanceRecallQuestion(code, 'teacher-1', index)
     }
-    // Pre-test answers survived the Recall stage.
+    // Pre-test answers survived the Recall stage, and team setup (captain/name/item) from before
+    // the pre-test survived both individual stages untouched.
     expect(livePlayers.value.find((p) => p.id === alpha.id)?.preTestAnswers).toHaveLength(10)
-
-    // --- 4. TEAM SETUP ---
-    await service.startTeamSetup(code, 'teacher-1')
-    await service.randomizeTeams(code, 'teacher-1', 1)
-    await service.lockTeams(code, 'teacher-1')
-    const teamId = (liveRoom.value as Room).teams[0].id
-    await service.finalizeCaptainElection(code, 'teacher-1', teamId)
-    await vi.waitFor(() => expect(liveRoom.value?.teamsLocked).toBe(true))
-    const magic: { value: Array<{ teamId: string; magicHolderPlayerId: string | null }> } = { value: [] }
-    const stopMagic = service.subscribeAllTeamMagic(code, (value) => { magic.value = value })
-    await vi.waitFor(() => expect(magic.value[0]?.magicHolderPlayerId).toBeTruthy())
-    const captainId = magic.value[0].magicHolderPlayerId as string
-    await service.setTeamGuardianName(code, teamId, captainId, 'ทีมกุหลาบ')
-    await service.chooseStartingItem(code, teamId, captainId, 'power_surge')
-    stopMagic()
-    // Assessment data survives team setup.
     expect(livePlayers.value.find((p) => p.id === beta.id)?.preTestAnswers).toHaveLength(10)
+    expect((liveRoom.value as Room).teams[0].id).toBe(teamId)
+    expect((liveRoom.value as Room).teamsLocked).toBe(true)
 
     // --- 5/6. MAIN + BOSS ---
     await service.startRoom(code, 'teacher-1', 30)
@@ -270,6 +294,7 @@ describe('Full system flow QA', () => {
     const room = await service.createRoom('teacher-1')
     const code = room.roomCode
     const first = (await service.joinRoom({ roomCode: code, displayName: 'Alpha', studentNumber: '01' }, 'uid-1')).player
+    await completeMinimalTeamSetup(service, code)
     await service.startPreTest(code, 'teacher-1')
     for (let index = 0; index < 4; index += 1) {
       await service.savePreTestAnswer(code, first.id, {
@@ -300,6 +325,8 @@ describe('Full system flow QA', () => {
     const code = room.roomCode
     const player = (await service.joinRoom({ roomCode: code, displayName: 'Alpha', studentNumber: '01' }, 'uid-1')).player
 
+    await completeMinimalTeamSetup(service, code)
+
     await service.startPreTest(code, 'teacher-1')
     for (let index = 0; index < 10; index += 1) {
       await service.savePreTestAnswer(code, player.id, {
@@ -308,26 +335,12 @@ describe('Full system flow QA', () => {
         expectedIndex: index,
       })
     }
+    const liveRoom = { value: null as Room | null }
+    const stopRoomSub = service.subscribeRoom(code, (value) => { liveRoom.value = value })
     await service.startRecall(code, 'teacher-1')
     for (let index = 0; index < RECALL_QUESTIONS.length; index += 1) {
       await service.advanceRecallQuestion(code, 'teacher-1', index)
     }
-    await service.startTeamSetup(code, 'teacher-1')
-    await service.randomizeTeams(code, 'teacher-1', 1)
-    await service.lockTeams(code, 'teacher-1')
-    const teamId = room.teams[0]?.id ?? ''
-    const liveRoom = { value: null as Room | null }
-    const stopRoomSub = service.subscribeRoom(code, (value) => { liveRoom.value = value })
-    await vi.waitFor(() => expect(liveRoom.value?.teamsLocked).toBe(true))
-    const resolvedTeamId = teamId || (liveRoom.value as Room).teams[0].id
-    await service.finalizeCaptainElection(code, 'teacher-1', resolvedTeamId)
-    const magic = { value: [] as Array<{ teamId: string; magicHolderPlayerId: string | null }> }
-    const stopMagic = service.subscribeAllTeamMagic(code, (value) => { magic.value = value })
-    await vi.waitFor(() => expect(magic.value[0]?.magicHolderPlayerId).toBeTruthy())
-    const captainId = magic.value[0].magicHolderPlayerId as string
-    await service.setTeamGuardianName(code, resolvedTeamId, captainId, 'ทีมกุหลาบ')
-    await service.chooseStartingItem(code, resolvedTeamId, captainId, 'power_surge')
-    stopMagic()
 
     await service.startRoom(code, 'teacher-1', 30)
     for (let index = 0; index < 10; index += 1) {

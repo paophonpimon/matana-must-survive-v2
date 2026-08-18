@@ -80,25 +80,10 @@ describe('assessment gating and timing', () => {
     // The first snapshot must land before any assertion reads room fields, or optional chaining
     // yields undefined and every field assertion silently passes.
     await vi.waitFor(() => expect(liveRoom.value).not.toBeNull())
-    return { service, code, alpha, beta, liveRoom, players, stop: () => { stopPlayers(); stopRoom() } }
-  }
 
-  const answer = (bank: typeof PRE_TEST_QUESTIONS, index: number, correct = true) => ({
-    questionId: bank[index].id,
-    selectedChoiceId: correct
-      ? bank[index].correctChoiceId
-      : bank[index].choices.find((choice) => choice.id !== bank[index].correctChoiceId)?.id ?? '',
-    expectedIndex: index,
-  })
-
-  // Drives lobby -> ... -> postTest STAGE without opening the post-test.
-  const reachPostTestStage = async (context: Awaited<ReturnType<typeof setup>>) => {
-    const { service, code, liveRoom } = context
-    await service.startPreTest(code, 'teacher-1')
-    await service.startRecall(code, 'teacher-1')
-    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
-      await service.advanceRecallQuestion(code, 'teacher-1', index)
-    }
+    // Team setup now runs BEFORE the pre-test, so it must be complete here — startPreTest is
+    // gated on phase === 'teamSetup' plus full team readiness — before any test below can call
+    // startPreTest directly, exactly as it could when team setup used to run after Recall.
     await service.startTeamSetup(code, 'teacher-1')
     await service.randomizeTeams(code, 'teacher-1', 1)
     await service.lockTeams(code, 'teacher-1')
@@ -112,6 +97,27 @@ describe('assessment gating and timing', () => {
     await service.setTeamGuardianName(code, teamId, captainId, 'ทีมกุหลาบ')
     await service.chooseStartingItem(code, teamId, captainId, 'power_surge')
     stopMagic()
+
+    return { service, code, alpha, beta, liveRoom, players, stop: () => { stopPlayers(); stopRoom() } }
+  }
+
+  const answer = (bank: typeof PRE_TEST_QUESTIONS, index: number, correct = true) => ({
+    questionId: bank[index].id,
+    selectedChoiceId: correct
+      ? bank[index].correctChoiceId
+      : bank[index].choices.find((choice) => choice.id !== bank[index].correctChoiceId)?.id ?? '',
+    expectedIndex: index,
+  })
+
+  // Drives teamSetup -> ... -> postTest STAGE without opening the post-test. Team setup itself is
+  // already done by setup() above, since it now runs before the pre-test.
+  const reachPostTestStage = async (context: Awaited<ReturnType<typeof setup>>) => {
+    const { service, code, liveRoom } = context
+    await service.startPreTest(code, 'teacher-1')
+    await service.startRecall(code, 'teacher-1')
+    for (let index = 0; index < RECALL_QUESTION_COUNT; index += 1) {
+      await service.advanceRecallQuestion(code, 'teacher-1', index)
+    }
     await service.startRoom(code, 'teacher-1', 30)
     for (let index = 0; index < 10; index += 1) {
       await service.advanceQuestion(code, 'teacher-1', index)
