@@ -173,6 +173,13 @@ describe('Full system flow QA', () => {
     expect(alphaAfterMain.score).toBe(10)
     expect(resolveStudentRoute(liveRoom.value as Room, alphaAfterMain)).toBe(`/game/${code}`)
 
+    // Reaching the postTest STAGE does not open the test — the teacher must start it.
+    await expect(service.savePostTestAnswer(code, alpha.id, {
+      questionId: POST_TEST_QUESTIONS[0].id, selectedChoiceId: POST_TEST_QUESTIONS[0].correctChoiceId, expectedIndex: 0,
+    })).rejects.toThrow()
+    await service.startPostTest(code, 'teacher-1')
+    await vi.waitFor(() => expect(liveRoom.value?.postTestStartedAt).toBeTruthy())
+
     // Alpha 9/10 (up from 3), Beta 8/10 (equal to 8), Gamma incomplete again.
     await answerAssessment(alpha.id, POST_TEST_QUESTIONS, 9, 10, 'post')
     await answerAssessment(beta.id, POST_TEST_QUESTIONS, 8, 10, 'post')
@@ -334,6 +341,7 @@ describe('Full system flow QA', () => {
       }
     }
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('postTest'))
+    await service.startPostTest(code, 'teacher-1')
     await service.savePostTestAnswer(code, player.id, {
       questionId: POST_TEST_QUESTIONS[0].id,
       selectedChoiceId: POST_TEST_QUESTIONS[0].correctChoiceId,

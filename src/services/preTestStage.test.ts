@@ -98,17 +98,61 @@ describe('Teacher pre-test stage', () => {
     )
   })
 
+  it('both timing controls are per-question seconds, driven by the shared 1-second stepper', async () => {
+    const page = await readTeacherPage()
+    // Both settings are PER QUESTION and in seconds — no total-duration wording, no unit mixing.
+    expect(page).toContain('เวลาต่อข้อ (ก่อนเรียน/หลังเรียน)')
+    expect(page).toContain('เวลาต่อข้อ (ทบทวนเรื่องราว)')
+    expect(page).toContain('ใช้ค่าเดียวกันทั้งแบบทดสอบก่อนเรียนและหลังเรียน')
+    // No total-duration wording survives for the assessment setting.
+    expect(page).not.toContain('เวลาแบบทดสอบ')
+    expect(page).not.toContain('รวมทั้งชุด')
+    // Both per-question helpers state seconds-per-question. A "not นาที" check is impossible in
+    // Thai — วินาที contains นาที as a substring — so this asserts the positive unit instead, and
+    // that no helper offers minutes as a standalone word.
+    const helpers = page.match(/helper=\{`[^`]*`\}/g) ?? []
+    expect(helpers).toHaveLength(2)
+    for (const helper of helpers) {
+      expect(helper).toContain('วินาทีต่อข้อ')
+      expect(helper).not.toMatch(/[\s(]นาที/)
+    }
+    // Both go through the one reusable stepper rather than bespoke number fields.
+    const steppers = page.match(/<SettingStepper/g) ?? []
+    expect(steppers).toHaveLength(2)
+  })
+
+  it('the one shared stepper moves by exactly one step and clamps to its range', async () => {
+    const source = await import('node:fs/promises').then((fs) =>
+      fs.readFile(new URL('../components/NumberStepper.tsx', import.meta.url), 'utf8'))
+    // Default step is 1, and the timing settings never override it.
+    expect(source).toContain('step = 1')
+    expect(source).toContain('onClick={() => adjust(-step)}')
+    expect(source).toContain('onClick={() => adjust(step)}')
+    expect(source).toContain('Math.max(min, Math.min(max, next))')
+    const page = await readTeacherPage()
+    // No +/-5 stepping survives on any numeric setting.
+    expect(page).not.toContain('delta * 5')
+    expect(page).not.toContain('step={5}')
+    // Every numeric setting renders through the one component — no bare .setup-stepper markup.
+    expect(page).not.toContain('className="setup-stepper"')
+  })
   it('the pre-test CTA is always rendered and routed through the incomplete-students confirmation', async () => {
-    const source = await readTeacherPage()
-    expect(source).toContain('เริ่มทบทวนเรื่องราว')
-    // CTA is wired to the confirming entry point, not straight to the transition.
-    expect(source).toContain('onClick={requestStartRecall}')
-    // It is never gated on everyone having finished — only on the busy flag and a valid duration.
-    expect(source).toContain('disabled={advancingStageBusy || !recallDurationValid}')
-    expect(source).not.toMatch(/disabled=\{[^}]*preTestCompletedCount[^}]*\}/)
-    // Confirmation copy states the real consequence.
-    expect(source).toContain('จะไม่ถูกนำไปเปรียบเทียบคะแนนก่อน–หลัง')
-    // All three per-student statuses exist.
-    for (const label of ['ยังไม่เริ่ม', 'กำลังทำ', 'เสร็จแล้ว']) expect(source).toContain(label)
+    const page = await readTeacherPage()
+    // The pre-test stage now renders through the shared TeacherAssessmentStage, so the wiring
+    // lives on the usage site and the button behaviour lives in the component.
+    expect(page).toContain('onContinue={requestStartRecall}')
+    expect(page).toContain('continueLabel="เริ่มทบทวนเรื่องราว"')
+    // Confirmation copy still states the real consequence.
+    expect(page).toContain('จะไม่ถูกนำไปเปรียบเทียบคะแนนก่อน–หลัง')
+    // The Recall per-item control must NOT appear on an assessment screen.
+    const stage = await import('node:fs/promises').then((fs) =>
+      fs.readFile(new URL('../components/TeacherAssessmentStage.tsx', import.meta.url), 'utf8'))
+    expect(stage).not.toContain('recall-duration')
+    // The continue button is never gated on everyone having finished — only on the busy flag.
+    expect(stage).toContain('onClick={onContinue} disabled={busy}')
+    // All four per-student statuses exist, in the shared pure helper.
+    const clock = await import('node:fs/promises').then((fs) =>
+      fs.readFile(new URL('../lib/assessmentClock.ts', import.meta.url), 'utf8'))
+    for (const label of ['ยังไม่เริ่ม', 'กำลังทำ', 'เสร็จแล้ว', 'หมดเวลา']) expect(clock).toContain(label)
   })
 })

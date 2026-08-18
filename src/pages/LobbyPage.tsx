@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { PhaseIntro } from '../components/PhaseIntro'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicPanel } from '../components/MagicPanel'
@@ -94,6 +95,7 @@ export const LobbyPage = () => {
 
   return (
     <ScenePage image="/images/hero-curse.png" imageAlt="กุหลาบของมัทนาที่ยังถูกพันธนาการ" imagePosition="50% 58%">
+      <PhaseIntro phase={roomState.data?.phase === 'teamSetup' ? 'teamSetup' : null} entryKey={`${normalizedCode}-${roomState.data?.currentRound ?? 0}`} />
       <BrandHeader />
       <div className="mx-auto flex w-full max-w-4xl flex-1 items-center px-5 py-8 sm:px-8">
         {roomState.loading || playerState.loading ? (

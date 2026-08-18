@@ -4,7 +4,7 @@ import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } fr
 import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { getRemainingMilliseconds } from '../lib/gameFlow'
+import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestWindow, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
@@ -12,6 +12,9 @@ import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, valid
 import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
+  DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
+  MAX_ASSESSMENT_SECONDS_PER_QUESTION,
+  MIN_ASSESSMENT_SECONDS_PER_QUESTION,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
   MAX_BOSS_SECONDS_PER_QUESTION,
   MAX_RECALL_SECONDS_PER_ITEM,
@@ -36,6 +39,7 @@ import type {
   RecallAnswerRecord,
   Room,
   RoundHistoryEntry,
+  TeacherRoomSummary,
   TeamGuardianName,
   TeamMagicState,
   TeamRosterSummary,
@@ -68,6 +72,10 @@ interface DemoState {
 // request can't set a 0-second or absurdly long timer.
 const clampRecallDuration = (seconds: number): number =>
   Math.max(MIN_RECALL_SECONDS_PER_ITEM, Math.min(MAX_RECALL_SECONDS_PER_ITEM, Math.round(seconds)))
+// Assessment budget clamp. Shared by both services so a teacher-supplied duration can never be
+// out of range on one backend and valid on the other.
+const clampAssessmentDuration = (seconds: number): number =>
+  Math.max(MIN_ASSESSMENT_SECONDS_PER_QUESTION, Math.min(MAX_ASSESSMENT_SECONDS_PER_QUESTION, Math.round(seconds)))
 const clampBossDuration = (seconds: number): number =>
   Math.max(MIN_BOSS_SECONDS_PER_QUESTION, Math.min(MAX_BOSS_SECONDS_PER_QUESTION, Math.round(seconds)))
 
@@ -150,9 +158,13 @@ const createPlayer = (
 // Recall phase every round now begins with, before startMainAfterRecall ever moves it to 'main'.
 const createFreshBossFields = (): Pick<
   Room,
-  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner' | 'bossAwaitingContinue'
+  'phase' | 'bossQuestionIds' | 'bossQuestionIndex' | 'bossQuestionStartedAt' | 'bossQuestionDurationSeconds' | 'bossCompleted' | 'bossWinner' | 'bossAwaitingContinue' | 'preTestStartedAt' | 'postTestStartedAt'
 > => ({
   phase: 'lobby',
+  // A new round re-opens both tests from scratch; startPreTest and the Main->postTest transition
+  // each write a fresh instant, so clearing here just stops a finished round's deadline lingering.
+  preTestStartedAt: null,
+  postTestStartedAt: null,
   bossQuestionIds: [],
   bossQuestionIndex: 0,
   bossQuestionStartedAt: null,
@@ -177,6 +189,7 @@ const createSeedState = (): DemoState => {
     recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
     recallQuestionIndex: 0,
     recallQuestionStartedAt: null,
+    assessmentSecondsPerQuestion: DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
     ...createFreshBossFields(),
     questionIds: selectRoundQuestions(questions),
     previousQuestionIds: [],
@@ -228,6 +241,12 @@ const normalizeState = (state: DemoState): DemoState => {
     room.bossWinner ??= null
     // Pause-and-continue gate: older saved demo state predates this entirely.
     room.bossAwaitingContinue ??= false
+    // Assessment Layer timing: saved demo state from before the total-test timer has none of
+    // these. A missing duration must fall back to the default, never 0, which would read as an
+    // already-expired test; a missing start instant means "not opened yet".
+    room.assessmentSecondsPerQuestion ??= DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION
+    room.preTestStartedAt ??= null
+    room.postTestStartedAt ??= null
     roomState.magic ??= {}
     roomState.magicEvents ??= []
     // Older saved demo state (before this migration) won't have these keys at all — default
@@ -494,9 +513,10 @@ export class DemoGameService implements GameService {
       questionDurationSeconds: 30,
       questionStartedAt: null,
       questionClosedAt: null,
-    recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
-    recallQuestionIndex: 0,
-    recallQuestionStartedAt: null,
+      recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
+      recallQuestionIndex: 0,
+      recallQuestionStartedAt: null,
+      assessmentSecondsPerQuestion: DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
       ...createFreshBossFields(),
       questionIds: selectRoundQuestions(questions),
       previousQuestionIds: [],
@@ -646,7 +666,7 @@ export class DemoGameService implements GameService {
   // lobby -> preTest. Teacher-only and idempotent: a duplicate click from any stage other than
   // 'lobby' is a safe no-op, mirroring startRecall/startTeamSetup. Starts no timer — the pre-test
   // is self-paced, and nothing about it is competitive.
-  async startPreTest(roomCode: string, teacherSessionId: string): Promise<void> {
+  async startPreTest(roomCode: string, teacherSessionId: string, assessmentSecondsPerQuestion?: number): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
     if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
@@ -655,6 +675,12 @@ export class DemoGameService implements GameService {
     if (roomState.room.phase !== 'lobby') return
     if (Object.keys(roomState.players).length === 0) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มแบบทดสอบไม่ได้')
     roomState.room.phase = 'preTest'
+    if (assessmentSecondsPerQuestion != null) {
+      roomState.room.assessmentSecondsPerQuestion = clampAssessmentDuration(assessmentSecondsPerQuestion)
+    }
+    // Offset by the phase-intro cutscene so the budget does not tick while the intro plays. This
+    // is the authoritative instant every client derives its deadline from.
+    roomState.room.preTestStartedAt = Date.now()
     await writeState(state)
   }
 
@@ -758,11 +784,7 @@ export class DemoGameService implements GameService {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
     }
     // Answers lock when the shared countdown expires, the same way saveAnswer guards Main.
-    const recallTiming = {
-      questionStartedAt: roomState.room.recallQuestionStartedAt,
-      questionDurationSeconds: roomState.room.recallQuestionDurationSeconds,
-      questionClosedAt: null,
-    }
+    const recallTiming = recallQuestionTiming(roomState.room)
     if (!roomState.room.recallQuestionStartedAt || getRemainingMilliseconds(recallTiming, Date.now()) <= 0) {
       throw new Error('ผู้ใช้:หมดเวลาตอบข้อนี้แล้ว')
     }
@@ -792,6 +814,13 @@ export class DemoGameService implements GameService {
     const player = roomState?.players[playerId]
     if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
     if (roomState.room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
+    // Two server-side gates, both derived only from room state so a refresh cannot bypass either:
+    //   not open yet -> the teacher has not started the test
+    //   expired      -> the budget ran out; already-saved answers stay, nothing is fabricated
+    if (roomState.room.preTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบก่อนเรียน')
+    if (isAssessmentExpired(preTestWindow(roomState.room, player.preTestAnswers))) {
+      throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
+    }
     // The bank is the only authority on correctness — never the caller.
     const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
     if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
@@ -820,6 +849,10 @@ export class DemoGameService implements GameService {
     const player = roomState?.players[playerId]
     if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
     if (roomState.room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
+    if (roomState.room.postTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบหลังเรียน')
+    if (isAssessmentExpired(postTestWindow(roomState.room, player.postTestAnswers))) {
+      throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
+    }
     // The bank is the only authority on correctness — never the caller.
     const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
     if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
@@ -871,6 +904,22 @@ export class DemoGameService implements GameService {
 
   // postTest -> survey. Teacher-only and idempotent: only fires from the post-test stage, so a
   // stale/duplicate press is a safe no-op. No timer — the survey is self-paced.
+  // postTest stage -> post-test OPEN. Teacher-only and idempotent: once postTestStartedAt is set,
+  // a duplicate press is a safe no-op that cannot restart or extend the budget.
+  async startPostTest(roomCode: string, teacherSessionId: string, assessmentSecondsPerQuestion?: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+    verifyTeacher(roomState.room, teacherSessionId)
+    if (roomState.room.status !== 'playing' || roomState.room.phase !== 'postTest') return
+    if (roomState.room.postTestStartedAt != null) return
+    if (assessmentSecondsPerQuestion != null) {
+      roomState.room.assessmentSecondsPerQuestion = clampAssessmentDuration(assessmentSecondsPerQuestion)
+    }
+    roomState.room.postTestStartedAt = Date.now()
+    await writeState(state)
+  }
+
   async startSurvey(roomCode: string, teacherSessionId: string): Promise<void> {
     const state = await readState()
     const roomState = state.rooms[roomCode]
@@ -954,6 +1003,10 @@ export class DemoGameService implements GameService {
       // (completeRound). Every Main result below is written exactly as before: scores, submitted,
       // finishedAt and elapsedMs are untouched, so the eventual result screen is unchanged.
       roomState.room.phase = 'postTest'
+      // Reaching the stage is NOT starting the test. postTestStartedAt stays null so students
+      // land on a waiting screen and every write is rejected until the teacher explicitly opens
+      // it via startPostTest. This is the gate that used to be missing entirely.
+      roomState.room.postTestStartedAt = null
       roomState.room.currentQuestionIndex = roomState.room.questionIds.length
       roomState.room.questionStartedAt = null
       roomState.room.questionClosedAt = null
@@ -989,11 +1042,7 @@ export class DemoGameService implements GameService {
     if (roomState.room.bossQuestionIndex !== answer.expectedBossIndex) {
       throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
     }
-    const bossTiming = {
-      questionStartedAt: roomState.room.bossQuestionStartedAt,
-      questionDurationSeconds: roomState.room.bossQuestionDurationSeconds,
-      questionClosedAt: null,
-    }
+    const bossTiming = bossQuestionTiming(roomState.room)
     if (!roomState.room.bossQuestionStartedAt || getRemainingMilliseconds(bossTiming, Date.now()) <= 0) {
       throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
     }
@@ -1361,7 +1410,7 @@ export class DemoGameService implements GameService {
     // getRemainingMilliseconds (not manual deadline math) so a teacher's early close
     // (questionClosedAt) is honored here too — otherwise a late/slow client could still submit
     // an answer up until the ORIGINAL deadline even after the teacher closed the question early.
-    if (!roomState.room.questionStartedAt || getRemainingMilliseconds(roomState.room, Date.now()) <= 0) {
+    if (!roomState.room.questionStartedAt || getRemainingMilliseconds(mainQuestionTiming(roomState.room), Date.now()) <= 0) {
       throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
     }
     if (roomState.room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
@@ -1655,6 +1704,20 @@ export class DemoGameService implements GameService {
     }
     void emit()
     return listen(() => { void emit() })
+  }
+
+  // Ownership filter mirrors the Firebase query exactly: only rooms this teacher created, and
+  // only fields that live on the room document itself — no roundHistory is touched here.
+  async listTeacherRooms(teacherSessionId: string): Promise<TeacherRoomSummary[]> {
+    const state = await readState()
+    return Object.values(state.rooms)
+      .filter((roomState) => roomState.room.teacherSessionId === teacherSessionId)
+      .map((roomState) => ({
+        roomCode: roomState.room.roomCode,
+        createdAt: roomState.room.createdAt,
+        status: roomState.room.status,
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt)
   }
 
   subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void): Unsubscribe {

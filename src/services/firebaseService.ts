@@ -25,7 +25,7 @@ import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } fr
 import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { getRemainingMilliseconds } from '../lib/gameFlow'
+import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestWindow, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
@@ -34,6 +34,9 @@ import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
 import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService, type PostTestAnswerInput, type PreTestAnswerInput, type RecallAnswerInput, type SurveyResponseInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
+  DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
+  MAX_ASSESSMENT_SECONDS_PER_QUESTION,
+  MIN_ASSESSMENT_SECONDS_PER_QUESTION,
   DEFAULT_BOSS_QUESTION_DURATION_SECONDS,
   GAME_PHASES,
   MAX_BOSS_SECONDS_PER_QUESTION,
@@ -67,6 +70,7 @@ import type {
   SurveyResponseRecord,
   Room,
   RoundHistoryEntry,
+  TeacherRoomSummary,
   TeamGuardianName,
   TeamMagicBreakdown,
   TeamMagicState,
@@ -187,6 +191,12 @@ const mapRoom = (data: DocumentData): Room => ({
   recallQuestionDurationSeconds: Number(data.recallQuestionDurationSeconds ?? RECALL_SECONDS_PER_ITEM),
   recallQuestionIndex: Number(data.recallQuestionIndex ?? 0),
   recallQuestionStartedAt: toMillis(data.recallQuestionStartedAt),
+  // Rooms written before per-question timing have no such field. Falling back to the default is
+  // deliberate: the old field held a WHOLE-TEST budget, so reusing its number here would silently
+  // grant that much time to every single question.
+  assessmentSecondsPerQuestion: Number(data.assessmentSecondsPerQuestion ?? DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION),
+  preTestStartedAt: toMillis(data.preTestStartedAt),
+  postTestStartedAt: toMillis(data.postTestStartedAt),
   bossQuestionIds: Array.isArray(data.bossQuestionIds) ? data.bossQuestionIds.map(String) : [],
   bossQuestionIndex: Number(data.bossQuestionIndex ?? 0),
   bossQuestionStartedAt: toMillis(data.bossQuestionStartedAt),
@@ -383,6 +393,11 @@ const mapTeamRoster = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: str
 // hand-crafted request can't set a 0-second or absurdly long timer.
 const clampRecallDuration = (seconds: number): number =>
   Math.max(MIN_RECALL_SECONDS_PER_ITEM, Math.min(MAX_RECALL_SECONDS_PER_ITEM, Math.round(seconds)))
+// Assessment budget clamp — mirrors demoService exactly so a duration cannot be valid on one
+// backend and out of range on the other.
+const clampAssessmentDuration = (seconds: number): number =>
+  Math.max(MIN_ASSESSMENT_SECONDS_PER_QUESTION, Math.min(MAX_ASSESSMENT_SECONDS_PER_QUESTION, Math.round(seconds)))
+
 const clampBossDuration = (seconds: number): number =>
   Math.max(MIN_BOSS_SECONDS_PER_QUESTION, Math.min(MAX_BOSS_SECONDS_PER_QUESTION, Math.round(seconds)))
 
@@ -661,8 +676,14 @@ const createFreshBossFields = (): Pick<
   | 'bossCompleted'
   | 'bossWinner'
   | 'bossAwaitingContinue'
+  | 'preTestStartedAt'
+  | 'postTestStartedAt'
 > => ({
   phase: 'lobby',
+  // A new round re-opens both tests from scratch; startPreTest and the Main->postTest transition
+  // each write a fresh instant, so clearing here just stops a finished round's deadline lingering.
+  preTestStartedAt: null,
+  postTestStartedAt: null,
   bossQuestionIds: [],
   bossQuestionIndex: 0,
   bossQuestionStartedAt: null,
@@ -722,6 +743,7 @@ export class FirebaseGameService implements GameService {
     recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
     recallQuestionIndex: 0,
     recallQuestionStartedAt: null,
+        assessmentSecondsPerQuestion: DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
         ...createFreshBossFields(),
         questionIds: selectRoundQuestions(questions),
         previousQuestionIds: [],
@@ -956,7 +978,7 @@ export class FirebaseGameService implements GameService {
   // lobby -> preTest. Teacher-only and idempotent: a duplicate click from any stage other than
   // 'lobby' is a safe no-op, mirroring startRecall/startTeamSetup. Starts no timer — the pre-test
   // is self-paced, and nothing about it is competitive.
-  async startPreTest(roomCode: string, teacherSessionId: string): Promise<void> {
+  async startPreTest(roomCode: string, teacherSessionId: string, assessmentSecondsPerQuestion?: number): Promise<void> {
     const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
     if (playerSnapshots.empty) throw new Error('ผู้ใช้:ยังไม่มีผู้เล่นเข้าร่วม จึงยังเริ่มแบบทดสอบไม่ได้')
     const roomRef = doc(db, 'rooms', roomCode)
@@ -967,7 +989,13 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:เริ่มแบบทดสอบก่อนเรียนได้เฉพาะช่วงห้องรอ')
       if (room.phase !== 'lobby') return
-      transaction.update(roomRef, { phase: 'preTest' })
+      // preTestStartedAt is offset by the phase-intro cutscene so the budget does not tick while
+      // the intro plays, and is written server-side so a refresh cannot reset or extend it.
+      transaction.update(roomRef, {
+        phase: 'preTest',
+        ...(assessmentSecondsPerQuestion == null ? {} : { assessmentSecondsPerQuestion: clampAssessmentDuration(assessmentSecondsPerQuestion) }),
+        preTestStartedAt: serverTimestamp(),
+      })
     })
   }
 
@@ -1081,11 +1109,7 @@ export class FirebaseGameService implements GameService {
         throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
       }
       // Answers lock when the shared countdown expires, the same way saveAnswer guards Main.
-      const recallTiming = {
-        questionStartedAt: room.recallQuestionStartedAt,
-        questionDurationSeconds: room.recallQuestionDurationSeconds,
-        questionClosedAt: null,
-      }
+      const recallTiming = recallQuestionTiming(room)
       if (!room.recallQuestionStartedAt || getRemainingMilliseconds(recallTiming, Date.now()) <= 0) {
         throw new Error('ผู้ใช้:หมดเวลาตอบข้อนี้แล้ว')
       }
@@ -1123,6 +1147,11 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(roomSnapshot.data())
       const player = mapPlayer(playerSnapshot)
       if (room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
+      // Two server-side gates, both derived only from room state so a refresh bypasses neither.
+      if (room.preTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบก่อนเรียน')
+      if (isAssessmentExpired(preTestWindow(room, player.preTestAnswers))) {
+        throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
+      }
       // The bank is the only authority on correctness — never the caller.
       const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
       if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
@@ -1155,6 +1184,10 @@ export class FirebaseGameService implements GameService {
       const room = mapRoom(roomSnapshot.data())
       const player = mapPlayer(playerSnapshot)
       if (room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
+      if (room.postTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบหลังเรียน')
+      if (isAssessmentExpired(postTestWindow(room, player.postTestAnswers))) {
+        throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
+      }
       // The bank is the only authority on correctness — never the caller.
       const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
       if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
@@ -1211,6 +1244,24 @@ export class FirebaseGameService implements GameService {
 
   // postTest -> survey. Teacher-only and idempotent: only fires from the post-test stage, so a
   // stale/duplicate press is a safe no-op. No timer — the survey is self-paced.
+  // postTest stage -> post-test OPEN. Teacher-only and idempotent: once postTestStartedAt is set,
+  // a duplicate press is a safe no-op that cannot restart or extend the budget.
+  async startPostTest(roomCode: string, teacherSessionId: string, assessmentSecondsPerQuestion?: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef)
+      if (!snapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
+      const room = mapRoom(snapshot.data())
+      if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
+      if (room.status !== 'playing' || room.phase !== 'postTest') return
+      if (room.postTestStartedAt != null) return
+      transaction.update(roomRef, {
+        ...(assessmentSecondsPerQuestion == null ? {} : { assessmentSecondsPerQuestion: clampAssessmentDuration(assessmentSecondsPerQuestion) }),
+        postTestStartedAt: serverTimestamp(),
+      })
+    })
+  }
+
   async startSurvey(roomCode: string, teacherSessionId: string): Promise<void> {
     const roomRef = doc(db, 'rooms', roomCode)
     await runTransaction(db, async (transaction) => {
@@ -1313,6 +1364,10 @@ export class FirebaseGameService implements GameService {
         // action (completeRound). The player writes below are unchanged.
         transaction.update(roomRef, {
           phase: 'postTest',
+          // Reaching the stage is NOT starting the test — students wait until the teacher opens
+          // it via startPostTest. Written explicitly as null so a re-entered round cannot inherit
+          // a previous postTestStartedAt and silently auto-open.
+          postTestStartedAt: null,
           currentQuestionIndex: room.questionIds.length,
           questionStartedAt: null,
           questionClosedAt: null,
@@ -1372,7 +1427,7 @@ export class FirebaseGameService implements GameService {
       const player = mapPlayer(playerSnapshot)
       if (room.status !== 'playing' || room.phase !== 'boss') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงศึกด่านชิงมนตรา')
       if (room.bossQuestionIndex !== answer.expectedBossIndex) throw new Error('ผู้ใช้:ลำดับคำถามเปลี่ยนแล้ว กรุณารอข้อถัดไป')
-      const bossTiming = { questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null }
+      const bossTiming = bossQuestionTiming(room)
       if (!room.bossQuestionStartedAt || getRemainingMilliseconds(bossTiming, Date.now()) <= 0) {
         throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
       }
@@ -1794,7 +1849,7 @@ export class FirebaseGameService implements GameService {
       // getRemainingMilliseconds (not manual deadline math) so a teacher's early close
       // (questionClosedAt) is honored here too — otherwise a late/slow client could still
       // submit an answer up until the ORIGINAL deadline even after an early close.
-      if (!room.questionStartedAt || getRemainingMilliseconds(room, Date.now()) <= 0) {
+      if (!room.questionStartedAt || getRemainingMilliseconds(mainQuestionTiming(room), Date.now()) <= 0) {
         throw new Error('ผู้ใช้:หมดเวลาตอบคำถามข้อนี้แล้ว')
       }
       if (room.questionIds[answer.expectedQuestionIndex] !== answer.questionId) {
@@ -2134,6 +2189,29 @@ export class FirebaseGameService implements GameService {
       (snapshot) => listener(snapshot.docs.map(mapTeamGuardianName)),
       () => onError('ไม่สามารถโหลดชื่อทีมได้ กรุณาตรวจสอบอินเทอร์เน็ต'),
     )
+  }
+
+  // Ownership is enforced twice, on purpose. The query constrains teacherSessionId to this
+  // teacher's uid, and the `list` rule in firestore.rules rejects any query that is NOT so
+  // constrained — so a client that dropped the where() clause gets permission-denied instead of
+  // the whole rooms collection.
+  //
+  // Exactly ONE query, and it touches only room documents. Nothing here reads a roundHistory
+  // subcollection: doing that per room to show a student/round count turned painting the list
+  // into an N+1 read. Those counts are derived from the single history load that happens when a
+  // room is actually opened.
+  //
+  // Sorted client-side rather than with orderBy('createdAt'): a where + orderBy on different
+  // fields needs a composite index, and a teacher owns few enough rooms that sorting them here
+  // costs nothing and keeps this feature deployable with NO index change.
+  async listTeacherRooms(teacherSessionId: string): Promise<TeacherRoomSummary[]> {
+    const snapshot = await getDocs(query(collection(db, 'rooms'), where('teacherSessionId', '==', teacherSessionId)))
+    return snapshot.docs
+      .map((roomDocument) => {
+        const room = mapRoom(roomDocument.data())
+        return { roomCode: room.roomCode || roomDocument.id, createdAt: room.createdAt, status: room.status }
+      })
+      .sort((a, b) => b.createdAt - a.createdAt)
   }
 
   subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void, onError: (message: string) => void): Unsubscribe {

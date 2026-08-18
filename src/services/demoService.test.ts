@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { questionsById } from '../data/questions'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
-import { ANSWER_REVEAL_MILLISECONDS, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, mainQuestionTiming } from '../lib/gameFlow'
 import { resolveStudentRoute } from '../lib/game'
 import { computeStudentRecallResult } from '../lib/learning'
 import { computeTeamCompetitionStats, hasAnyMagicItem } from '../lib/magic'
@@ -411,7 +411,11 @@ describe('Demo timed classroom flow', () => {
     const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
     await vi.waitFor(() => expect(typeof liveRoom.value?.questionStartedAt).toBe('number'))
     await answerAt(service, room, player, 0, false)
-    vi.spyOn(Date, 'now').mockReturnValue((liveRoom.value?.questionStartedAt ?? 0) + 5_001)
+    // Question 1 is a phase entry, so its deadline is the persisted start + the phase-intro
+    // offset + the configured duration. Derived from the real helper rather than hand-computed,
+    // so this cannot drift from the production rule.
+    const deadline = getQuestionDeadline(mainQuestionTiming(liveRoom.value as Room)) as number
+    vi.spyOn(Date, 'now').mockReturnValue(deadline + 1)
 
     await expect(answerAt(service, room, player, 0, true)).rejects.toThrow('หมดเวลา')
     stopRoom()

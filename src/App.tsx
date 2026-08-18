@@ -8,6 +8,7 @@ import { JoinPage } from './pages/JoinPage'
 import { LobbyPage } from './pages/LobbyPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ResultPage } from './pages/ResultPage'
+import { TeacherHistoryPage } from './pages/TeacherHistoryPage'
 import { TeacherPage } from './pages/TeacherPage'
 
 const App = () => (
@@ -16,6 +17,9 @@ const App = () => (
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/teacher" element={<TeacherPage />} />
+        {/* Read-only archive. Reachable without an active room, which is the point: a teacher
+            comes back days later to print or export a past class. */}
+        <Route path="/teacher/history" element={<TeacherHistoryPage />} />
         <Route path="/join" element={<JoinPage />} />
         <Route path="/lobby/:roomCode" element={<LobbyPage />} />
         <Route path="/game/:roomCode" element={<GamePage />} />

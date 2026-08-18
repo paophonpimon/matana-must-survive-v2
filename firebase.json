@@ -15,6 +15,10 @@
         "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       },
       {
+        "source": "/teacher/**",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
         "source": "/join",
         "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       },

@@ -211,6 +211,40 @@ export const formatHostilePercent = (multiplier: number): string => {
   return Number.isInteger(percent) ? `${percent}` : percent.toFixed(1)
 }
 
+// A team question is worth 10 competition points at full strength — see computeTeamQuestionBreakdown,
+// where rawScore is (correct members / members) * 10. Stating that here lets the seal copy quote
+// real numbers instead of leaving the student to work a percentage out.
+export const TEAM_QUESTION_MAX_POINTS = 10
+
+export interface ScoreSealCopy {
+  /** Headline: states the effect on THIS question, never a bare percentage. */
+  primary: string
+  /** One supporting line. Real points when they are known, plain wording otherwise. */
+  detail: string
+}
+
+// Plain-language Score Seal explanation. ‘50% ถูกผนึก’ left it ambiguous whether 50% was what
+// remained or what was lost; this states the remainder, the effect and the actual points.
+//
+// The ‘half’ wording is only used when it is literally true (one seal). Two stacked seals leave a
+// quarter, so that case gets its own phrasing rather than an inaccurate ‘half’. Math unchanged:
+// every number here comes from computeHostileMultiplier.
+export const buildScoreSealCopy = (sealCount: number): ScoreSealCopy => {
+  const multiplier = computeHostileMultiplier(sealCount)
+  const remainingPercent = formatHostilePercent(multiplier)
+  const maxPoints = TEAM_QUESTION_MAX_POINTS * multiplier
+  return {
+    // Says what happens to THIS question's score. A standalone ‘50%’ left it ambiguous whether
+    // that was what remained or what was lost.
+    primary: `🔒 คะแนนข้อนี้เหลือ ${remainingPercent}%`,
+    // Exactly ONE supporting line — the concrete points, since TEAM_QUESTION_MAX_POINTS is known.
+    // The generic ‘half’ phrasing is only correct for a single seal, so it is the fallback.
+    detail: maxPoints > 0
+      ? `ตอบถูกข้อนี้ ได้สูงสุด ${maxPoints} คะแนน จากปกติ ${TEAM_QUESTION_MAX_POINTS} คะแนน`
+      : 'ตอบถูกข้อนี้จะได้รับคะแนนเพียงครึ่งหนึ่งของคะแนนปกติ',
+  }
+}
+
 // Item 7: dramatic-popup presentation copy, shared by the student toast (MagicPanel) and the
 // teacher spell-event overlay (TeacherPage) so both audiences narrate the same event with the
 // same tone/wording, just at a different scale. `tone` drives the CSS variant (magic-toast-seal

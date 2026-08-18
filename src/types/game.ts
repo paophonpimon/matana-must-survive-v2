@@ -201,6 +201,22 @@ export const RECALL_SECONDS_PER_ITEM = 15
 // 5s floor. Capped lower than Main's because Recall items are two-choice recall prompts.
 export const MIN_RECALL_SECONDS_PER_ITEM = 5
 export const MAX_RECALL_SECONDS_PER_ITEM = 120
+// Assessment Layer: time allowed PER QUESTION, applied identically to the pre-test and the
+// post-test. Deliberately a new field rather than a redefinition of the old total-budget one:
+// a room written under the old model stores 240 meaning “240s for the whole test”, and silently
+// reinterpreting that as 240s per question would give it forty minutes.
+export const DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION = 30
+export const MIN_ASSESSMENT_SECONDS_PER_QUESTION = 10
+export const MAX_ASSESSMENT_SECONDS_PER_QUESTION = 120
+// The student is warned, not penalised, for the last stretch of the budget.
+export const ASSESSMENT_WARNING_MILLISECONDS = 30_000
+
+// Phase-intro cutscene length. Lives here rather than in the component because the SERVICES read
+// it too: every timed activity's start instant is written as (now + this), so the intro plays
+// over a clock that has not begun yet and no activity loses time to the transition.
+export const PHASE_INTRO_MILLISECONDS = 1_800
+
+
 export const MIN_BOSS_SECONDS_PER_QUESTION = 3
 export const MAX_BOSS_SECONDS_PER_QUESTION = 60
 // Sentinel selectedChoiceId persisted when a Recall item's countdown expires with no answer.
@@ -253,6 +269,19 @@ export interface Room {
   // whole sequence has finished, which is the gate the teacher's "จัดทีมและเตรียมเกม" waits on.
   recallQuestionIndex: number
   recallQuestionStartedAt: number | null
+  // Assessment Layer timing: seconds allowed for EACH question, shared by the pre-test and the
+  // post-test so both halves of the comparison are taken under identical conditions. Each item
+  // gets the full value; finishing one early does not bank time toward the next.
+  assessmentSecondsPerQuestion: number
+  // Authoritative start instants, written by the teacher-only transition that opens each test.
+  // The deadline is derived from these on every client, so a refresh, a reconnect or a device
+  // swap can neither reset nor extend the clock — there is no client-held countdown to restart.
+  //
+  // NULL means "this test exists as a stage but is NOT open yet": students wait, and every write
+  // is rejected. Only the teacher's explicit start action writes an instant here, which is what
+  // makes "students cannot begin before the teacher starts" deterministic and refresh-proof.
+  preTestStartedAt: number | null
+  postTestStartedAt: number | null
   bossQuestionIds: string[]
   bossQuestionIndex: number
   bossQuestionStartedAt: number | null
@@ -591,4 +620,18 @@ export interface AnswerProgressEntry {
   // otherwise be misread as "already answered" for the new round's identical questionId.
   currentRound: number
   answeredAt: number
+}
+
+// Teacher-owned room listing, for the read-only room-history screen. Deliberately a summary
+// rather than a full Room: this list only has to identify a room well enough to pick it, and
+// nothing on this screen may resume or mutate gameplay.
+//
+// Deliberately carries NOTHING derived from roundHistory. Deriving a student or round count here
+// would mean reading every room's history subcollection just to paint the list — an N+1 read on a
+// screen that only needs to let the teacher pick a room. Those figures come from the ONE history
+// load performed when a room is actually opened (see summarizeRoundHistory in lib/roomHistory).
+export interface TeacherRoomSummary {
+  roomCode: string
+  createdAt: number
+  status: RoomStatus
 }

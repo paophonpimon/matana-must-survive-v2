@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GrimoireModal } from './GrimoireModal'
+import { TargetTeamModal } from './TargetTeamModal'
 import { MagicItemIcon } from './MagicItemIcon'
 import {
   MAGIC_ITEM_INFO,
@@ -95,6 +96,7 @@ export const MagicPanel = ({
   // Purely local UI state — never touches room/service state, so opening it can't pause the
   // timer or alter game state.
   const [grimoireOpen, setGrimoireOpen] = useState(false)
+  const [targetModalOpen, setTargetModalOpen] = useState(false)
 
   const teamId = magic?.teamId ?? ''
 
@@ -197,6 +199,7 @@ export const MagicPanel = ({
   const activatableTypes = ACTIVATABLE_TYPES.filter((itemType) => magic.inventory[itemType].available > 0)
   const effectiveActivationItem = activatableTypes.length === 1 ? activatableTypes[0] : (selectedActivationItem || null)
   const opponentTeams = teams.filter((team) => team.id !== magic.teamId)
+  const selectedTargetTeam = opponentTeams.find((team) => team.id === selectedTargetTeamId) ?? null
   // Milestone: while the room is still 'waiting', the current pick (if any) is always exactly
   // one type — this is what the picker below pre-selects, and what a re-submit without touching
   // any button (re-confirm) would resubmit unchanged.
@@ -279,9 +282,11 @@ export const MagicPanel = ({
           </button>
         </div>
       </div>
-      <p className="mt-1 text-sm text-[#c0b7ab]">
+      {/* Non-captains get a single compact read-only line instead of the full control block, so
+          the side column stays short enough to fit a landscape tablet without scrolling. */}
+      <p className={`mt-1 text-sm text-[#c0b7ab] ${isHolder ? '' : 'magic-panel-readonly'}`}>
         {magic.magicHolderPlayerId
-          ? (isHolder ? 'คุณคือผู้ถือคทาเวทมนตร์ของทีมนี้' : 'ผู้ถือคทาเวทมนตร์ของทีมนี้เท่านั้นที่ใช้ไอเทมได้')
+          ? (isHolder ? 'คุณคือผู้ถือคทาเวทมนตร์ของทีมนี้' : 'เฉพาะหัวหน้าทีมเท่านั้นที่ใช้ไอเทมของทีมได้')
           : 'ยังไม่มีผู้ถือคทาเวทมนตร์'}
       </p>
 
@@ -436,12 +441,35 @@ export const MagicPanel = ({
               {affectedQuestionIndex != null ? ` — จะมีผลกับคำถามข้อที่ ${affectedQuestionIndex + 1}` : ''}
             </p>
             {effectiveActivationItem === 'score_seal' ? (
-              <select value={selectedTargetTeamId} onChange={(event) => setSelectedTargetTeamId(event.target.value)} disabled={busy} aria-label="เลือกทีมเป้าหมาย">
-                <option value="">เลือกทีมเป้าหมาย</option>
-                {opponentTeams.map((team) => (
-                  <option key={team.id} value={team.id}>{team.name}</option>
-                ))}
-              </select>
+              <div className="target-team-field">
+                {/* A prominent button + modal instead of a native dropdown: on a tablet the
+                    dropdown was a small tap target whose options were hidden behind an OS
+                    overlay. Targeting rules are untouched — the same opponentTeams list. */}
+                <button
+                  type="button"
+                  className="target-team-trigger"
+                  onClick={() => setTargetModalOpen(true)}
+                  disabled={busy}
+                >
+                  <span>เลือกทีมเป้าหมาย</span>
+                  <span aria-hidden="true">▾</span>
+                </button>
+                {selectedTargetTeam ? (
+                  <p className="target-team-selected">
+                    <span aria-hidden="true">🎯</span> เป้าหมาย: <strong>{selectedTargetTeam.name}</strong>
+                    <small>แตะเพื่อเปลี่ยนได้ก่อนใช้ไอเทม</small>
+                  </p>
+                ) : (
+                  <p className="target-team-empty-hint">ยังไม่ได้เลือกทีมเป้าหมาย</p>
+                )}
+                <TargetTeamModal
+                  open={targetModalOpen}
+                  teams={opponentTeams}
+                  selectedTeamId={selectedTargetTeamId}
+                  onSelect={setSelectedTargetTeamId}
+                  onClose={() => setTargetModalOpen(false)}
+                />
+              </div>
             ) : null}
             <button className="primary-button w-full" type="button" onClick={() => void submitActivation()} disabled={busy || !effectiveActivationItem}>
               {busy ? 'กำลังใช้ไอเทม...' : 'ใช้ไอเทมนี้'}

@@ -5,6 +5,7 @@ import { ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { MagicPanel } from '../components/MagicPanel'
 import { TeamItemStatus } from '../components/TeamItemStatus'
+import { PhaseIntro, type PhaseIntroKey } from '../components/PhaseIntro'
 import { PostTestPhase } from '../components/PostTestPhase'
 import { SurveyPhase } from '../components/SurveyPhase'
 import { PreTestPhase } from '../components/PreTestPhase'
@@ -12,10 +13,11 @@ import { RecallPhase } from '../components/RecallPhase'
 import { useGame } from '../context/GameContext'
 import { questionsById } from '../data/questions'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamAnswerProgress, useMagicEvents, useTeamMagic, useTeamRoster } from '../hooks/useGameData'
+import { shuffleChoicesForPlayer } from '../lib/choiceOrder'
 import { resolveStudentRoute } from '../lib/game'
-import { areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds } from '../lib/gameFlow'
+import { areAnswersLocked, bossQuestionTiming, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, mainQuestionTiming } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
-import { computeHostileMultiplier, formatHostilePercent, getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
+import { buildScoreSealCopy, getMagicActivationWindow, MAGIC_ITEM_INFO } from '../lib/magic'
 import { friendlyError } from '../services'
 import { getPlayerSession, hasShownBossWinnerBanner, markBossWinnerBannerShown } from '../services/sessionStorage'
 import type { BossWinner } from '../types/game'
@@ -63,13 +65,19 @@ export const GamePage = () => {
   const displayTeams = useMemo(() => (room?.teams ?? []).map((team) => ({ ...team, name: guardianNameById.get(team.id) ?? team.name })), [room?.teams, guardianNameById])
   const assignedTeamDisplayName = assignedTeam ? guardianNameById.get(assignedTeam.id) ?? assignedTeam.name : 'ยังไม่ได้จัดทีม'
   const isBossPhase = room?.phase === 'boss'
+  // Intro plays on entry to a MAJOR activity only. teamSetup lives on the lobby and result on the
+  // result page, so this page covers the six phases it actually renders.
+  const introPhase: PhaseIntroKey | null = room && ['preTest', 'recall', 'main', 'boss', 'postTest', 'survey'].includes(room.phase)
+    ? (room.phase as PhaseIntroKey)
+    : null
   const questionIndex = room?.currentQuestionIndex ?? 0
   const questionId = room?.questionIds[questionIndex]
   const question = questionId ? questionsById.get(questionId) : undefined
   const savedAnswer = player?.answers.find((answer) => answer.questionId === questionId)
   const selectedChoiceId = pendingChoiceId || savedAnswer?.selectedChoiceId || ''
-  const remainingMs = room && !isBossPhase ? getRemainingMilliseconds(room, now) : 0
-  const revealRemainingMs = room && !isBossPhase ? getRevealRemainingMilliseconds(room, now) : 0
+  const mainTiming = room ? mainQuestionTiming(room) : null
+  const remainingMs = mainTiming && !isBossPhase ? getRemainingMilliseconds(mainTiming, now) : 0
+  const revealRemainingMs = mainTiming && !isBossPhase ? getRevealRemainingMilliseconds(mainTiming, now) : 0
   const timeExpired = remainingMs <= 0
   const hasAnswered = Boolean(savedAnswer || pendingChoiceId)
   const answerWasCorrect = Boolean(selectedChoiceId && selectedChoiceId === question?.correctChoiceId)
@@ -79,7 +87,7 @@ export const GamePage = () => {
   // ศึกด่านชิงมนตรา (Milestone 4): reuses the SAME gameFlow.ts timer helpers as the main flow,
   // fed a boss-shaped {questionStartedAt, questionDurationSeconds, questionClosedAt: null}
   // object — boss has no early-close, so questionClosedAt is always null here.
-  const bossTiming = room ? { questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null } : null
+  const bossTiming = room ? bossQuestionTiming(room) : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
   const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
   const bossRevealRemainingMs = bossDeadline != null && now >= bossDeadline
@@ -89,6 +97,15 @@ export const GamePage = () => {
   const bossQuestionId = room?.bossQuestionIds[room.bossQuestionIndex]
   const bossQuestion = bossQuestionId ? questionsById.get(bossQuestionId) : undefined
   const bossSavedAnswer = player?.bossAnswers.find((answer) => answer.questionId === bossQuestionId)
+  // Boss choices shuffle too, EXCEPT for the swipe interaction: there, left and right are bound to
+  // specific choice ids by the question itself (swipeLeftChoiceId / swipeRightChoiceId), so
+  // position carries meaning and reordering would change what a swipe does. Icon-based kinds are
+  // safe because choiceIcons is keyed by choice id and travels with the choice.
+  const bossOrderedChoices = useMemo(() => {
+    if (!bossQuestion) return []
+    if (bossQuestion.bossInteraction?.kind === 'swipe') return bossQuestion.choices
+    return shuffleChoicesForPlayer(bossQuestion.choices, player?.id ?? '', bossQuestion.id)
+  }, [bossQuestion, player?.id])
   const bossSelectedChoiceId = pendingChoiceId || bossSavedAnswer?.selectedChoiceId || ''
   const bossHasAnswered = Boolean(bossSavedAnswer || pendingChoiceId)
 
@@ -127,7 +144,17 @@ export const GamePage = () => {
   const illusionHiddenChoiceId = !isBossPhase && illusionEffect?.itemType === 'illusion' && illusionEffect.affectedQuestionIndex === questionIndex
     ? illusionEffect.hiddenChoiceId ?? null
     : null
-  const visibleChoices = question ? question.choices.filter((choice) => choice.id !== illusionHiddenChoiceId) : []
+  // Illusion removes a choice BY ID, before ordering — so the hidden choice is the same one for
+  // every member of the team regardless of the order each of them sees, and it can never be
+  // "the third button" for one student and a different choice for another.
+  const visibleChoices = useMemo(
+    () => shuffleChoicesForPlayer(
+      question ? question.choices.filter((choice) => choice.id !== illusionHiddenChoiceId) : [],
+      player?.id ?? '',
+      question?.id ?? '',
+    ),
+    [question, illusionHiddenChoiceId, player?.id],
+  )
 
   // Visual-only: is an item effect landing on the question currently on screen? Derived entirely
   // from the existing magic state — the team's own queuedEffect for buffs, and the same
@@ -276,6 +303,7 @@ export const GamePage = () => {
 
   return (
     <ScenePage compact>
+      <PhaseIntro phase={introPhase} entryKey={`${normalizedCode}-${room?.currentRound ?? 0}`} />
       {bossWinnerBanner ? (
         <div className="magic-toast-stack" aria-live="assertive">
           <div className="magic-toast magic-toast-winner">
@@ -312,6 +340,7 @@ export const GamePage = () => {
           // still 'playing'; the Main score is already final and is neither read nor written here.
           <PostTestPhase
             player={player}
+            room={room}
             onAnswer={(input) => service.savePostTestAnswer(normalizedCode, player.id, input)}
           />
         ) : room.phase === 'preTest' ? (
@@ -319,6 +348,7 @@ export const GamePage = () => {
           // shell so routing/session handling stay identical to every other phase.
           <PreTestPhase
             player={player}
+            room={room}
             onAnswer={(input) => service.savePreTestAnswer(normalizedCode, player.id, input)}
           />
         ) : room.phase === 'recall' ? (
@@ -423,7 +453,7 @@ export const GamePage = () => {
                   )
                 })() : (
                   <div className={`boss-rapid-choices boss-rapid-choices-${bossQuestion.bossInteraction?.kind ?? 'legacy'}`}>
-                    {bossQuestion.choices.map((choice, index) => (
+                    {bossOrderedChoices.map((choice, index) => (
                       <button
                         key={choice.id}
                         className={`boss-rapid-choice ${bossSelectedChoiceId === choice.id ? 'boss-rapid-choice-selected' : ''}`}
@@ -475,6 +505,12 @@ export const GamePage = () => {
               <div className="text-right"><p className="text-xs text-[#aaa298]">รอบที่ {room.currentRound}</p><strong className={`question-timer ${remainingMs <= 5_000 ? 'question-timer-urgent' : ''}`}>{timeExpired ? 'หมดเวลา' : formatCountdown(remainingMs)}</strong></div>
             </header>
 
+            {/* Two columns on a landscape tablet: question + answers on the left, the team item
+                panel on the right, so a captain never has to scroll to reach activation. Below
+                the breakpoint this collapses back to the original single column. */}
+            <div className="game-columns">
+              <div className="game-columns-main">
+
             <section className="mt-4" aria-label={`คำถามข้อ ${questionIndex + 1} จาก 10 ข้อ`}>
               <div className="mb-2 flex justify-between text-sm"><span>คำถามที่ {Math.min(questionIndex + 1, 10)} จาก 10</span><span className="text-[#c9a55f]">ทุกคนใช้เวลาเท่ากัน</span></div>
               <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
@@ -487,17 +523,30 @@ export const GamePage = () => {
               {activeEffectKind ? (
                 <>
                   <span className="question-card-effect-frame" aria-hidden="true" />
-                  <span className={`question-card-effect-badge question-card-effect-badge-${activeEffectKind}`}>
-                    {activeEffectKind === 'surge' ? (
-                      <><b>×2</b><small>คะแนนแข่งขัน</small></>
-                    ) : activeEffectKind === 'seal' ? (
-                      <><b>{formatHostilePercent(computeHostileMultiplier(incomingSealCount))}%</b><small>ถูกผนึก</small></>
-                    ) : (
-                      <><b>🔮</b><small>มายา</small></>
-                    )}
-                  </span>
+                  {/* Seal is announced by the in-flow banner below instead of this overhanging
+                      corner badge, which sat outside the card edge and clipped. */}
+                  {activeEffectKind === 'seal' ? null : (
+                    <span className={`question-card-effect-badge question-card-effect-badge-${activeEffectKind}`}>
+                      {activeEffectKind === 'surge'
+                        ? <><b>×2</b><small>คะแนนแข่งขัน</small></>
+                        : <><b>🔮</b><small>มายา</small></>}
+                    </span>
+                  )}
                 </>
               ) : null}
+              {/* Score Seal banner. A normal in-flow block as the first thing in the card, so it
+                  aligns with the card's inner edges by construction — no absolute positioning, no
+                  negative margin, no transform. States the effect once, with one supporting line;
+                  every figure comes from computeHostileMultiplier, the math is untouched. */}
+              {activeEffectKind === 'seal' ? (() => {
+                const sealCopy = buildScoreSealCopy(incomingSealCount)
+                return (
+                  <p className="score-seal-banner" role="status">
+                    <strong>{sealCopy.primary}</strong>
+                    <span>{sealCopy.detail}</span>
+                  </p>
+                )
+              })() : null}
               <div className="flex items-center justify-between gap-3"><span className="category-chip">{categoryLabel}</span><span className="text-sm text-[#aaa298]">เปลี่ยนคำตอบได้จนหมดเวลา</span></div>
               <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{question.question}</h1>
               {illusionHiddenChoiceId ? (
@@ -552,7 +601,9 @@ export const GamePage = () => {
               </section>
             ) : null}
 
-            <p className="mx-auto mt-4 max-w-2xl text-center text-xs leading-relaxed text-[#999187]">เมื่อหมดเวลา ระบบจะแสดงว่าตอบถูกหรือผิดพร้อมคะแนนความรู้สะสมของคุณ แล้วทุกคนจึงเปลี่ยนข้อพร้อมกัน คำตอบของคุณเป็นความลับ เพื่อนร่วมทีมไม่เห็นคำตอบของคุณ</p>
+              </div>
+
+              <aside className="game-columns-side">
 
             {player.teamId ? (
               <MagicPanel
@@ -571,6 +622,8 @@ export const GamePage = () => {
                 onActivate={(itemType, targetTeamId) => service.activateItem(normalizedCode, player.teamId as string, player.id, itemType, targetTeamId)}
               />
             ) : null}
+              </aside>
+            </div>
           </>
         )}
       </div>

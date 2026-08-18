@@ -1,4 +1,4 @@
-import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, RoundHistoryEntry, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
+import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, RoundHistoryEntry, TeacherRoomSummary, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
 
 export interface AnswerInput {
   questionId: string
@@ -82,7 +82,7 @@ export interface GameService {
   // recallQuestionDurationSeconds is optional so existing callers keep working; when omitted the
   // room keeps its current (default) Recall duration.
   // lobby -> preTest. Teacher-only, no-op unless the room is still in 'lobby'.
-  startPreTest(roomCode: string, teacherSessionId: string): Promise<void>
+  startPreTest(roomCode: string, teacherSessionId: string, assessmentDurationSeconds?: number): Promise<void>
   // preTest -> recall. Same teacher-only, stage-guarded shape; a stale click is a safe no-op.
   startRecall(roomCode: string, teacherSessionId: string, recallQuestionDurationSeconds?: number): Promise<void>
   // Room-synchronized Recall advance, mirroring advanceQuestion: expectedRecallIndex makes a
@@ -110,6 +110,9 @@ export interface GameService {
   // advanceBossQuestion's expected-index guards, so a stale/duplicate call is a safe no-op.
   continueAfterBoss(roomCode: string, teacherSessionId: string, expectedRound: number): Promise<void>
   // postTest -> survey. Teacher-only; no-op unless the room is in the post-test stage.
+  // Explicit teacher gate: reaching the postTest stage does not open the test. Until this runs,
+  // students wait and every post-test write is rejected.
+  startPostTest(roomCode: string, teacherSessionId: string, assessmentDurationSeconds?: number): Promise<void>
   startSurvey(roomCode: string, teacherSessionId: string): Promise<void>
   // survey -> completed. Teacher-only; no-op unless the room is in the survey stage. Snapshots
   // this round's history before completing, so assessment data is durable immediately.
@@ -148,6 +151,10 @@ export interface GameService {
   subscribeAllTeamGuardianNames(roomCode: string, listener: (names: TeamGuardianName[]) => void, onError: (message: string) => void): Unsubscribe
   // Teacher-only: immutable per-round learning snapshots for this room, written by the
   // round-ending operations before player data is reset.
+  // Read-only room history. Returns ONLY rooms whose teacherSessionId is this teacher, newest
+  // first. There is deliberately no counterpart that reopens or mutates an old room — the history
+  // screen can look, print and export, and nothing else.
+  listTeacherRooms(teacherSessionId: string): Promise<TeacherRoomSummary[]>
   subscribeRoundHistory(roomCode: string, listener: (entries: RoundHistoryEntry[]) => void, onError: (message: string) => void): Unsubscribe
   setTeamGuardianName(roomCode: string, teamId: string, playerId: string, name: string): Promise<void>
   resetTeamGuardianName(roomCode: string, teacherSessionId: string, teamId: string): Promise<void>

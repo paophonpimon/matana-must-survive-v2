@@ -1,11 +1,13 @@
 import { createPortal } from 'react-dom'
 import type { EvidenceSummary } from '../lib/evidenceSummary'
-import type { Player } from '../types/game'
+import type { PrintablePlayer } from '../lib/roomHistory'
 
 interface TeacherReportPrintViewProps {
   roomCode: string
   round: number
-  players: Player[]
+  // Widened from Player[] to the minimal printable shape so a recorded round can satisfy it
+  // from its own immutable snapshot. The live caller passes real Players and is unaffected.
+  players: PrintablePlayer[]
   questionIds: string[]
   teamNameById: Map<string, string>
   // Computed by computeEvidenceSummaryFromHistory — the same function the on-screen panel and

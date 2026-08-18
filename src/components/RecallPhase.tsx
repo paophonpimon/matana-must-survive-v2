@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { shuffleChoicesForPlayer } from '../lib/choiceOrder'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
-import { getRemainingMilliseconds } from '../lib/gameFlow'
+import { getRemainingMilliseconds, recallQuestionTiming } from '../lib/gameFlow'
 import { friendlyError } from '../services'
 import type { RecallAnswerInput } from '../services/gameService'
 import { RECALL_QUESTION_COUNT, type Player, type Room } from '../types/game'
@@ -32,16 +33,20 @@ export const RecallPhase = ({ player, room, onAnswer }: RecallPhaseProps) => {
   const totalCount = RECALL_QUESTION_COUNT
   const questionIndex = room.recallQuestionIndex
   const currentQuestion = RECALL_QUESTIONS[questionIndex]
+  // Per-student choice order, derived from (playerId, conceptId). Correctness below still
+  // compares choice.id, so a different order per student changes nothing about scoring.
+  // Declared above the early return so the hook order is identical on every render.
+  const orderedChoices = useMemo(
+    () => shuffleChoicesForPlayer(currentQuestion?.choices ?? [], player.id, currentQuestion?.id ?? ''),
+    [currentQuestion, player.id],
+  )
+
   const answeredRecord = currentQuestion
     ? player.recallAnswers.find((entry) => entry.conceptId === currentQuestion.id)
     : undefined
 
   // Same timing helpers Main uses, fed a recall-shaped timing object.
-  const recallTiming = {
-    questionStartedAt: room.recallQuestionStartedAt,
-    questionDurationSeconds: room.recallQuestionDurationSeconds,
-    questionClosedAt: null,
-  }
+  const recallTiming = recallQuestionTiming(room)
   const remainingMs = currentQuestion ? getRemainingMilliseconds(recallTiming, now) : 0
   const secondsLeft = Math.max(0, Math.ceil(remainingMs / 1_000))
   const timeExpired = remainingMs <= 0
@@ -91,6 +96,7 @@ export const RecallPhase = ({ player, room, onAnswer }: RecallPhaseProps) => {
   // Once the countdown expires the answer is revealed to everyone, answered or not.
   const revealing = timeExpired || Boolean(answeredRecord)
 
+
   return (
     <div className="recall-phase">
       <header className="recall-phase-header">
@@ -119,7 +125,7 @@ export const RecallPhase = ({ player, room, onAnswer }: RecallPhaseProps) => {
         <p className="recall-question-label">{currentQuestion.label}</p>
         <h1 className="recall-question-prompt">{currentQuestion.prompt}</h1>
         <div className="recall-choice-grid">
-          {currentQuestion.choices.map((choice, index) => {
+          {orderedChoices.map((choice, index) => {
             const isSelected = answeredRecord?.selectedChoiceId === choice.id
             const isCorrectChoice = choice.id === currentQuestion.correctChoiceId
             const resultClass = revealing

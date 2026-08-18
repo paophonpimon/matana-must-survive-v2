@@ -2089,6 +2089,13 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .setup-field-label strong { display: block; color: var(--ink); font-size: clamp(0.95rem, 1.1vw, 1.05rem); font-weight: 700; }
 .setup-field-label small { display: block; margin-top: 0.1rem; color: var(--ink-faint); font-size: 0.76rem; }
 
+/* ---- The one numeric stepper -------------------------------------------------
+   Team Setup owns this visual language, and every numeric setting in the app now renders through
+   NumberStepper onto these same classes, so the polish below applies everywhere at once and no
+   second stepper style can appear.
+
+   Raised crimson buttons + a warm cream field, with real press feedback: lift on hover, visibly
+   depress on press, spring back on release, and a small bump on the number when the value moves. */
 .setup-stepper { display: inline-flex; align-items: center; gap: 0.4rem; flex: none; }
 .setup-stepper button {
   display: grid;
@@ -2103,11 +2110,45 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   font-weight: 700;
   line-height: 1;
   background: linear-gradient(180deg, #a72333, #7d1522);
-  transition: background 160ms ease, transform 140ms ease;
+  /* Raised: a warm drop shadow plus an inner top highlight and inner bottom shade give the cap
+     its thickness without any images. */
+  box-shadow:
+    0 2px 0 rgba(92, 15, 25, 0.9),
+    0 4px 10px rgba(38, 8, 14, 0.38),
+    inset 0 1px 0 rgba(255, 220, 200, 0.32),
+    inset 0 -2px 4px rgba(70, 8, 16, 0.45);
+  /* Overshooting cubic-bezier on release gives the spring-back without a keyframe animation. */
+  transition: background 160ms ease, transform 130ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 130ms ease;
+  /* Kills the tap highlight and double-tap zoom so a tablet press reads as a button press. */
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
-@media (hover: hover) { .setup-stepper button:hover:not(:disabled) { background: linear-gradient(180deg, #bd2b3d, #8e1a29); } }
-.setup-stepper button:active:not(:disabled) { transform: translateY(1px); }
-.setup-stepper button:disabled { color: rgba(253, 241, 220, 0.6); background: linear-gradient(180deg, #9a8b8d, #837577); }
+@media (hover: hover) {
+  .setup-stepper button:hover:not(:disabled) {
+    background: linear-gradient(180deg, #bd2b3d, #8e1a29);
+    transform: translateY(-1px);
+    box-shadow:
+      0 3px 0 rgba(92, 15, 25, 0.9),
+      0 7px 16px rgba(38, 8, 14, 0.45),
+      inset 0 1px 0 rgba(255, 220, 200, 0.4),
+      inset 0 -2px 4px rgba(70, 8, 16, 0.45);
+  }
+}
+/* Pressed: the cap sinks onto its shadow. Same treatment for a real tap on touch devices. */
+.setup-stepper button:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow:
+    0 0 0 rgba(92, 15, 25, 0.9),
+    0 1px 3px rgba(38, 8, 14, 0.4),
+    inset 0 2px 5px rgba(70, 8, 16, 0.5);
+  transition-duration: 60ms;
+}
+.setup-stepper button:focus-visible { outline: 2px solid #f2d58d; outline-offset: 2px; }
+.setup-stepper button:disabled {
+  color: rgba(253, 241, 220, 0.6);
+  background: linear-gradient(180deg, #9a8b8d, #837577);
+  box-shadow: 0 1px 0 rgba(80, 70, 72, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
 .setup-stepper input {
   width: 4.4rem;
   height: 2.6rem;
@@ -2118,9 +2159,30 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   text-align: center;
-  background: #fff;
+  /* Warm cream, inset so it reads as a recess between two raised caps. */
+  background: linear-gradient(180deg, #fffaf0, #f6ecd8);
+  box-shadow: inset 0 2px 4px rgba(120, 94, 58, 0.22), 0 1px 0 rgba(255, 255, 255, 0.5);
 }
-.setup-stepper input:disabled { color: var(--ink-faint); background: #efeae0; }
+.setup-stepper input:focus-visible { outline: 2px solid #c9a55f; outline-offset: 1px; }
+.setup-stepper input:disabled { color: var(--ink-faint); background: #efeae0; box-shadow: none; }
+/* Native spinners would be a second, inconsistent way to step. */
+.setup-stepper input::-webkit-outer-spin-button,
+.setup-stepper input::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.setup-stepper input { appearance: textfield; -moz-appearance: textfield; }
+
+/* Value bump: scale only, ~160ms, so it registers as feedback without moving the layout. */
+.setup-stepper input.is-bumping { animation: stepper-bump 160ms ease-out; }
+@keyframes stepper-bump {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.09); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-stepper button { transition: background 160ms ease; }
+  .setup-stepper button:hover:not(:disabled), .setup-stepper button:active:not(:disabled) { transform: none; }
+  .setup-stepper input.is-bumping { animation: none; }
+}
 
 .setup-action {
   flex: none;
@@ -2970,4 +3032,440 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .petal-field { display: none; }
   .victory-rays { animation: none; }
   .victory-fireworks i { animation: none; opacity: 0.45; transform: scale(0.65); }
+}
+
+/* ================= Assessment total timer =====================================
+   One budget for the whole 10-item test. Deliberately understated: a neutral readout that only
+   gains colour in the final 30 seconds, so it informs without turning a measurement into a race. */
+.assessment-timer {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.7rem;
+  background: rgba(20, 12, 38, 0.45);
+}
+.assessment-timer small { font-size: 0.68rem; color: #aaa298; letter-spacing: 0.04em; }
+.assessment-timer strong { font-size: 1.15rem; color: #f2d58d; font-variant-numeric: tabular-nums; }
+/* Final stretch. Amber, not red — a warning, not a penalty. */
+.assessment-timer-warning { border-color: rgba(242, 213, 141, 0.55); background: rgba(78, 56, 18, 0.4); }
+.assessment-timer-warning strong { color: #ffd98a; }
+.assessment-timer-expired strong { color: #d99a9a; font-size: 1rem; }
+/* Teacher stage variant: centred and a little larger, since it is read from across a room. */
+.assessment-timer-stage { align-items: center; margin: 0.5rem auto 0; }
+.assessment-timer-stage strong { font-size: 1.6rem; }
+
+.assessment-warning {
+  border-left: 3px solid rgba(242, 213, 141, 0.7);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.4rem;
+  background: rgba(78, 56, 18, 0.32);
+  color: #ffe6ad;
+  font-size: 0.9rem;
+}
+
+.assessment-stage-budget {
+  margin-top: 0.5rem;
+  color: #d8d1c5;
+  font-size: 0.95rem;
+}
+
+/* Timed-out student chip: distinct from both "done" (green) and "in progress" (neutral), because
+   the difference matters — a timed-out student is incomplete, not merely slow. */
+.recall-player-chip-timeout {
+  border-color: rgba(217, 154, 154, 0.45);
+  background: rgba(64, 28, 32, 0.4);
+  color: #f0d6d6;
+}
+.recall-player-chip-timeout b { color: #e8a9a9; }
+
+/* ================= Phase intro transition =====================================
+   A short CSS-only cutscene between MAJOR activities. Dark wash + vignette + two lines that fade
+   in and back out. No artwork, no images, no sound — real artwork arrives separately.
+
+   Total length matches PHASE_INTRO_MILLISECONDS (1.8s), which the services also use to offset
+   every timed activity's start instant, so nothing loses time to this. */
+.phase-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: #0b0714;
+  animation: phase-intro-wash 1.8s ease-in-out forwards;
+  pointer-events: none;
+}
+.phase-intro-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(120, 40, 70, 0.28) 0%, rgba(11, 7, 20, 0.85) 62%, #0b0714 100%);
+}
+.phase-intro-copy {
+  position: relative;
+  padding: 0 1.5rem;
+  text-align: center;
+  animation: phase-intro-text 1.8s ease-out forwards;
+}
+.phase-intro-eyebrow {
+  color: #c9566f;
+  font-size: clamp(0.85rem, 2vw, 1rem);
+  letter-spacing: 0.32em;
+  text-transform: none;
+}
+.phase-intro-title {
+  margin-top: 0.75rem;
+  color: #f5e6c8;
+  font-family: var(--font-display, inherit);
+  font-size: clamp(1.5rem, 4.5vw, 2.6rem);
+  line-height: 1.35;
+  text-shadow: 0 0 28px rgba(201, 86, 111, 0.35);
+}
+/* Opaque in, hold, then out — the activity underneath is already mounted and simply revealed. */
+@keyframes phase-intro-wash {
+  0% { opacity: 0; }
+  14% { opacity: 1; }
+  72% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes phase-intro-text {
+  0% { opacity: 0; transform: translateY(0.6rem); }
+  26% { opacity: 1; transform: translateY(0); }
+  70% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-0.35rem); }
+}
+/* Respect a reduced-motion preference: keep the beat, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .phase-intro, .phase-intro-copy { animation-duration: 1.8s; }
+  .phase-intro-copy { animation-name: phase-intro-wash; }
+}
+
+/* ================= Landscape gameplay: two columns =============================
+   Target is a 1180x800 / 1280x800 landscape tablet, where the single-column layout pushed the
+   item panel below the fold and a captain had to scroll mid-question to activate anything.
+
+   Below the breakpoint nothing changes — the grid is a single column, so phones and portrait
+   tablets keep the original stacked order. */
+.game-columns { display: grid; gap: 1rem; }
+.game-columns-side { min-width: 0; }
+.game-columns-main { min-width: 0; }
+
+@media (min-width: 1024px) and (orientation: landscape) {
+  .game-columns {
+    grid-template-columns: minmax(0, 1.55fr) minmax(20rem, 0.95fr);
+    gap: clamp(0.9rem, 1.6vw, 1.5rem);
+    align-items: start;
+  }
+  /* Each column scrolls internally rather than the page, so the question and the item controls
+     are both reachable without moving the other out of view. */
+  .game-columns-main, .game-columns-side {
+    max-height: calc(100dvh - 11rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
+/* Height-constrained landscape (the 800px-tall tablets specifically): compress the vertical
+   rhythm rather than introducing a page scroll. Touch targets are deliberately untouched. */
+@media (min-width: 1024px) and (orientation: landscape) and (max-height: 900px) {
+  .game-header { padding-block: 0.5rem; }
+  .question-card { padding: clamp(0.85rem, 1.5vw, 1.15rem); }
+  .question-card h1 { margin-top: 0.75rem; font-size: clamp(1.05rem, 1.7vw, 1.3rem); line-height: 1.5; }
+  .question-card .choice-button { padding-block: 0.6rem; }
+  .feedback-region { margin-top: 0.75rem; min-height: 2.5rem; }
+  /* Long explanatory paragraphs are the main source of dead vertical space here. The information
+     is repeated in the panel itself, so it is hidden at this size rather than shortened. */
+  .game-columns-main > p.mx-auto { display: none; }
+  .magic-panel-note, .magic-panel-longform { display: none; }
+}
+
+/* ---- Score Seal banner ----
+   A normal in-flow block inside the question card, so it inherits the card's content width and
+   aligns with its inner edges automatically. Deliberately no absolute positioning, no negative
+   margin and no transform — those are what pushed the old corner badge outside the card. */
+.score-seal-banner {
+  display: grid;
+  gap: 0.2rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 0.9rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid rgba(224, 138, 138, 0.55);
+  /* Matches the question card's own radius, one step in. */
+  border-radius: 0.7rem;
+  background: linear-gradient(180deg, rgba(104, 32, 48, 0.55), rgba(64, 20, 32, 0.5));
+  box-shadow: inset 0 1px 0 rgba(255, 210, 210, 0.12);
+}
+.score-seal-banner strong { color: #ffd9df; font-size: clamp(1rem, 1.6vw, 1.15rem); font-weight: 800; }
+.score-seal-banner span { color: #e8d3d6; font-size: clamp(0.82rem, 1.2vw, 0.92rem); }
+
+/* ---- Target team picker ---- */
+.target-team-field { display: grid; gap: 0.4rem; }
+.target-team-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid rgba(242, 213, 141, 0.45);
+  border-radius: 0.7rem;
+  background: rgba(46, 26, 20, 0.55);
+  color: #f2d58d;
+  font-weight: 600;
+}
+.target-team-trigger:disabled { opacity: 0.55; }
+.target-team-selected { display: grid; gap: 0.1rem; color: #fff7df; font-size: 0.9rem; }
+.target-team-selected strong { color: #f2d58d; }
+.target-team-selected small { color: #aaa298; font-size: 0.75rem; }
+.target-team-empty-hint { color: #8b8377; font-size: 0.85rem; }
+
+.target-team-backdrop { z-index: 130; }
+.target-team-modal { width: min(34rem, 92vw); max-height: 86dvh; overflow-y: auto; }
+.target-team-title { margin-bottom: 0.9rem; font-size: 1.25rem; font-weight: 600; text-align: center; }
+.target-team-grid { display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+/* Large touch targets — the whole point of replacing the native dropdown. */
+.target-team-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 4rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.8rem;
+  background: rgba(20, 12, 38, 0.55);
+  color: #fff7df;
+  font-size: 1rem;
+  text-align: left;
+}
+.target-team-card-selected { border-color: rgba(242, 213, 141, 0.75); background: rgba(78, 56, 18, 0.45); }
+.target-team-mark { font-size: 1.35rem; }
+.target-team-empty { margin: 0.5rem 0; color: #8b8377; text-align: center; }
+
+/* ================= Seconds stepper =============================================
+   Reusable [-] [value] [+] control for numeric settings. Steps by exactly 1 — these are short
+   durations where a larger jump overshoots, and one step size keeps adjacent controls consistent. */
+.seconds-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+.seconds-stepper-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Comfortable touch target on a tablet without dominating the settings panel. */
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid rgba(242, 213, 141, 0.45);
+  border-radius: 0.6rem;
+  background: rgba(46, 26, 20, 0.55);
+  color: #f2d58d;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+.seconds-stepper-button:disabled { opacity: 0.4; }
+.seconds-stepper-value {
+  width: 4.5rem;
+  padding: 0.55rem 0.4rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* Native spinners would offer a second, inconsistent way to step — the buttons are the control. */
+.seconds-stepper-value::-webkit-outer-spin-button,
+.seconds-stepper-value::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.seconds-stepper-value { appearance: textfield; -moz-appearance: textfield; }
+.seconds-stepper-unit { color: #c0b7ab; font-size: 0.9rem; }
+.assessment-stage-live { color: #9ee6b4; }
+
+/* Captain crown inside the Team Setup roster cards. Identity moved here from the removed per-team
+   admin block; the flag comes from the persisted magicHolderPlayerId, never from list order. */
+.setup-group-name { display: inline-flex; align-items: baseline; gap: 0.35rem; }
+.setup-group-crown { font-size: 0.9em; line-height: 1; }
+
+/* Team-setup readiness badge. Says only THAT a starting item was chosen, never which one — this
+   screen is projected, so the item itself stays secret until the team actually activates it. */
+.setup-group-ready {
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid rgba(126, 176, 137, 0.5);
+  border-radius: 999px;
+  background: rgba(226, 240, 228, 0.75);
+  color: #2f6b41;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Captain label beside the crown. Kept small and muted so the student's own name still leads. */
+.setup-group-captain-tag { color: var(--ink-faint, #8d8275); font-size: 0.72rem; font-weight: 600; }
+
+/* ================= Teacher boss board =========================================
+   The boss phase is a special event, so it gets a darker, warmer treatment than the ordinary
+   scoreboard strip it replaces. Projector-first: large type, high contrast, generous spacing,
+   and states readable as shape + colour so they carry from the back of a room.
+
+   Performance: only transform/opacity/box-shadow animate, on a handful of elements. No particles
+   canvas, no per-frame JS, nothing that scales with the number of students. */
+.boss-board {
+  position: relative;
+  overflow: hidden;
+  margin-top: 0.75rem;
+  padding: clamp(1rem, 2vw, 1.6rem);
+  border: 1px solid rgba(242, 213, 141, 0.35);
+  border-radius: 1rem;
+  background:
+    radial-gradient(ellipse at 50% -10%, rgba(167, 35, 51, 0.35), transparent 62%),
+    linear-gradient(180deg, #1a0f24, #120a19);
+  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 220, 180, 0.12);
+}
+/* Slow gold/crimson breathing glow — one element, transform + opacity only. */
+.boss-board-aura {
+  position: absolute;
+  inset: -40% -20% auto;
+  height: 90%;
+  background: radial-gradient(ellipse at center, rgba(242, 213, 141, 0.16), transparent 65%);
+  animation: boss-aura 6s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes boss-aura {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.08); }
+}
+
+.boss-board-hero { position: relative; text-align: center; }
+.boss-board-live {
+  display: inline-block;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid rgba(233, 107, 128, 0.6);
+  border-radius: 999px;
+  background: rgba(120, 24, 40, 0.55);
+  color: #ffc9d2;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  animation: boss-live-pulse 2s ease-in-out infinite;
+}
+@keyframes boss-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.boss-board-title {
+  margin-top: 0.35rem;
+  color: #ffe7b8;
+  font-family: var(--font-display, inherit);
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  line-height: 1.1;
+  text-shadow: 0 0 30px rgba(242, 213, 141, 0.4);
+}
+.boss-board-subtitle { margin-top: 0.2rem; color: #d9c9b4; font-size: clamp(0.85rem, 1.5vw, 1rem); }
+
+.boss-board-strip {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+  margin-top: clamp(0.8rem, 1.6vw, 1.2rem);
+}
+.boss-board-stat, .boss-board-timer {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid rgba(242, 213, 141, 0.22);
+  border-radius: 0.7rem;
+  background: rgba(255, 255, 255, 0.05);
+  text-align: center;
+}
+.boss-board-stat small, .boss-board-timer small { color: #b6a894; font-size: 0.72rem; letter-spacing: 0.08em; }
+.boss-board-stat strong { color: #fff7df; font-size: clamp(1.4rem, 2.6vw, 2rem); font-variant-numeric: tabular-nums; }
+.boss-board-stat strong span { color: #9d9182; font-size: 0.55em; }
+.boss-board-reward strong { font-size: clamp(0.85rem, 1.3vw, 1rem); color: #f2d58d; line-height: 1.3; }
+/* The timer is the loudest thing on the board. */
+.boss-board-timer strong {
+  color: #ffe7b8;
+  font-size: clamp(2rem, 4.5vw, 3.2rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.boss-board-timer.is-urgent {
+  border-color: rgba(233, 107, 128, 0.75);
+  background: rgba(120, 24, 40, 0.4);
+  animation: boss-urgent 700ms ease-in-out infinite;
+}
+.boss-board-timer.is-urgent strong { color: #ff9fae; }
+@keyframes boss-urgent { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+.boss-board-timer.is-done strong { color: #ff9fae; font-size: clamp(1.5rem, 3vw, 2.2rem); }
+
+.boss-board-outcome {
+  position: relative;
+  margin-top: 0.8rem;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid rgba(242, 213, 141, 0.3);
+  border-radius: 0.7rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: #ffe7b8;
+  font-size: clamp(1rem, 2vw, 1.35rem);
+  font-weight: 700;
+  text-align: center;
+}
+.boss-board-outcome.is-winner {
+  border-color: rgba(242, 213, 141, 0.8);
+  background: linear-gradient(180deg, rgba(122, 82, 22, 0.6), rgba(74, 48, 16, 0.5));
+  box-shadow: 0 0 1.6rem rgba(233, 179, 79, 0.35);
+}
+
+.boss-board-teams {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+  padding: 0;
+  list-style: none;
+}
+.boss-team-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.8rem;
+  background: rgba(20, 12, 30, 0.6);
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease;
+}
+.boss-team-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.boss-team-head strong { color: #fff7df; font-size: clamp(1rem, 1.7vw, 1.2rem); }
+.boss-team-meta { display: flex; flex-wrap: wrap; gap: 0.6rem; color: #b6a894; font-size: 0.82rem; }
+.boss-team-chip {
+  margin-left: auto;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+/* Distinct border + glow per state, so the state reads from a distance without relying on the
+   chip text alone. */
+.boss-team-card.is-waiting { opacity: 0.75; }
+.boss-team-chip.is-waiting { color: #9d9182; }
+.boss-team-card.is-answered { border-color: rgba(150, 190, 230, 0.5); }
+.boss-team-chip.is-answered { color: #a9cbe8; }
+.boss-team-card.is-correct { border-color: rgba(126, 220, 157, 0.6); box-shadow: 0 0 1rem rgba(126, 220, 157, 0.22); }
+.boss-team-chip.is-correct { color: #9ee6b4; }
+.boss-team-card.is-wrong { border-color: rgba(224, 138, 138, 0.5); }
+.boss-team-chip.is-wrong { color: #e8a9a9; }
+.boss-team-card.is-leading { border-color: rgba(242, 213, 141, 0.8); box-shadow: 0 0 1.4rem rgba(233, 179, 79, 0.3); transform: translateY(-2px); }
+.boss-team-chip.is-leading { color: #f2d58d; }
+.boss-team-card.is-tied { border-color: rgba(201, 165, 240, 0.7); box-shadow: 0 0 1.2rem rgba(160, 120, 220, 0.25); }
+.boss-team-chip.is-tied { color: #c9a5f0; }
+.boss-team-card.is-winner {
+  border-color: rgba(242, 213, 141, 0.95);
+  background: linear-gradient(180deg, rgba(122, 82, 22, 0.55), rgba(40, 24, 12, 0.7));
+  box-shadow: 0 0 2rem rgba(233, 179, 79, 0.45);
+  transform: translateY(-3px);
+}
+.boss-team-chip.is-winner { color: #ffe7b8; }
+.boss-board-empty { color: #9d9182; text-align: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boss-board-aura, .boss-board-live, .boss-board-timer.is-urgent { animation: none; }
+  .boss-team-card { transition: none; transform: none; }
 }

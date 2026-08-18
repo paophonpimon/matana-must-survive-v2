@@ -109,7 +109,15 @@ service cloud.firestore {
 
     match /rooms/{roomCode} {
       // MVP: ผู้ใช้ที่ยืนยันตัวตนแบบ anonymous อ่านข้อมูลห้องได้เพื่อเข้าร่วมด้วยรหัส
-      allow read: if signedIn();
+      // get stays open to any signed-in user: joining a room means reading it by code before
+      // any membership exists, so there is nothing yet to authorize against.
+      allow get: if signedIn();
+      // list is NEW and deliberately narrower than the old blanket read. The teacher room-history
+      // screen queries rooms where teacherSessionId == uid; Firestore evaluates a list rule
+      // against every candidate document, so this clause only ever succeeds for a query already
+      // constrained to the caller. An unconstrained listing of rooms — which the previous
+      // `allow read` silently permitted — is now rejected outright.
+      allow list: if signedIn() && resource.data.teacherSessionId == request.auth.uid;
       allow create: if signedIn()
         && request.resource.data.teacherSessionId == request.auth.uid
         && request.resource.data.roomCode == roomCode

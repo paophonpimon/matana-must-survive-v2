@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundMusicControls } from '../components/BackgroundMusicControls'
+import { BossBoard } from '../components/BossBoard'
 import { BossResultDetails } from '../components/BossResultDetails'
 import { EvidenceSummaryPanel } from '../components/EvidenceSummaryPanel'
 import { TeacherReportPrintView } from '../components/TeacherReportPrintView'
@@ -7,11 +8,13 @@ import { GrimoireModal } from '../components/GrimoireModal'
 import { Link } from 'react-router-dom'
 import { ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '../components/Layout'
 import { MagicItemIcon } from '../components/MagicItemIcon'
+import { NumberStepper, SettingStepper } from '../components/NumberStepper'
+import { TeacherAssessmentStage } from '../components/TeacherAssessmentStage'
 import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
 import { useBackgroundMusic } from '../hooks/useBackgroundMusic'
 import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers, useRoundHistory } from '../hooks/useGameData'
-import { ANSWER_REVEAL_MILLISECONDS, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed } from '../lib/gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, RECALL_REVEAL_MILLISECONDS, bossQuestionTiming, isAssessmentExpired, postTestWindow, preTestWindow, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed, mainQuestionTiming, recallQuestionTiming } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
 import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
@@ -31,6 +34,9 @@ import {
   MAX_BOSS_SECONDS_PER_QUESTION,
   MAX_RECALL_SECONDS_PER_ITEM,
   MIN_BOSS_SECONDS_PER_QUESTION,
+  MAX_ASSESSMENT_SECONDS_PER_QUESTION,
+  MIN_ASSESSMENT_SECONDS_PER_QUESTION,
+  DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
   MIN_RECALL_SECONDS_PER_ITEM,
   RECALL_QUESTION_COUNT,
   RECALL_SECONDS_PER_ITEM,
@@ -130,6 +136,7 @@ export const TeacherPage = () => {
   // Teacher-configurable timers, both in plain seconds and both defaulted to the values the game
   // used before they were configurable.
   const [recallDurationValue, setRecallDurationValue] = useState(String(RECALL_SECONDS_PER_ITEM))
+  const [assessmentDurationValue, setAssessmentDurationValue] = useState(String(DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION))
   const [bossDurationValue, setBossDurationValue] = useState(String(DEFAULT_BOSS_QUESTION_DURATION_SECONDS))
   const [teamCountValue, setTeamCountValue] = useState('2')
   const [resultsTab, setResultsTab] = useState<'team' | 'individual'>('team')
@@ -142,6 +149,10 @@ export const TeacherPage = () => {
   const parsedDuration = Number(durationValue)
   const questionDurationSeconds = Math.round(parsedDuration * (durationUnit === 'minutes' ? 60 : 1))
   const durationValid = Number.isFinite(questionDurationSeconds) && questionDurationSeconds >= 5 && questionDurationSeconds <= 600
+  // Seconds PER QUESTION, same unit and same step size as the Recall control beside it.
+  const assessmentSecondsPerQuestion = Math.round(Number(assessmentDurationValue))
+  const assessmentDurationValid = Number.isFinite(assessmentSecondsPerQuestion)
+    && assessmentSecondsPerQuestion >= MIN_ASSESSMENT_SECONDS_PER_QUESTION && assessmentSecondsPerQuestion <= MAX_ASSESSMENT_SECONDS_PER_QUESTION
   const recallDurationSeconds = Math.round(Number(recallDurationValue))
   const recallDurationValid = Number.isFinite(recallDurationSeconds)
     && recallDurationSeconds >= MIN_RECALL_SECONDS_PER_ITEM && recallDurationSeconds <= MAX_RECALL_SECONDS_PER_ITEM
@@ -150,8 +161,9 @@ export const TeacherPage = () => {
     && bossDurationSeconds >= MIN_BOSS_SECONDS_PER_QUESTION && bossDurationSeconds <= MAX_BOSS_SECONDS_PER_QUESTION
   const parsedTeamCount = Math.round(Number(teamCountValue))
   const teamCountValid = Number.isFinite(parsedTeamCount) && parsedTeamCount >= 1 && parsedTeamCount <= 20
-  const remainingMs = roomState.data ? getRemainingMilliseconds(roomState.data, now) : 0
-  const revealRemainingMs = roomState.data ? getRevealRemainingMilliseconds(roomState.data, now) : 0
+  const mainTiming = roomState.data ? mainQuestionTiming(roomState.data) : null
+  const remainingMs = mainTiming ? getRemainingMilliseconds(mainTiming, now) : 0
+  const revealRemainingMs = mainTiming ? getRevealRemainingMilliseconds(mainTiming, now) : 0
   const currentQuestionId = roomState.data?.questionIds[roomState.data.currentQuestionIndex]
 
   // Milestone 4: boss-phase timing mirrors the main flow's, fed a boss-shaped
@@ -193,15 +205,11 @@ export const TeacherPage = () => {
   // Recall progress is the ROOM's shared timeline, not any student's own answer count.
   const recallQuestionIndex = roomState.data?.recallQuestionIndex ?? 0
   const recallSequenceFinished = recallQuestionIndex >= RECALL_QUESTION_COUNT
-  const bossTiming = roomState.data ? { questionStartedAt: roomState.data.bossQuestionStartedAt, questionDurationSeconds: roomState.data.bossQuestionDurationSeconds, questionClosedAt: null } : null
+  const bossTiming = roomState.data ? bossQuestionTiming(roomState.data) : null
   const bossRemainingMs = bossTiming ? getRemainingMilliseconds(bossTiming, now) : 0
   const bossDeadline = bossTiming ? getQuestionDeadline(bossTiming) : null
   const bossRevealRemainingMs = bossDeadline != null && now >= bossDeadline
     ? Math.max(0, bossDeadline + BOSS_REVEAL_MILLISECONDS - now)
-    : 0
-  const currentBossQuestionId = roomState.data?.bossQuestionIds[roomState.data.bossQuestionIndex]
-  const bossAnsweredCount = currentBossQuestionId
-    ? playersState.data.filter((player) => player.bossAnswers.some((answer) => answer.questionId === currentBossQuestionId)).length
     : 0
 
   // While a question is live, hide each player's just-answered (unrevealed) score bump from
@@ -417,7 +425,7 @@ export const TeacherPage = () => {
     const tick = (): void => {
       const currentTime = Date.now()
       setNow(currentTime)
-      const deadline = getQuestionDeadline(room)
+      const deadline = getQuestionDeadline(mainQuestionTiming(room))
       const recentlyAttempted = advancingQuestion.current.key === questionKey && currentTime - advancingQuestion.current.attemptedAt < 3_000
       if (deadline == null || currentTime < deadline + ANSWER_REVEAL_MILLISECONDS || recentlyAttempted) return
       advancingQuestion.current = { key: questionKey, attemptedAt: currentTime }
@@ -447,15 +455,12 @@ export const TeacherPage = () => {
     const tick = (): void => {
       const currentTime = Date.now()
       setNow(currentTime)
-      const deadline = getQuestionDeadline({
-        questionStartedAt: room.recallQuestionStartedAt,
-        questionDurationSeconds: room.recallQuestionDurationSeconds,
-        questionClosedAt: null,
-      })
+      const deadline = getQuestionDeadline(recallQuestionTiming(room))
       const recentlyAttempted = advancingRecallQuestion.current.key === recallKey && currentTime - advancingRecallQuestion.current.attemptedAt < 3_000
-      // The existing 4-second reveal window applies here too, so the correct answer and feedback
-      // stay on screen before everyone moves on together.
-      if (deadline == null || currentTime < deadline + ANSWER_REVEAL_MILLISECONDS || recentlyAttempted) return
+      // Recall uses its OWN, much shorter reveal window (~1s) rather than Main's 4s: five short
+      // review items back to back made the longer hold read as dead air. Main is untouched — it
+      // still needs the longer pause for the competitive score breakdown.
+      if (deadline == null || currentTime < deadline + RECALL_REVEAL_MILLISECONDS || recentlyAttempted) return
       advancingRecallQuestion.current = { key: recallKey, attemptedAt: currentTime }
       void service.advanceRecallQuestion(roomCode, teacherSessionId, room.recallQuestionIndex).catch((reason) => {
         advancingRecallQuestion.current = { key: '', attemptedAt: 0 }
@@ -483,7 +488,7 @@ export const TeacherPage = () => {
     const tick = (): void => {
       const currentTime = Date.now()
       setNow(currentTime)
-      const deadline = getQuestionDeadline({ questionStartedAt: room.bossQuestionStartedAt, questionDurationSeconds: room.bossQuestionDurationSeconds, questionClosedAt: null })
+      const deadline = getQuestionDeadline(bossQuestionTiming(room))
       const recentlyAttempted = advancingBossQuestion.current.key === bossKey && currentTime - advancingBossQuestion.current.attemptedAt < 3_000
       if (deadline == null || currentTime < deadline + BOSS_REVEAL_MILLISECONDS || recentlyAttempted) return
       advancingBossQuestion.current = { key: bossKey, attemptedAt: currentTime }
@@ -618,7 +623,7 @@ export const TeacherPage = () => {
     // Kicked off synchronously inside the click, before the async service call — browsers only
     // allow play() from a real user gesture, and awaiting the transition first would lose it.
     backgroundMusic.start()
-    runStageTransition(() => service.startPreTest(roomCode, teacherSessionId))
+    runStageTransition(() => service.startPreTest(roomCode, teacherSessionId, assessmentSecondsPerQuestion))
   }
   const handleStartRecall = (): void => {
     backgroundMusic.start()
@@ -634,6 +639,23 @@ export const TeacherPage = () => {
     }
     handleStartRecall()
   }
+  // Rows for the shared assessment stage view. Counts only — no answer content ever reaches the
+  // teacher screen, which may be projected.
+  const assessmentStudents = (which: 'pre' | 'post') => sortedPlayers.map((player) => {
+    const answers = which === 'pre' ? player.preTestAnswers : player.postTestAnswers
+    const room = roomState.data
+    // Timed out is now PER STUDENT: each one's current question has its own window, derived from
+    // when that question appeared for them.
+    const timedOut = room != null && isAssessmentExpired(
+      which === 'pre' ? preTestWindow(room, answers) : postTestWindow(room, answers),
+      now,
+    )
+    return { id: player.id, displayName: player.displayName, answeredCount: answers.length, timedOut }
+  })
+  // Opens the post-test. Until this runs the room is on the postTest STAGE but the test itself is
+  // closed, so students wait and their answer writes are rejected.
+  const handleStartPostTest = (): void =>
+    runStageTransition(() => service.startPostTest(roomCode, teacherSessionId, assessmentSecondsPerQuestion))
   const handleStartSurvey = (): void => runStageTransition(() => service.startSurvey(roomCode, teacherSessionId))
   const handleCompleteRound = (): void => runStageTransition(() => service.completeRound(roomCode, teacherSessionId))
   const handleStartTeamSetup = (): void => runStageTransition(() => service.startTeamSetup(roomCode, teacherSessionId))
@@ -934,25 +956,12 @@ export const TeacherPage = () => {
   const StageRoomControls = () => (
     <div className="stage-room-controls">
       <button type="button" className="copy-button" onClick={() => setConfirmAction('close')} disabled={busy}>ยุติห้อง</button>
+      <Link className="copy-button" to="/teacher/history">ประวัติห้อง</Link>
       {service.isDemo ? (
         <button type="button" className="copy-button" onClick={() => void createRoom()} disabled={busy}>สร้างห้องทดสอบใหม่</button>
       ) : null}
     </div>
   )
-
-  // Stepper helpers for the team-setup screen. They only nudge the same state the number inputs
-  // already write, clamped to the same bounds those inputs declare — validation is unchanged, and
-  // typing a value directly still works.
-  const stepClamped = (raw: string, delta: number, min: number, max: number, fallback: number): string => {
-    const current = Number(raw)
-    const base = Number.isFinite(current) ? current : fallback
-    return String(Math.min(max, Math.max(min, Math.round(base) + delta)))
-  }
-  const adjustTeamCount = (delta: number): void => setTeamCountValue((value) => stepClamped(value, delta, 1, 20, 2))
-  const adjustDuration = (delta: number): void =>
-    setDurationValue((value) => (durationUnit === 'seconds' ? stepClamped(value, delta * 5, 5, 600, 30) : stepClamped(value, delta, 1, 10, 1)))
-  const adjustBossDuration = (delta: number): void =>
-    setBossDurationValue((value) => stepClamped(value, delta * 5, MIN_BOSS_SECONDS_PER_QUESTION, MAX_BOSS_SECONDS_PER_QUESTION, MIN_BOSS_SECONDS_PER_QUESTION))
 
   // Captain / team-name rows. Built as an element list (not a nested component) so React keeps the
   // same instances across renders — a nested component would remount these inputs on every
@@ -1014,6 +1023,10 @@ export const TeacherPage = () => {
     name: team.name,
     guardianName: guardianNameById.get(team.id) ?? null,
     tone: index % TEAM_TONE_COUNT,
+    // Readiness ONLY. This screen is projected, so revealing which item a team picked would hand
+    // every opponent that information before it is ever used. hasAnyMagicItem returns a boolean
+    // over the whole inventory, so there is no item type here to leak in the first place.
+    hasChosenItem: hasAnyMagicItem(magicByTeamId.get(team.id)?.inventory ?? createEmptyMagicInventory()),
     members: sortedPlayers
       .filter((player) => player.teamId === team.id)
       .slice()
@@ -1144,6 +1157,9 @@ export const TeacherPage = () => {
                 รีเซ็ตและเปิดห้องสาธิต {service.demoRoomCode}
               </button>
             ) : null}
+            {/* Reachable with no active room on purpose: the usual reason to open this is to
+                print or export a class that finished days ago. */}
+            <Link className="secondary-button mx-auto mt-3 flex w-full max-w-sm justify-center" to="/teacher/history">ประวัติห้อง</Link>
             {error ? <p className="error-message mt-5" role="alert">{error}</p> : null}
           </section>
         ) : roomState.loading ? (
@@ -1244,11 +1260,35 @@ export const TeacherPage = () => {
 
                   <div className="lobby-divider" aria-hidden="true" />
 
+                  {/* Both timing controls live HERE, before anything starts: the assessment total
+                      budget (used by BOTH the pre-test and the post-test) and Recall's separate
+                      per-item timing. Both are entered in SECONDS so two adjacent number inputs
+                      cannot mean different units. Neither appears on an assessment screen, where a
+                      per-item control would be mistaken for the test's own clock. */}
+                  <SettingStepper
+                    id="assessment-duration"
+                    label="เวลาต่อข้อ (ก่อนเรียน/หลังเรียน)"
+                    helper={`${MIN_ASSESSMENT_SECONDS_PER_QUESTION}–${MAX_ASSESSMENT_SECONDS_PER_QUESTION} วินาทีต่อข้อ • ทุกข้อได้เวลาเท่ากัน • ใช้ค่าเดียวกันทั้งแบบทดสอบก่อนเรียนและหลังเรียน`}
+                    value={assessmentDurationValue}
+                    onChange={setAssessmentDurationValue}
+                    min={MIN_ASSESSMENT_SECONDS_PER_QUESTION}
+                    max={MAX_ASSESSMENT_SECONDS_PER_QUESTION}
+                  />
+
+                  <SettingStepper
+                    id="recall-duration"
+                    label="เวลาต่อข้อ (ทบทวนเรื่องราว)"
+                    helper={`${MIN_RECALL_SECONDS_PER_ITEM}–${MAX_RECALL_SECONDS_PER_ITEM} วินาทีต่อข้อ • ใช้กับทั้ง 5 ข้อ`}
+                    value={recallDurationValue}
+                    onChange={setRecallDurationValue}
+                    min={MIN_RECALL_SECONDS_PER_ITEM}
+                    max={MAX_RECALL_SECONDS_PER_ITEM}
+                  />
                   <button
                     type="button"
                     className="stage-cta"
                     onClick={handleStartPreTest}
-                    disabled={advancingStageBusy || sortedPlayers.length === 0}
+                    disabled={advancingStageBusy || sortedPlayers.length === 0 || !assessmentDurationValid || !recallDurationValid}
                   >
                     {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบทดสอบก่อนเรียน'}
                   </button>
@@ -1296,114 +1336,41 @@ export const TeacherPage = () => {
                 would let the room see the test. Only "who is still working" is surfaced, which is
                 all the teacher needs to decide when to move on. */}
             {isPreTestPhase ? (
-              <section className="recall-command-view" aria-live="polite">
-                <p className="eyebrow">ขั้นที่ 1 · แบบทดสอบก่อนเรียน</p>
-                <h2 className="recall-command-title">แบบทดสอบก่อนเรียน</h2>
-                <p className="recall-command-count">
-                  เสร็จแล้ว {preTestCompletedCount} / {sortedPlayers.length} คน
-                </p>
-                <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={preTestCompletedCount}>
-                  <i style={{ width: `${sortedPlayers.length > 0 ? (preTestCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
-                </div>
-
-                {/* Name, answered count and status. Counts only — never any answer content, so
-                    the teacher screen still cannot leak the test itself. */}
-                <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
-                  {sortedPlayers.map((player) => {
-                    const answered = player.preTestAnswers.length
-                    const done = answered >= ASSESSMENT_QUESTION_COUNT
-                    const status = done ? 'เสร็จแล้ว' : answered === 0 ? 'ยังไม่เริ่ม' : 'กำลังทำ'
-                    return (
-                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
-                        <span>{player.displayName}</span>
-                        <b>{answered}/{ASSESSMENT_QUESTION_COUNT}</b>
-                        <span>{status}</span>
-                      </li>
-                    )
-                  })}
-                </ul>
-
-                {/* Recall's per-item timer is chosen here, because this screen is where Recall
-                    starts. Same field, same bounds, same validation as before — only relocated. */}
-                <div className="stage-duration-field mt-5">
-                  <label htmlFor="recall-duration">เวลาต่อข้อ (ทบทวนเรื่องราว)</label>
-                  <div className="stage-duration-input">
-                    <input
-                      id="recall-duration"
-                      type="number"
-                      min={MIN_RECALL_SECONDS_PER_ITEM}
-                      max={MAX_RECALL_SECONDS_PER_ITEM}
-                      step="1"
-                      value={recallDurationValue}
-                      onChange={(event) => setRecallDurationValue(event.target.value)}
-                    />
-                    <span>วินาที</span>
-                  </div>
-                  <small>{MIN_RECALL_SECONDS_PER_ITEM}-{MAX_RECALL_SECONDS_PER_ITEM} วินาที · ใช้กับทั้ง 5 ข้อ</small>
-                </div>
-
-                {/* Always available — one student must never be able to hold the class. If anyone
-                    is still unfinished the teacher is asked to confirm first, and told exactly what
-                    it costs (those students drop out of the pre/post comparison); their saved
-                    answers are still kept, nothing is discarded either way. */}
-                <button
-                  type="button"
-                  className="primary-button recall-start-main-button mt-5"
-                  onClick={requestStartRecall}
-                  disabled={advancingStageBusy || !recallDurationValid}
-                >
-                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มทบทวนเรื่องราว'}
-                </button>
-                {preTestIncompleteCount > 0 ? (
-                  <p className="recall-command-hint">ยังมีนักเรียนทำไม่ครบ — เริ่มต่อได้ คำตอบที่บันทึกไว้จะไม่หาย</p>
-                ) : null}
-
-                <StageRoomControls />
-              </section>
+              <TeacherAssessmentStage
+                eyebrow="ขั้นที่ 1 · แบบทดสอบก่อนเรียน"
+                title="แบบทดสอบก่อนเรียน"
+                students={assessmentStudents('pre')}
+                completedCount={preTestCompletedCount}
+                startedAt={roomState.data.preTestStartedAt}
+                secondsPerQuestion={roomState.data.assessmentSecondsPerQuestion}
+                startLabel="เริ่มแบบทดสอบก่อนเรียน"
+                onContinue={requestStartRecall}
+                continueLabel="เริ่มทบทวนเรื่องราว"
+                continueHint="ยังมีนักเรียนทำไม่ครบ — เริ่มต่อได้ คำตอบที่บันทึกไว้จะไม่หาย"
+                busy={advancingStageBusy}
+                footer={<StageRoomControls />}
+              />
             ) : null}
 
             {/* Stage 'postTest' — the same minimal progress board the pre-test uses. No answers,
                 no correctness, no scores: this is a measurement, and the class must not see the
                 test. The live scoreboard dashboard is suppressed for the same reason. */}
             {isPostTestPhase ? (
-              <section className="recall-command-view" aria-live="polite">
-                <p className="eyebrow">ขั้นสุดท้าย · แบบทดสอบหลังเรียน</p>
-                <h2 className="recall-command-title">แบบทดสอบหลังเรียน</h2>
-                <p className="recall-command-count">
-                  เสร็จแล้ว {postTestCompletedCount} / {sortedPlayers.length} คน
-                </p>
-                <div className="recall-command-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={sortedPlayers.length} aria-valuenow={postTestCompletedCount}>
-                  <i style={{ width: `${sortedPlayers.length > 0 ? (postTestCompletedCount / sortedPlayers.length) * 100 : 0}%` }} />
-                </div>
-
-                <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
-                  {sortedPlayers.map((player) => {
-                    const done = player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT
-                    return (
-                      <li key={player.id} className={`recall-player-chip ${done ? 'recall-player-chip-done' : ''}`}>
-                        <span>{player.displayName}</span>
-                        <b>{done ? 'เสร็จแล้ว' : 'กำลังทำ'}</b>
-                      </li>
-                    )
-                  })}
-                </ul>
-
-                {/* Ends the round. Every Main/Boss result, team score and winner value is left
-                    exactly as it already is — this only flips status to 'completed'. */}
-                <button
-                  type="button"
-                  className="primary-button recall-start-main-button mt-5"
-                  onClick={handleStartSurvey}
-                  disabled={advancingStageBusy}
-                >
-                  {advancingStageBusy ? 'กำลังดำเนินการ...' : 'เริ่มแบบประเมินกิจกรรม'}
-                </button>
-                {postTestCompletedCount < sortedPlayers.length ? (
-                  <p className="recall-command-hint">ยังมีนักเรียนทำไม่ครบ — สรุปผลได้ คำตอบที่บันทึกไว้จะไม่หาย</p>
-                ) : null}
-
-                <StageRoomControls />
-              </section>
+              <TeacherAssessmentStage
+                eyebrow="ขั้นสุดท้าย · แบบทดสอบหลังเรียน"
+                title="แบบทดสอบหลังเรียน"
+                students={assessmentStudents('post')}
+                completedCount={postTestCompletedCount}
+                startedAt={roomState.data.postTestStartedAt}
+                secondsPerQuestion={roomState.data.assessmentSecondsPerQuestion}
+                onStart={handleStartPostTest}
+                startLabel="เริ่มแบบทดสอบหลังเรียน"
+                onContinue={handleStartSurvey}
+                continueLabel="เริ่มแบบประเมินกิจกรรม"
+                continueHint="ยังมีนักเรียนทำไม่ครบ — ไปต่อได้ คำตอบที่บันทึกไว้จะไม่หาย"
+                busy={advancingStageBusy}
+                footer={<StageRoomControls />}
+              />
             ) : null}
 
             {/* Stage 'survey' — the same minimal progress board. Individual responses are never
@@ -1477,14 +1444,28 @@ export const TeacherPage = () => {
                             <span>{group.guardianName ?? group.name}</span>
                             {group.guardianName ? <small>{group.name}</small> : null}
                             <span className="setup-group-count">{group.members.length} คน</span>
+                            {group.hasChosenItem ? (
+                              <span className="setup-group-ready" title="ทีมนี้เลือกไอเท็มเริ่มต้นแล้ว">เลือกไอเท็มแล้ว ✓</span>
+                            ) : null}
                           </h4>
                           <ul className="setup-group-list">
-                            {group.members.map((player) => (
-                              <li key={player.id}>
-                                <span className="setup-group-name">{player.displayName}</span>
-                                <span className="setup-group-number">เลขที่ {player.studentNumber}</span>
-                              </li>
-                            ))}
+                            {group.members.map((player) => {
+                              // Captain comes from the persisted magicHolderPlayerId for this
+                              // team — never from list order.
+                              const isCaptain = magicByTeamId.get(group.id)?.magicHolderPlayerId === player.id
+                              return (
+                                <li key={player.id}>
+                                  <span className="setup-group-name">
+                                    {isCaptain ? (
+                                      <span className="setup-group-crown" title="หัวหน้าทีม" aria-label="หัวหน้าทีม">👑</span>
+                                    ) : null}
+                                    {player.displayName}
+                                    {isCaptain ? <small className="setup-group-captain-tag">(หัวหน้าทีม)</small> : null}
+                                  </span>
+                                  <span className="setup-group-number">เลขที่ {player.studentNumber}</span>
+                                </li>
+                              )
+                            })}
                             {group.members.length === 0 ? <li className="setup-group-empty">ยังไม่มีสมาชิก</li> : null}
                           </ul>
                         </section>
@@ -1558,11 +1539,15 @@ export const TeacherPage = () => {
                       <strong>จำนวนทีม</strong>
                       <small>จำนวนทีมที่จะจัดให้นักเรียน</small>
                     </div>
-                    <div className="setup-stepper">
-                      <button type="button" onClick={() => adjustTeamCount(-1)} disabled={roomState.data.teamsLocked} aria-label="ลดจำนวนทีม">−</button>
-                      <input id="team-count" type="number" min={1} max={20} step="1" value={teamCountValue} onChange={(event) => setTeamCountValue(event.target.value)} disabled={roomState.data.teamsLocked} aria-label="จำนวนทีม" />
-                      <button type="button" onClick={() => adjustTeamCount(1)} disabled={roomState.data.teamsLocked} aria-label="เพิ่มจำนวนทีม">+</button>
-                    </div>
+                    <NumberStepper
+                      id="team-count"
+                      label="จำนวนทีม"
+                      value={teamCountValue}
+                      onChange={setTeamCountValue}
+                      min={1}
+                      max={20}
+                      disabled={roomState.data.teamsLocked}
+                    />
                   </div>
 
                   <div className="setup-field">
@@ -1594,11 +1579,14 @@ export const TeacherPage = () => {
                       <strong>เวลาต่อคำถาม</strong>
                       <small>เวลาต่อ 1 คำถาม</small>
                     </div>
-                    <div className="setup-stepper">
-                      <button type="button" onClick={() => adjustDuration(-1)} aria-label="ลดเวลาต่อคำถาม">−</button>
-                      <input id="question-duration" type="number" min={durationUnit === 'seconds' ? 5 : 1} max={durationUnit === 'seconds' ? 600 : 10} step="1" value={durationValue} onChange={(event) => setDurationValue(event.target.value)} aria-label="เวลาต่อคำถาม" />
-                      <button type="button" onClick={() => adjustDuration(1)} aria-label="เพิ่มเวลาต่อคำถาม">+</button>
-                    </div>
+                    <NumberStepper
+                      id="question-duration"
+                      label="เวลาต่อคำถาม"
+                      value={durationValue}
+                      onChange={setDurationValue}
+                      min={durationUnit === 'seconds' ? 5 : 1}
+                      max={durationUnit === 'seconds' ? 600 : 10}
+                    />
                   </div>
                   <div className="setup-unit-row">
                     <label htmlFor="duration-unit">หน่วยเวลา</label>
@@ -1614,22 +1602,21 @@ export const TeacherPage = () => {
                       <strong>เวลาต่อข้อ (ด่านชิงมนตรา)</strong>
                       <small>{MIN_BOSS_SECONDS_PER_QUESTION}-{MAX_BOSS_SECONDS_PER_QUESTION} วินาที · ใช้กับทั้ง 3 ข้อ</small>
                     </div>
-                    <div className="setup-stepper">
-                      <button type="button" onClick={() => adjustBossDuration(-1)} aria-label="ลดเวลาด่านชิงมนตรา">−</button>
-                      <input id="boss-duration" type="number" min={MIN_BOSS_SECONDS_PER_QUESTION} max={MAX_BOSS_SECONDS_PER_QUESTION} step="1" value={bossDurationValue} onChange={(event) => setBossDurationValue(event.target.value)} aria-label="เวลาต่อข้อด่านชิงมนตรา" />
-                      <button type="button" onClick={() => adjustBossDuration(1)} aria-label="เพิ่มเวลาด่านชิงมนตรา">+</button>
-                    </div>
+                    <NumberStepper
+                      id="boss-duration"
+                      label="เวลาต่อข้อด่านชิงมนตรา"
+                      value={bossDurationValue}
+                      onChange={setBossDurationValue}
+                      min={MIN_BOSS_SECONDS_PER_QUESTION}
+                      max={MAX_BOSS_SECONDS_PER_QUESTION}
+                    />
                   </div>
 
-                  {/* Captain election + team naming. Lives inside this column on this stage so
-                      the teacher never has to scroll past the fold to clear the checks that gate
-                      the start button. */}
-                  {roomState.data.teams.length > 0 ? (
-                    <div className="setup-team-admin">
-                      <p className="setup-subhead">หัวหน้าทีมและชื่อทีม</p>
-                      <ul className="setup-team-admin-list">{teamAdminRows}</ul>
-                    </div>
-                  ) : null}
+                  {/* The per-team admin block (name override, name reset, captain-election reset,
+                      captain badges) used to sit here and duplicated what the roster on the left
+                      already conveys. Removed from THIS screen only — teamAdminRows and every
+                      handler behind it are untouched and still render on the dashboard, so no
+                      team, captain or naming capability was removed from the app. */}
 
                   {roomState.data.teams.length > 0 ? (
                     <button type="button" className="setup-grimoire" onClick={() => setGrimoireOpen(true)}>
@@ -1891,14 +1878,19 @@ export const TeacherPage = () => {
                   ) : <span className="count-badge">{sortedPlayers.length} คน</span>}
                 </div>
                 {roomState.data.status === 'playing' && isBossPhase ? (
-                  // Milestone 4: correctness/ranking is deliberately withheld here — "do not
-                  // reveal the live overall ranking between boss questions" — only progress
-                  // (question number, time, how many have answered) is shown while boss is live.
-                  <dl className="broadcast-stats" aria-label="สถานการณ์ศึกด่านชิงมนตรา">
-                    <div><dt>ข้อของด่านชิงมนตรา</dt><dd>{roomState.data.bossQuestionIndex + 1}<span>/3</span></dd></div>
-                    <div><dt>{bossRevealRemainingMs > 0 ? 'ดูผลอีก' : 'เวลาคงเหลือ'}</dt><dd>{bossRevealRemainingMs > 0 ? formatCountdown(bossRevealRemainingMs) : formatCountdown(bossRemainingMs)}</dd></div>
-                    <div><dt>ตอบแล้วข้อนี้</dt><dd>{bossAnsweredCount}<span>/{sortedPlayers.length}</span></dd></div>
-                  </dl>
+                  // Dedicated boss board. Replaces the generic three-stat strip for this phase
+                  // only; the main-phase strip below is untouched. Correctness stays hidden
+                  // until the answer window closes — the same rule the old strip enforced.
+                  <BossBoard
+                    room={roomState.data}
+                    players={sortedPlayers}
+                    teams={roomState.data.teams}
+                    teamDisplayName={guardianDisplayName}
+                    teamTone={(teamId) => teamToneById.get(teamId) ?? 0}
+                    remainingMs={bossRemainingMs}
+                    revealRemainingMs={bossRevealRemainingMs}
+                    formatCountdown={formatCountdown}
+                  />
                 ) : roomState.data.status === 'playing' ? (
                   <dl className="broadcast-stats" aria-label="สถานการณ์ปัจจุบันของห้อง">
                     <div><dt>คำถามปัจจุบัน</dt><dd>{roomState.data.currentQuestionIndex + 1}<span>/10</span></dd></div>
@@ -2103,10 +2095,16 @@ export const TeacherPage = () => {
                     {roomState.data.status === 'waiting' && !isTeamSetupPhase ? (
                       <>
                         <div className="timer-setting">
-                          <label htmlFor="team-count">จำนวนทีม</label>
-                          <div>
-                            <input id="team-count" type="number" min={1} max={20} step="1" value={teamCountValue} onChange={(event) => setTeamCountValue(event.target.value)} disabled={roomState.data.teamsLocked} />
-                          </div>
+                          <label htmlFor="team-count-dashboard">จำนวนทีม</label>
+                          <NumberStepper
+                            id="team-count-dashboard"
+                            label="จำนวนทีม"
+                            value={teamCountValue}
+                            onChange={setTeamCountValue}
+                            min={1}
+                            max={20}
+                            disabled={roomState.data.teamsLocked}
+                          />
                           <small>สุ่มทีมได้ซ้ำหลายครั้งจนกว่าจะล็อกทีม</small>
                         </div>
                         <div className="grid grid-cols-2 gap-3">

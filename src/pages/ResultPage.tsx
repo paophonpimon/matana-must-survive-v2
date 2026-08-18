@@ -1,13 +1,14 @@
 import { useEffect, useMemo } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BrandHeader, ErrorPanel, LoadingPanel, ScenePage } from '../components/Layout'
+import { PhaseIntro } from '../components/PhaseIntro'
 import { useAllTeamGuardianNames, useRoom, usePlayer, useTeamMagic } from '../hooks/useGameData'
 import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
 import { computePostTestResult, computePreTestResult } from '../lib/assessment'
 import { resolveStudentRoute } from '../lib/game'
 import { computeStudentRecallResult } from '../lib/learning'
 import { getPlayerSession } from '../services/sessionStorage'
-import { DEFAULT_BOSS_QUESTION_DURATION_SECONDS, RECALL_SECONDS_PER_ITEM } from '../types/game'
+import { DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION, DEFAULT_BOSS_QUESTION_DURATION_SECONDS, RECALL_SECONDS_PER_ITEM } from '../types/game'
 import type { Player, Room } from '../types/game'
 
 const previewRoom: Room = {
@@ -32,6 +33,9 @@ const previewRoom: Room = {
   recallQuestionDurationSeconds: RECALL_SECONDS_PER_ITEM,
   recallQuestionIndex: 0,
   recallQuestionStartedAt: null,
+  assessmentSecondsPerQuestion: DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
+  preTestStartedAt: null,
+  postTestStartedAt: null,
   bossQuestionIds: [],
   bossQuestionIndex: 0,
   bossQuestionStartedAt: null,
@@ -121,6 +125,7 @@ export const ResultPage = () => {
 
   return (
     <ScenePage image={image} imageAlt={failed ? 'ดอกกุหลาบที่ถูกคำสาปครอบงำ' : successful ? 'มัทนาคืนร่างมนุษย์ท่ามกลางแสงทอง' : 'กุหลาบของมัทนาที่คำสาปเริ่มอ่อนกำลัง'} imagePosition={successful ? '50% 48%' : '50% 54%'}>
+      <PhaseIntro phase={isPreview ? null : 'result'} entryKey={`${normalizedCode}-${room?.currentRound ?? 0}`} />
       <BrandHeader />
       <div className={successful ? 'congratulations-stage' : 'mx-auto flex w-full max-w-4xl flex-1 items-end px-5 pb-8 pt-20 sm:items-center sm:px-8 sm:py-12'}>
         {!isPreview && (roomState.loading || playerState.loading) ? <LoadingPanel /> : !room || !player ? (
