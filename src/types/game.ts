@@ -326,6 +326,19 @@ export interface Player {
   // ranking or any team-facing computation.
   preTestAnswers: PreTestAnswerRecord[]
   postTestAnswers: PostTestAnswerRecord[]
+  // How many assessment questions this student has moved PAST — answered or timed out. This, not
+  // answers.length, is the current question index.
+  //
+  // Decoupling the two is what lets a timed-out question advance without inventing an answer: the
+  // progress counter moves, the answers array does not, and “which items timed out” is simply the
+  // gap between them. Evidence keeps using answers.length, so an unanswered item stays unanswered.
+  preTestProgress: number
+  postTestProgress: number
+  // When the CURRENT assessment question started for this student. Written by the service on open,
+  // on every saved answer and on every timeout advance, so each question gets the full configured
+  // time and a refresh resumes the same deadline instead of restarting it.
+  preTestQuestionStartedAt: number | null
+  postTestQuestionStartedAt: number | null
   surveyResponses: SurveyResponseRecord[]
   submitted: boolean
   finishedAt: number | null
@@ -403,11 +416,13 @@ export interface QueuedMagicEffect {
   targetTeamId: string
   affectedQuestionIndex: number
   createdAt: number
-  // Milestone 4.1: only meaningful when itemType === 'illusion'. Chosen ONCE, server/service
-  // side, at activation time (never recomputed on read, never independently randomized per
-  // client) — this is what makes every team member see the exact same hidden choice, and makes
-  // a refresh/retry unable to reroll it. Undefined for every other item type.
-  hiddenChoiceId?: string
+  // Only meaningful when itemType === 'illusion'. The TWO wrong choices to hide, chosen ONCE
+  // service-side at activation time — never recomputed on read, never independently randomised
+  // per client. That is what makes every team member see the same two removed choices, and makes
+  // a refresh, a retry or a reconnect unable to reroll them. Undefined for every other item type.
+  //
+  // Always wrong answers: the correct choice can never appear here (see pickIllusionHiddenChoices).
+  hiddenChoiceIds?: string[]
 }
 
 // Milestone 4: "after reveal, show a clear calculation" (raw team score / magic multiplier /

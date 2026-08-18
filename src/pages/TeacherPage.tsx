@@ -14,7 +14,7 @@ import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
 import { useBackgroundMusic } from '../hooks/useBackgroundMusic'
 import { useAllCaptainVoteProgress, useAllTeamGuardianNames, useAllTeamMagic, useMagicEvents, useRoom, usePlayers, useRoundHistory } from '../hooks/useGameData'
-import { ANSWER_REVEAL_MILLISECONDS, RECALL_REVEAL_MILLISECONDS, bossQuestionTiming, isAssessmentExpired, postTestWindow, preTestWindow, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed, mainQuestionTiming, recallQuestionTiming } from '../lib/gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, RECALL_REVEAL_MILLISECONDS, bossQuestionTiming, isAssessmentExpired, postTestProgressOf, postTestWindow, preTestProgressOf, preTestWindow, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisiblePlayer, isCurrentQuestionRevealed, mainQuestionTiming, recallQuestionTiming } from '../lib/gameFlow'
 import { BOSS_REVEAL_MILLISECONDS } from '../lib/boss'
 import { resolveTeacherRoomSession } from '../lib/game'
 import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
@@ -191,11 +191,11 @@ export const TeacherPage = () => {
   // Post-test runs while the room is still 'playing', so it is deliberately NOT part of
   // isPreGameStage (which means status === 'waiting').
   const isPostTestPhase = roomState.data?.status === 'playing' && roomState.data?.phase === 'postTest'
-  const postTestCompletedCount = playersState.data.filter((player) => player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT).length
+  const postTestCompletedCount = playersState.data.filter((player) => player.postTestProgress >= ASSESSMENT_QUESTION_COUNT).length
   const isSurveyPhase = roomState.data?.status === 'playing' && roomState.data?.phase === 'survey'
   const surveyCompletedCount = playersState.data.filter((player) => player.surveyResponses.length >= SURVEY_ITEM_COUNT).length
   // Completion = answered every item in the bank. Derived from counts only — no answer data.
-  const preTestCompletedCount = playersState.data.filter((player) => player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT).length
+  const preTestCompletedCount = playersState.data.filter((player) => player.preTestProgress >= ASSESSMENT_QUESTION_COUNT).length
   // Anyone short of a full bank — whether they never started or stopped halfway. This is exactly
   // the group the pre/post comparison will exclude, which is what the confirmation warns about.
   const preTestIncompleteCount = playersState.data.length - preTestCompletedCount
@@ -647,10 +647,11 @@ export const TeacherPage = () => {
     // Timed out is now PER STUDENT: each one's current question has its own window, derived from
     // when that question appeared for them.
     const timedOut = room != null && isAssessmentExpired(
-      which === 'pre' ? preTestWindow(room, answers) : postTestWindow(room, answers),
+      which === 'pre' ? preTestWindow(room, preTestProgressOf(player)) : postTestWindow(room, postTestProgressOf(player)),
       now,
     )
-    return { id: player.id, displayName: player.displayName, answeredCount: answers.length, timedOut }
+    const progress = which === 'pre' ? player.preTestProgress : player.postTestProgress
+    return { id: player.id, displayName: player.displayName, progress, answeredCount: answers.length, timedOut }
   })
   // Opens the post-test. Until this runs the room is on the postTest STAGE but the test itself is
   // closed, so students wait and their answer writes are rejected.

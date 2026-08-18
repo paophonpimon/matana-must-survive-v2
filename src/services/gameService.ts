@@ -97,6 +97,11 @@ export interface GameService {
   // transition into 'preTest'/'postTest'/'survey' exists in this milestone.
   savePreTestAnswer(roomCode: string, playerId: string, answer: PreTestAnswerInput): Promise<void>
   savePostTestAnswer(roomCode: string, playerId: string, answer: PostTestAnswerInput): Promise<void>
+  // Timeout advance for the assessments. Writes NO answer — it only moves the student past an
+  // expired question, so an unanswered item can never become a dead end. Idempotent: keyed on the
+  // expected index, so a duplicate call or a reconnect that re-detects the same expiry is a no-op.
+  advancePreTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void>
+  advancePostTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void>
   saveSurveyResponse(roomCode: string, playerId: string, response: SurveyResponseInput): Promise<void>
   advanceQuestion(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>
   closeQuestionEarly(roomCode: string, teacherSessionId: string, expectedQuestionIndex: number): Promise<void>

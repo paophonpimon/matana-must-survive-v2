@@ -807,7 +807,7 @@ describe('Demo timed classroom flow', () => {
       stopRoom()
     })
 
-    it('rejects activation once the eligible window would land on the final question (question 10)', async () => {
+    it('stays usable on the final question, which the effect now lands on directly', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -820,9 +820,9 @@ describe('Demo timed classroom flow', () => {
 
       const liveRoom: { value: Room | null } = { value: null }
       const stopRoom = service.subscribeRoom(room.roomCode, (value) => { liveRoom.value = value })
-      // Advance to question index 8 (question 9) — activating there would target index 9
-      // (question 10), which must never be an eligible activation target, at any point during
-      // question 9's lifecycle (activation is no longer time-gated).
+      // Advance to question index 9 (question 10). Items land on the CURRENT question, so the
+      // final question is a valid target — the old model excluded it because the effect would have
+      // spilled past the end of the round.
       //
       // Milestone 4: leaving main question 5 (index BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX = 4)
       // inserts the 3-question boss phase before the room can reach question 6 — status stays
@@ -831,17 +831,20 @@ describe('Demo timed classroom flow', () => {
       // auto-advance timers drive it in TeacherPage.tsx) so this loop still lands on index 8
       // afterward; production code is untouched — the boss trigger inside advanceQuestion still
       // fires exactly as before, this only teaches the test to wait it out.
-      for (let index = 0; index < 8; index += 1) {
+      for (let index = 0; index < 9; index += 1) {
         await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(index))
         await advanceQuestionThroughBoss(service, room.roomCode, 'teacher-1', index)
       }
-      // Confirms the boss phase actually resolved and main question 6 (index 5) resumed, not
-      // just that the loop completed.
+      // Confirms the boss phase actually resolved and main resumed, not just that the loop ran.
       await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
-      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(8))
+      await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(9))
 
-      await expect(service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge'))
-        .rejects.toThrow('ไม่สามารถใช้ไอเทมได้ในขณะนี้')
+      const magic: { value: TeamMagicState | null } = { value: null }
+      const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge')
+      await vi.waitFor(() => expect(magic.value?.queuedEffect).not.toBeNull())
+      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(9)
+      stopMagic()
       stopRoom()
     })
 
@@ -862,12 +865,14 @@ describe('Demo timed classroom flow', () => {
       // Simulate a fresh page load: a brand-new subscription (not the one used to activate).
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
+      // Waits on the effect's own field, not on "not null" — magic.value starts null, and
+      // expect(undefined).not.toBeNull() would pass before the first emission ever arrives.
       await vi.waitFor(() => {
         expect(magic.value ? hasAnyMagicItem(magic.value.inventory) : false).toBe(true)
-        expect(magic.value?.queuedEffect).not.toBeNull()
+        expect(magic.value?.queuedEffect?.itemType).toBe('score_seal')
       })
       expect(magic.value?.inventory.score_seal).toMatchObject({ available: 1, consumed: 0 })
-      expect(magic.value?.queuedEffect).toMatchObject({ itemType: 'score_seal', targetTeamId: 'team-2', affectedQuestionIndex: 1 })
+      expect(magic.value?.queuedEffect).toMatchObject({ itemType: 'score_seal', targetTeamId: 'team-2', affectedQuestionIndex: 0 })
       stop()
     })
   })
@@ -1338,7 +1343,7 @@ describe('Demo timed classroom flow', () => {
       stop()
     })
 
-    it('activating illusion chooses and persists one incorrect choice — never the correct one, never rerolled by a refresh', async () => {
+    it('activating illusion chooses and persists two incorrect choices — never the correct one, never rerolled by a refresh', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -1348,27 +1353,31 @@ describe('Demo timed classroom flow', () => {
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
       await service.startRoom(room.roomCode, 'teacher-1', 60)
-      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets question index 1
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets question index 0
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await vi.waitFor(() => expect(magic.value?.queuedEffect?.itemType).toBe('illusion'))
-      const hiddenChoiceId = magic.value?.queuedEffect?.hiddenChoiceId
-      expect(hiddenChoiceId).toBeTruthy()
+      const hiddenChoiceIds = magic.value?.queuedEffect?.hiddenChoiceIds as string[]
+      expect(hiddenChoiceIds).toHaveLength(2)
 
-      const targetedQuestion = questionsById.get(room.questionIds[1])
-      expect(hiddenChoiceId).not.toBe(targetedQuestion?.correctChoiceId) // never the correct choice
-      expect(targetedQuestion?.choices.map((choice) => choice.id)).toContain(hiddenChoiceId) // a real choice
+      const targetedQuestion = questionsById.get(room.questionIds[0])
+      // Never the correct choice, always real choices, never the same one twice.
+      expect(hiddenChoiceIds).not.toContain(targetedQuestion?.correctChoiceId)
+      for (const id of hiddenChoiceIds) {
+        expect(targetedQuestion?.choices.map((choice) => choice.id)).toContain(id)
+      }
+      expect(new Set(hiddenChoiceIds).size).toBe(2)
 
       // Re-reading the same queued effect (simulating a refresh) never changes the value —
-      // it was chosen once, at activation time, and is only ever read afterward.
+      // chosen once, at activation time, and only ever read afterward.
       for (let i = 0; i < 3; i += 1) {
-        await vi.waitFor(() => expect(magic.value?.queuedEffect?.hiddenChoiceId).toBe(hiddenChoiceId))
+        await vi.waitFor(() => expect(magic.value?.queuedEffect?.hiddenChoiceIds).toEqual(hiddenChoiceIds))
       }
       stop()
     })
 
-    it('all teammates see the exact same hidden choice (one shared team doc, not per-player)', async () => {
+    it('all teammates see the exact same hidden choices (one shared team doc, not per-player)', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -1388,10 +1397,10 @@ describe('Demo timed classroom flow', () => {
       const stopA = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { viewA.value = value })
       const stopB = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { viewB.value = value })
       await vi.waitFor(() => {
-        expect(viewA.value?.queuedEffect?.hiddenChoiceId).toBeTruthy()
-        expect(viewB.value?.queuedEffect?.hiddenChoiceId).toBeTruthy()
+        expect(viewA.value?.queuedEffect?.hiddenChoiceIds).toHaveLength(2)
+        expect(viewB.value?.queuedEffect?.hiddenChoiceIds).toHaveLength(2)
       })
-      expect(viewA.value?.queuedEffect?.hiddenChoiceId).toBe(viewB.value?.queuedEffect?.hiddenChoiceId)
+      expect(viewA.value?.queuedEffect?.hiddenChoiceIds).toEqual(viewB.value?.queuedEffect?.hiddenChoiceIds)
       stopA()
       stopB()
     })
@@ -1399,36 +1408,33 @@ describe('Demo timed classroom flow', () => {
     it('the effect applies only to its target main question — it resolves and clears once that question is left, consuming the item exactly once', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
-      const p1 = (await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')).player
+      await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
       await advanceToTeamSetup(service, room.roomCode)
     await service.randomizeTeams(room.roomCode, 'teacher-1', 1)
       await service.lockTeams(room.roomCode, 'teacher-1')
       const holderId = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holderId, 'illusion')
       await service.startRoom(room.roomCode, 'teacher-1', 60)
-      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 1
+      await service.activateItem(room.roomCode, 'team-1', holderId, 'illusion') // targets index 0
 
       const magic: { value: TeamMagicState | null } = { value: null }
       const stop = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
-      await vi.waitFor(() => expect(magic.value?.queuedEffect).not.toBeNull())
-
-      // Question 0 (index 0) is not the targeted question — leaving it must not resolve or
-      // consume the effect.
-      await answerAt(service, room, p1, 0, true)
-      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
-      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(1)
+      await vi.waitFor(() => expect(magic.value?.queuedEffect?.itemType).toBe('illusion'))
+      // The effect targets the question being answered right now.
+      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(0)
       expect(magic.value?.inventory.illusion.consumed).toBe(0)
 
-      // Question 1 (index 1) IS the targeted question — leaving it resolves and clears the
-      // effect, consuming the item exactly once.
-      await answerAt(service, room, p1, 1, true)
-      await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
+      // Leaving that question resolves and clears the effect, consuming the item exactly once.
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
       await vi.waitFor(() => expect(magic.value?.queuedEffect).toBeNull())
       expect(magic.value?.inventory.illusion.available).toBe(0)
       expect(magic.value?.inventory.illusion.consumed).toBe(1)
 
       // A stale/duplicate advanceQuestion retry for the question already left must never
       // double-consume the item (existing expectedQuestionIndex guard already covers this).
+      await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      expect(magic.value?.inventory.illusion.consumed).toBe(1)
+      // Leaving a LATER question also cannot consume again.
       await service.advanceQuestion(room.roomCode, 'teacher-1', 1)
       expect(magic.value?.inventory.illusion.consumed).toBe(1)
       stop()
@@ -1510,9 +1516,11 @@ describe('Demo timed classroom flow', () => {
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
       await service.startRoom(room.roomCode, 'teacher-1', 60)
-      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
+      // Question 1 is answered with no item in play, then the item is activated on question 2 —
+      // effects land on the question in progress, so leaving index 1 resolves it.
       await answerAt(service, room, p1, 0, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
       await answerAt(service, room, p1, 1, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 1) // resolves: item consumed, event applied, round 1
 
@@ -1655,9 +1663,11 @@ describe('Demo timed classroom flow', () => {
       const holder1 = await getHolderId(service, room.roomCode, 'team-1')
       await service.chooseStartingItem(room.roomCode, 'team-1', holder1, 'power_surge')
       await service.startRoom(room.roomCode, 'teacher-1', 60)
-      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
+      // Effects land on the question in progress, so reach index 1 first and activate there —
+      // leaving index 1 is then the advance whose write is made to fail below.
       await answerAt(service, room, p1, 0, true)
       await service.advanceQuestion(room.roomCode, 'teacher-1', 0)
+      await service.activateItem(room.roomCode, 'team-1', holder1, 'power_surge') // targets index 1
       await answerAt(service, room, p1, 1, true)
 
       // Simulate the underlying write failing partway through the advance that would resolve
@@ -1672,10 +1682,11 @@ describe('Demo timed classroom flow', () => {
       const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magicAfterFailure.value = value })
       const stopEvents = service.subscribeMagicEvents(room.roomCode, (value) => { eventsAfterFailure.value = value })
       await vi.waitFor(() => expect(roomAfterFailure.value).not.toBeNull())
+      await vi.waitFor(() => expect(magicAfterFailure.value?.queuedEffect?.itemType).toBe('power_surge'))
       // The room must remain exactly where it was — not advanced, not partially advanced.
       expect(roomAfterFailure.value?.currentQuestionIndex).toBe(1)
       // The item must still be queued and unconsumed — resolution never partially landed.
-      expect(magicAfterFailure.value?.queuedEffect).not.toBeNull()
+      expect(magicAfterFailure.value?.queuedEffect?.affectedQuestionIndex).toBe(1)
       expect(magicAfterFailure.value?.inventory.power_surge.consumed).toBe(0)
       expect(eventsAfterFailure.value.find((event) => event.itemType === 'power_surge')?.status).toBe('queued')
 
@@ -1816,7 +1827,7 @@ describe('Demo timed classroom flow', () => {
         .rejects.toThrow('ไม่สามารถใช้ไอเทมได้ในขณะนี้')
     })
 
-    it('activation during question 4 (index 3) targets question 5 (index 4), matching the documented examples', async () => {
+    it('activation during question 4 (index 3) targets question 4 itself, matching the documented examples', async () => {
       const service = new DemoGameService()
       const room = await service.createRoom('teacher-1')
       await service.joinRoom({ roomCode: room.roomCode, displayName: 'Alpha', studentNumber: '01' }, 'owner-1')
@@ -1839,7 +1850,7 @@ describe('Demo timed classroom flow', () => {
       const stopMagic = service.subscribeTeamMagic(room.roomCode, 'team-1', (value) => { magic.value = value })
       await service.activateItem(room.roomCode, 'team-1', holderId, 'power_surge')
       await vi.waitFor(() => expect(magic.value?.queuedEffect).not.toBeNull())
-      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(4) // question 5
+      expect(magic.value?.queuedEffect?.affectedQuestionIndex).toBe(3) // question 4 — the one being answered
 
       stopRoom()
       stopMagic()

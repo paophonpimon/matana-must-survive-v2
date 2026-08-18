@@ -7,7 +7,8 @@ import {
   getMagicActivationWindow,
   isEligibleQuestionIndex,
   pickElectedCaptain,
-  pickIllusionHiddenChoice,
+  ILLUSION_HIDDEN_CHOICE_COUNT,
+  pickIllusionHiddenChoices,
 } from './magic'
 import type { MagicEvent, Player, Question } from '../types/game'
 
@@ -24,6 +25,10 @@ const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
   recallAnswers: [],
   preTestAnswers: [],
   postTestAnswers: [],
+  preTestProgress: 0,
+  postTestProgress: 0,
+  preTestQuestionStartedAt: null,
+  postTestQuestionStartedAt: null,
   surveyResponses: [],
   submitted: false,
   finishedAt: null,
@@ -105,7 +110,7 @@ describe('pickElectedCaptain', () => {
 })
 
 // Milestone 4.1: illusion's hidden-choice selection — must never pick the correct choice.
-describe('pickIllusionHiddenChoice', () => {
+describe('pickIllusionHiddenChoices', () => {
   const question: Pick<Question, 'choices' | 'correctChoiceId'> = {
     choices: [
       { id: 'a', text: 'a' },
@@ -116,55 +121,87 @@ describe('pickIllusionHiddenChoice', () => {
     correctChoiceId: 'b',
   }
 
-  it('never returns the correct choice, across every possible draw', () => {
+  it('removes exactly two choices', () => {
     for (let i = 0; i < 10; i += 1) {
-      expect(pickIllusionHiddenChoice(question, () => i / 10)).not.toBe('b')
+      expect(pickIllusionHiddenChoices(question, () => i / 10)).toHaveLength(ILLUSION_HIDDEN_CHOICE_COUNT)
+      expect(ILLUSION_HIDDEN_CHOICE_COUNT).toBe(2)
     }
   })
 
-  it('always returns one of the incorrect choices', () => {
+  it('never removes the correct choice, across every possible draw', () => {
     for (let i = 0; i < 10; i += 1) {
-      expect(['a', 'c', 'd']).toContain(pickIllusionHiddenChoice(question, () => i / 10))
+      expect(pickIllusionHiddenChoices(question, () => i / 10)).not.toContain('b')
+    }
+  })
+
+  it('only ever removes incorrect choices, and never the same one twice', () => {
+    for (let i = 0; i < 10; i += 1) {
+      const hidden = pickIllusionHiddenChoices(question, () => i / 10)
+      for (const id of hidden) expect(['a', 'c', 'd']).toContain(id)
+      expect(new Set(hidden).size).toBe(hidden.length)
+    }
+  })
+
+  it('leaves exactly one correct + one wrong choice visible on a 4-choice question', () => {
+    const hidden = pickIllusionHiddenChoices(question, () => 0.42)
+    const visible = question.choices.filter((choice) => !hidden.includes(choice.id))
+    expect(visible).toHaveLength(2)
+    expect(visible.filter((choice) => choice.id === question.correctChoiceId)).toHaveLength(1)
+    expect(visible.filter((choice) => choice.id !== question.correctChoiceId)).toHaveLength(1)
+  })
+
+  it('is stable for a given draw, so a rerender/refresh cannot reroll it', () => {
+    // The service calls this ONCE and persists the result; this pins that the function itself is
+    // deterministic for a fixed random source, which is what makes that persistence meaningful.
+    const first = pickIllusionHiddenChoices(question, () => 0.7)
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(pickIllusionHiddenChoices(question, () => 0.7)).toEqual(first)
     }
   })
 })
 
 describe('isEligibleQuestionIndex', () => {
-  it('rejects question 1 (index 0) and the final question, accepts everything between', () => {
-    expect(isEligibleQuestionIndex(0, 10)).toBe(false)
-    expect(isEligibleQuestionIndex(9, 10)).toBe(false)
+  it('accepts every question in the round, now that items affect the CURRENT question', () => {
+    // Items land on the question being answered, so there is no longer a "too early" question 1
+    // or a "too late" final question — only the round's own bounds apply.
+    expect(isEligibleQuestionIndex(0, 10)).toBe(true)
+    expect(isEligibleQuestionIndex(9, 10)).toBe(true)
     expect(isEligibleQuestionIndex(1, 10)).toBe(true)
     expect(isEligibleQuestionIndex(8, 10)).toBe(true)
+  })
+
+  it('still rejects an index outside the round', () => {
+    expect(isEligibleQuestionIndex(-1, 10)).toBe(false)
+    expect(isEligibleQuestionIndex(10, 10)).toBe(false)
   })
 })
 
 describe('getMagicActivationWindow', () => {
   const baseRoom = { currentQuestionIndex: 0, questionIds }
 
-  // Milestone 2.2: activation is no longer available from the waiting lobby at all — choosing a
-  // starting item there only stores it. Activation is a `status === 'playing'` concept, valid
-  // for the WHOLE lifecycle of the current question (answering or reveal), not time-gated.
-  it('is never valid from the waiting lobby, regardless of which question would be next', () => {
+  // Activation is a `status === 'playing'` concept, valid for the WHOLE lifecycle of the current
+  // question (answering or reveal), and the effect lands on that same question.
+  it('is never valid from the waiting lobby', () => {
     expect(getMagicActivationWindow({ ...baseRoom, status: 'waiting' })).toEqual({ valid: false, affectedQuestionIndex: null })
   })
 
-  it('targets currentQuestionIndex + 1 while playing question 1 (its own reveal doesn\'t matter — always eligible if playing)', () => {
+  it('targets the CURRENT question while playing question 1', () => {
     const room = { ...baseRoom, status: 'playing' as const, currentQuestionIndex: 0 }
-    expect(getMagicActivationWindow(room)).toEqual({ valid: true, affectedQuestionIndex: 1 })
+    expect(getMagicActivationWindow(room)).toEqual({ valid: true, affectedQuestionIndex: 0 })
   })
 
-  it('targets currentQuestionIndex + 1 while playing question 4 (index 3) -> affects question 5 (index 4)', () => {
+  it('targets the CURRENT question while playing question 4 (index 3)', () => {
     const room = { ...baseRoom, status: 'playing' as const, currentQuestionIndex: 3 }
-    expect(getMagicActivationWindow(room)).toEqual({ valid: true, affectedQuestionIndex: 4 })
+    expect(getMagicActivationWindow(room)).toEqual({ valid: true, affectedQuestionIndex: 3 })
   })
 
-  it('is disabled once no eligible future question remains (currently on question 9, next would be the final question 10)', () => {
-    const room = { ...baseRoom, status: 'playing' as const, currentQuestionIndex: 8 }
-    expect(getMagicActivationWindow(room)).toEqual({ valid: false, affectedQuestionIndex: 9 })
-  })
-
-  it('is disabled while playing the final question itself', () => {
+  it('stays usable on the final question, which the effect now lands on directly', () => {
     const room = { ...baseRoom, status: 'playing' as const, currentQuestionIndex: 9 }
+    expect(getMagicActivationWindow(room)).toEqual({ valid: true, affectedQuestionIndex: 9 })
+  })
+
+  it('rejects an index past the end of the round', () => {
+    const room = { ...baseRoom, status: 'playing' as const, currentQuestionIndex: 10 }
     expect(getMagicActivationWindow(room)).toEqual({ valid: false, affectedQuestionIndex: 10 })
   })
 

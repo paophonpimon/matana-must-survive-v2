@@ -58,7 +58,7 @@ export const GrimoireModal = ({ open, onClose }: GrimoireModalProps) => {
 
           <div className="grimoire-summary">
             <p className="grimoire-summary-title">จำง่าย ๆ</p>
-            <p>⚡ 🔒 🔮 = หัวหน้าทีมกดใช้ → มีผลในคำถามข้อต่อไปเพียง 1 ข้อ</p>
+            <p>⚡ 🔒 🔮 = หัวหน้าทีมกดใช้ → มีผลกับคำถามข้อที่กำลังตอบอยู่ เพียง 1 ข้อ</p>
             <p>🛡️ = ไม่ต้องกด → ป้องกันมนตร์ผนึกคะแนนให้อัตโนมัติ 1 ครั้ง</p>
           </div>
         </div>

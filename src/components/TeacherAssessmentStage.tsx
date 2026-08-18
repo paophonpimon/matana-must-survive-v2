@@ -5,6 +5,9 @@ import { resolveAssessmentStatus } from '../lib/assessmentClock'
 export interface AssessmentStudentRow {
   id: string
   displayName: string
+  /** Questions moved past — answered or timed out. */
+  progress: number
+  /** Real answers only. Shown next to the status so 8/10 never reads as 10/10. */
   answeredCount: number
   /** True once this student's CURRENT question has run out of time. Per student, not per room. */
   timedOut?: boolean
@@ -82,7 +85,7 @@ export const TeacherAssessmentStage = ({
           leak the test itself. */}
       <ul className="recall-player-chips" aria-label="สถานะรายบุคคล">
         {students.map((student) => {
-          const status = resolveAssessmentStatus(student.answeredCount, student.timedOut ?? false)
+          const status = resolveAssessmentStatus(student.progress, student.timedOut ?? false, student.answeredCount)
           return (
             <li
               key={student.id}

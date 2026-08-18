@@ -1,8 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } from '../data/assessmentQuestions'
 import { resolveAssessmentStatus } from '../lib/assessmentClock'
-import { computeEvidenceSummaryFromHistory } from '../lib/evidenceSummary'
-import { getAssessmentDeadline, getAssessmentRemainingMilliseconds, isAssessmentExpired, isAssessmentOpen, preTestWindow } from '../lib/gameFlow'
+import { computeEvidenceSummary, computeEvidenceSummaryFromHistory } from '../lib/evidenceSummary'
+import { getAssessmentDeadline, getAssessmentRemainingMilliseconds, isAssessmentExpired, isAssessmentOpen, preTestProgressOf, preTestWindow } from '../lib/gameFlow'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
@@ -43,14 +43,16 @@ describe('assessment clock helpers', () => {
     expect(getAssessmentRemainingMilliseconds(open, startedAt + 999_999)).toBe(0)
   })
 
-  it('reports all four per-student statuses', () => {
+  it('reports all four per-student statuses from progress, not answers', () => {
     expect(resolveAssessmentStatus(0, false)).toBe('ยังไม่เริ่ม')
     expect(resolveAssessmentStatus(4, false)).toBe('กำลังทำ')
     expect(resolveAssessmentStatus(ASSESSMENT_QUESTION_COUNT, false)).toBe('เสร็จแล้ว')
     // Unfinished + expired is timed out, not merely "in progress".
     expect(resolveAssessmentStatus(4, true)).toBe('หมดเวลา')
-    // Finishing before the buzzer still reads as done, even once the clock runs out.
     expect(resolveAssessmentStatus(ASSESSMENT_QUESTION_COUNT, true)).toBe('เสร็จแล้ว')
+    // Reached the end with timeouts along the way: still finished, and the caller shows the real
+    // answered count beside it rather than pretending all ten were answered.
+    expect(resolveAssessmentStatus(ASSESSMENT_QUESTION_COUNT, false, 8)).toBe('เสร็จแล้ว')
   })
 })
 
@@ -187,26 +189,118 @@ describe('assessment gating and timing', () => {
     stop()
   })
 
-  it('gives every question the full time, restarting from the previous answer', async () => {
+  it('gives every question the full time, restarting when the student moves on', async () => {
     const { service, code, alpha, liveRoom, players, stop } = await setup()
     await service.startPreTest(code, 'teacher-1', 30)
     await vi.waitFor(() => expect(liveRoom.value?.preTestStartedAt).toBeTruthy())
     const room = liveRoom.value as Room
 
     // Question 1 runs from the instant the teacher opened the test (plus the phase intro).
-    expect(getAssessmentDeadline(preTestWindow(room, [])))
+    expect(getAssessmentDeadline(preTestWindow(room, { questionStartedAt: null, progress: 0 })))
       .toBe((room.preTestStartedAt as number) + PHASE_INTRO_MILLISECONDS + 30_000)
 
     await service.savePreTestAnswer(code, alpha.id, answer(PRE_TEST_QUESTIONS, 0))
-    await vi.waitFor(() => expect(players.value.find((p) => p.id === alpha.id)?.preTestAnswers).toHaveLength(1))
-    const saved = players.value.find((p) => p.id === alpha.id) as Player
+    await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1))
+    const saved = players.value.find((entry) => entry.id === alpha.id) as Player
 
-    // Question 2 restarts from when question 1 was answered — a full 30s again, with no intro
-    // offset and nothing carried over from how long question 1 took.
-    const second = preTestWindow(room, saved.preTestAnswers)
+    // Question 2 restarts from when the student moved on — a full 30s again, no intro offset, and
+    // nothing carried over from how long question 1 took.
+    const second = preTestWindow(room, preTestProgressOf(saved))
     expect(second.introOffsetMs).toBe(0)
-    expect(getAssessmentDeadline(second)).toBe(saved.preTestAnswers[0].answeredAt + 30_000)
-    expect(getAssessmentRemainingMilliseconds(second, saved.preTestAnswers[0].answeredAt)).toBe(30_000)
+    expect(second.startedAt).toBe(saved.preTestQuestionStartedAt)
+    expect(getAssessmentDeadline(second)).toBe((saved.preTestQuestionStartedAt as number) + 30_000)
+    expect(getAssessmentRemainingMilliseconds(second, saved.preTestQuestionStartedAt as number)).toBe(30_000)
+    stop()
+  })
+
+  it('advances past an expired question without inventing an answer', async () => {
+    const { service, code, alpha, liveRoom, players, stop } = await setup()
+    await service.startPreTest(code, 'teacher-1', 30)
+    await vi.waitFor(() => expect(liveRoom.value?.preTestStartedAt).toBeTruthy())
+    const room = liveRoom.value as Room
+
+    // Answer question 1 for real, then let question 2 run out.
+    await service.savePreTestAnswer(code, alpha.id, answer(PRE_TEST_QUESTIONS, 0))
+    await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1))
+    const atQ2 = players.value.find((entry) => entry.id === alpha.id) as Player
+    vi.setSystemTime(new Date((getAssessmentDeadline(preTestWindow(room, preTestProgressOf(atQ2))) as number) + 1_000))
+
+    // Answering is refused...
+    await expect(service.savePreTestAnswer(code, alpha.id, answer(PRE_TEST_QUESTIONS, 1))).rejects.toThrow()
+    // ...but the student is not stuck: the timeout advance moves them on.
+    await service.advancePreTestQuestion(code, alpha.id, 1)
+    await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(2))
+
+    const after = players.value.find((entry) => entry.id === alpha.id) as Player
+    // No fake answer was created — one real answer, progress 2.
+    expect(after.preTestAnswers).toHaveLength(1)
+    expect(after.preTestAnswers[0].questionId).toBe(PRE_TEST_QUESTIONS[0].id)
+    // Question 3 gets a full window from the advance instant.
+    expect(getAssessmentDeadline(preTestWindow(room, preTestProgressOf(after))))
+      .toBe((after.preTestQuestionStartedAt as number) + 30_000)
+
+    vi.useRealTimers()
+    stop()
+  })
+
+  it('timeout advance is idempotent — duplicates and reconnects cannot double-skip', async () => {
+    const { service, code, alpha, liveRoom, players, stop } = await setup()
+    await service.startPreTest(code, 'teacher-1', 30)
+    await vi.waitFor(() => expect(liveRoom.value?.preTestStartedAt).toBeTruthy())
+    const room = liveRoom.value as Room
+    const atQ1 = players.value.find((entry) => entry.id === alpha.id) as Player
+    vi.setSystemTime(new Date((getAssessmentDeadline(preTestWindow(room, preTestProgressOf(atQ1))) as number) + 1_000))
+
+    // Five calls for the same index — a rerender, a second tab and a reconnect all look like this.
+    await Promise.all([0, 0, 0, 0, 0].map(() => service.advancePreTestQuestion(code, alpha.id, 0)))
+    await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1))
+    // Exactly one question was skipped, not five.
+    expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1)
+
+    // A stale call for the index already left is a no-op, so it cannot re-skip.
+    await service.advancePreTestQuestion(code, alpha.id, 0)
+    expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1)
+    // And it is not a "next" button: the fresh question has time left, so it refuses.
+    vi.useRealTimers()
+    await service.advancePreTestQuestion(code, alpha.id, 1)
+    expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(1)
+    stop()
+  })
+
+  it('a final-question timeout finishes the assessment, leaving it incomplete', async () => {
+    const { service, code, alpha, liveRoom, players, stop } = await setup()
+    await service.startPreTest(code, 'teacher-1', 30)
+    await vi.waitFor(() => expect(liveRoom.value?.preTestStartedAt).toBeTruthy())
+    const room = liveRoom.value as Room
+
+    // Answer 8, time out on questions 9 and 10.
+    for (let index = 0; index < 8; index += 1) {
+      await service.savePreTestAnswer(code, alpha.id, answer(PRE_TEST_QUESTIONS, index))
+    }
+    await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(8))
+    for (const index of [8, 9]) {
+      const current = players.value.find((entry) => entry.id === alpha.id) as Player
+      vi.setSystemTime(new Date((getAssessmentDeadline(preTestWindow(room, preTestProgressOf(current))) as number) + 1_000))
+      await service.advancePreTestQuestion(code, alpha.id, index)
+      await vi.waitFor(() => expect(players.value.find((entry) => entry.id === alpha.id)?.preTestProgress).toBe(index + 1))
+    }
+
+    const done = players.value.find((entry) => entry.id === alpha.id) as Player
+    // Progressed 10/10, really answered 8/10 — the flow is finished.
+    expect(done.preTestProgress).toBe(ASSESSMENT_QUESTION_COUNT)
+    expect(done.preTestAnswers).toHaveLength(8)
+    // Past the end, nothing advances further.
+    await service.advancePreTestQuestion(code, alpha.id, 10)
+    expect(done.preTestProgress).toBe(ASSESSMENT_QUESTION_COUNT)
+    // Teacher status: finished, but the real count is 8.
+    expect(resolveAssessmentStatus(done.preTestProgress, false, done.preTestAnswers.length)).toBe('เสร็จแล้ว')
+
+    // Evidence: incomplete, so excluded from the paired comparison — never scored 0.
+    const evidence = computeEvidenceSummary([done])
+    expect(evidence.prePost.comparedCount).toBe(0)
+    expect(evidence.students[0]).toMatchObject({ preScore: null, difference: null })
+
+    vi.useRealTimers()
     stop()
   })
 
@@ -223,7 +317,7 @@ describe('assessment gating and timing', () => {
     // service uses, so the test cannot disagree with the production deadline rule.
     const room = liveRoom.value as Room
     const current = players.value.find((p) => p.id === alpha.id) as Player
-    vi.setSystemTime(new Date((getAssessmentDeadline(preTestWindow(room, current.preTestAnswers)) as number) + 1_000))
+    vi.setSystemTime(new Date((getAssessmentDeadline(preTestWindow(room, preTestProgressOf(current))) as number) + 1_000))
     await expect(service.savePreTestAnswer(code, alpha.id, answer(PRE_TEST_QUESTIONS, 3))).rejects.toThrow()
 
     await vi.waitFor(() => {

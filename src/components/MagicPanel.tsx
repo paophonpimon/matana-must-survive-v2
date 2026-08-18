@@ -49,7 +49,8 @@ interface MagicPanelProps {
   // Grimoire follow-up: the room's actual live question position — distinct from
   // affectedQuestionIndex below (which is only "what a FRESH activation would target," and is
   // null whenever activation isn't currently possible). Needed to tell whether an ALREADY-queued
-  // effect is still upcoming ("ข้อต่อไป") or is now the question in progress ("กำลังมีผลในข้อนี้").
+  // effect is live on the question in progress — activation now always targets the current
+  // question, so there is no "upcoming" state left to distinguish.
   currentQuestionIndex: number
   events: MagicEvent[]
   canActivateNow: boolean
@@ -68,6 +69,14 @@ const formatPercent = (multiplier: number): string => {
 // Shared by LobbyPage (selection only — always canActivateNow=false, roomStatus='waiting') and
 // GamePage (selection already done; activation live throughout the current question) so the
 // magic UI is built once, not twice.
+// Immediate post-activation confirmation, one line per item. The effect lands on the question
+// already on screen, so these state what just happened — never what will happen next question.
+const ACTIVATION_CONFIRMATION: Record<'power_surge' | 'score_seal' | 'illusion', string> = {
+  power_surge: '⚡ คะแนนข้อนี้ ×2',
+  score_seal: '🔒 คะแนนข้อนี้เหลือ 50%',
+  illusion: '✨ ตัดคำตอบผิดออกแล้ว 2 ตัว',
+}
+
 export const MagicPanel = ({
   magic,
   magicLoading,
@@ -233,7 +242,7 @@ export const MagicPanel = ({
     setNotice('')
     try {
       await onActivate(effectiveActivationItem, effectiveActivationItem === 'score_seal' ? selectedTargetTeamId : undefined)
-      setNotice(affectedQuestionIndex != null ? `ใช้ไอเทมแล้ว จะมีผลกับคำถามข้อที่ ${affectedQuestionIndex + 1}` : 'ใช้ไอเทมแล้ว')
+      setNotice(ACTIVATION_CONFIRMATION[effectiveActivationItem])
       setSelectedActivationItem('')
       setSelectedTargetTeamId('')
     } catch (reason) {
@@ -292,14 +301,12 @@ export const MagicPanel = ({
 
       {/* Item 7: compact "active effect" badges — icon + short Thai label, remain visible for as
           long as the underlying state is true, distinct from the transient toast above.
-          Grimoire follow-up: wording now distinguishes queued ("ข้อต่อไป") from active
-          ("กำลังมีผลในข้อนี้") via getMagicEffectPhase, instead of always saying "ข้อต่อไป" even
+          Activation targets the question in progress, so every badge reads "กำลังมีผลในข้อนี้"
           once the target question is actually the one in progress. */}
       {magic.queuedEffect || incomingSealSummaries.length > 0 || magic.inventory.rose_shield.available > 0 ? (
         <div className="magic-status-badges" role="list" aria-label="สถานะมนตราปัจจุบัน">
           {magic.queuedEffect ? (() => {
-            const phase = getMagicEffectPhase(magic.queuedEffect.affectedQuestionIndex, currentQuestionIndex)
-            const phaseLabel = phase === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'
+            const phaseLabel = 'กำลังมีผลในข้อนี้'
             const itemLabel = magic.queuedEffect.itemType === 'power_surge' ? 'x2' : magic.queuedEffect.itemType === 'illusion' ? 'มายา' : 'ผนึก'
             return (
               <span className={`magic-badge magic-badge-${magic.queuedEffect.itemType === 'power_surge' ? 'surge' : magic.queuedEffect.itemType === 'illusion' ? 'illusion' : 'seal'}`} role="listitem">
@@ -310,7 +317,7 @@ export const MagicPanel = ({
           })() : null}
           {incomingSealSummaries.length > 0 ? (
             <span className="magic-badge magic-badge-seal" role="listitem">
-              <MagicItemIcon itemType="score_seal" size="sm" /> ถูกผนึก {getMagicEffectPhase(incomingSealSummaries[0].questionIndex, currentQuestionIndex) === 'active' ? 'กำลังมีผลในข้อนี้' : 'ข้อต่อไป'}
+              <MagicItemIcon itemType="score_seal" size="sm" /> ถูกผนึกคะแนนในข้อนี้
             </span>
           ) : null}
           {magic.inventory.rose_shield.available > 0 ? (
@@ -355,14 +362,14 @@ export const MagicPanel = ({
 
       {(magic.queuedEffect || incomingSealSummaries.length > 0) ? (
         <div className="mt-3 space-y-1.5 text-xs text-[#c0b7ab]">
-          {/* Grimoire follow-up: "จะมีผล...ข้อต่อไป" while queued vs "กำลังมีผลในข้อนี้" once the
+          {/* The effect is live on the question in progress the moment it is cast, so the
               target question is the one actually in progress — never "กำลังรอผล" (ambiguous
               about which question) for both states like before. */}
           {magic.queuedEffect ? (() => {
             const phase = getMagicEffectPhase(magic.queuedEffect.affectedQuestionIndex, currentQuestionIndex)
             const timing = phase === 'active'
               ? `กำลังมีผลในคำถามข้อนี้ (ข้อ ${magic.queuedEffect.affectedQuestionIndex + 1})`
-              : `จะมีผลในคำถามข้อต่อไป (ข้อ ${magic.queuedEffect.affectedQuestionIndex + 1})`
+              : `กำลังมีผลในข้อนี้ (ข้อ ${magic.queuedEffect.affectedQuestionIndex + 1})`
             return (
               <p className="flex items-center gap-1.5">
                 <MagicItemIcon itemType={magic.queuedEffect.itemType} size="sm" />
@@ -375,8 +382,7 @@ export const MagicPanel = ({
             )
           })() : null}
           {incomingSealSummaries.map((summary) => {
-            const phase = getMagicEffectPhase(summary.questionIndex, currentQuestionIndex)
-            const timing = phase === 'active' ? `กำลังมีผลในข้อนี้ (ข้อ ${summary.questionIndex + 1})` : `จะมีผลในข้อต่อไป (ข้อ ${summary.questionIndex + 1})`
+            const timing = `กำลังมีผลในข้อนี้ (ข้อ ${summary.questionIndex + 1})`
             return (
               <p key={summary.questionIndex} className="flex items-center gap-1.5 text-[#f3aaa7]">
                 <MagicItemIcon itemType="score_seal" size="sm" />
@@ -438,7 +444,7 @@ export const MagicPanel = ({
             ) : null}
             <p className="text-sm text-[#d8d1c5]">
               {effectiveActivationItem ? `ใช้ ${MAGIC_ITEM_INFO[effectiveActivationItem].label}` : 'เลือกไอเทมที่จะใช้'}
-              {affectedQuestionIndex != null ? ` — จะมีผลกับคำถามข้อที่ ${affectedQuestionIndex + 1}` : ''}
+              {affectedQuestionIndex != null ? ` — มีผลกับข้อนี้ (ข้อ ${affectedQuestionIndex + 1}) ทันที` : ''}
             </p>
             {effectiveActivationItem === 'score_seal' ? (
               <div className="target-team-field">
@@ -480,7 +486,7 @@ export const MagicPanel = ({
           // question once playing (no timer gate) — the only way canActivateNow is false while
           // playing is that no eligible future question is left (currently on, or one away
           // from, the final question), which is permanent for the rest of this round.
-          <p className="mt-3 text-sm text-[#8b8377]">ไม่สามารถใช้ไอเทมได้แล้ว เนื่องจากไม่มีคำถามข้อต่อไปที่ไอเทมมีผลได้ในภารกิจนี้</p>
+          <p className="mt-3 text-sm text-[#8b8377]">ยังใช้ไอเทมไม่ได้ในตอนนี้</p>
         ) : null
       ) : null}
 

@@ -25,9 +25,9 @@ import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } fr
 import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestWindow, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
+import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestProgressOf, postTestWindow, preTestProgressOf, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
-import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoices } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
@@ -256,6 +256,12 @@ const mapPlayer = (snapshot: QueryDocumentSnapshot<DocumentData> | { id: string;
     // Assessment Layer: absent on every player document written before this milestone, so an
     // empty array is the correct read — never a missing-field error.
     preTestAnswers: Array.isArray(data.preTestAnswers) ? data.preTestAnswers.map(mapAssessmentAnswerRecord) : [],
+    // Player docs written before progress tracking have neither field. Falling back to the answer
+    // count is the correct migration: under the old model progress WAS answers.length.
+    preTestProgress: Number(data.preTestProgress ?? (Array.isArray(data.preTestAnswers) ? data.preTestAnswers.length : 0)),
+    postTestProgress: Number(data.postTestProgress ?? (Array.isArray(data.postTestAnswers) ? data.postTestAnswers.length : 0)),
+    preTestQuestionStartedAt: toMillis(data.preTestQuestionStartedAt),
+    postTestQuestionStartedAt: toMillis(data.postTestQuestionStartedAt),
     postTestAnswers: Array.isArray(data.postTestAnswers) ? data.postTestAnswers.map(mapAssessmentAnswerRecord) : [],
     surveyResponses: Array.isArray(data.surveyResponses) ? data.surveyResponses.map(mapSurveyResponseRecord) : [],
     submitted: Boolean(data.submitted),
@@ -305,7 +311,7 @@ const mapQueuedMagicEffect = (value: unknown): QueuedMagicEffect | null => {
     targetTeamId: String(effect.targetTeamId ?? ''),
     affectedQuestionIndex: Number(effect.affectedQuestionIndex ?? 0),
     createdAt: Number(effect.createdAt ?? 0),
-    ...(typeof effect.hiddenChoiceId === 'string' ? { hiddenChoiceId: effect.hiddenChoiceId } : {}),
+    ...(Array.isArray(effect.hiddenChoiceIds) ? { hiddenChoiceIds: effect.hiddenChoiceIds.map(String) } : {}),
   }
 }
 
@@ -815,6 +821,10 @@ export class FirebaseGameService implements GameService {
           recallAnswers: [],
           preTestAnswers: [],
           postTestAnswers: [],
+          preTestProgress: 0,
+          postTestProgress: 0,
+          preTestQuestionStartedAt: null,
+          postTestQuestionStartedAt: null,
           surveyResponses: [],
           submitted: false,
           finishedAt: null,
@@ -1064,7 +1074,8 @@ export class FirebaseGameService implements GameService {
       if (room.teacherSessionId !== teacherSessionId) throw new Error('ผู้ใช้:เซสชันครูไม่ตรงกับห้องนี้')
       if (room.status !== 'waiting') throw new Error('ผู้ใช้:จัดทีมได้เฉพาะช่วงห้องรอ')
       if (room.phase !== 'recall') return
-      // Gated on the shared Recall timeline finishing, not on every student having answered.
+      // The gate is the shared Recall timeline finishing all 5 questions — NOT whether every
+      // student personally answered them.
       if (room.recallQuestionIndex < RECALL_QUESTION_COUNT) {
         throw new Error('ผู้ใช้:ต้องทำทบทวนเรื่องราวให้ครบทั้ง 5 ข้อก่อนจัดทีม')
       }
@@ -1142,36 +1153,71 @@ export class FirebaseGameService implements GameService {
     const roomRef = doc(db, 'rooms', roomCode)
     const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
     await runTransaction(db, async (transaction) => {
-      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
-      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const [roomSnapshot, playerSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(playerRef),
+      ])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
       const room = mapRoom(roomSnapshot.data())
       const player = mapPlayer(playerSnapshot)
       if (room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
-      // Two server-side gates, both derived only from room state so a refresh bypasses neither.
       if (room.preTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบก่อนเรียน')
-      if (isAssessmentExpired(preTestWindow(room, player.preTestAnswers))) {
+      // The CURRENT question's window — keyed on this student's own progress, not on the room.
+      if (isAssessmentExpired(preTestWindow(room, preTestProgressOf(player)))) {
         throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
       }
-      // The bank is the only authority on correctness — never the caller.
-      const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
-      if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+      // Progress — NOT answers.length — is the current question index, so a timed-out item can
+      // never hold the student on the same question.
+      const index = player.preTestProgress
+      const expectedQuestion = PRE_TEST_QUESTIONS[index]
+      if (index >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
         throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
       }
-      // Idempotent: the first answer for a question is the one that counts.
       if (player.preTestAnswers.some((item) => item.questionId === answer.questionId)) return
-      // Sequential: the submitted question must be the next unanswered item, and the caller's
-      // expected index must agree with the server's own count.
-      if (player.preTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+      if (index !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
         throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
       }
       const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
       if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
-      const preTestAnswers = [...player.preTestAnswers, {
-        questionId: answer.questionId,
-        selectedChoiceId: answer.selectedChoiceId,
-        answeredAt: Date.now(),
-      }]
-      transaction.update(playerRef, { preTestAnswers })
+      const now = Date.now()
+      transaction.update(playerRef, {
+        preTestAnswers: [...player.preTestAnswers, {
+          questionId: answer.questionId,
+          selectedChoiceId: answer.selectedChoiceId,
+          answeredAt: now,
+        }],
+        // Advance, and start the next question's full window from this instant.
+        preTestProgress: index + 1,
+        preTestQuestionStartedAt: now,
+      })
+    })
+  }
+
+  // Timeout advance. Creates NO answer record — the item simply stays unanswered, and the gap
+  // between progress and answers.length is what marks it as timed out.
+  //
+  // Idempotent by expected-index token: a duplicate call, a second tab, or a reconnect that
+  // re-detects the same expiry all find progress already moved and no-op.
+  async advancePreTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(playerRef),
+      ])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) return
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.phase !== 'preTest' || room.preTestStartedAt == null) return
+      const index = player.preTestProgress
+      if (index !== expectedIndex || index >= ASSESSMENT_QUESTION_COUNT) return
+      // Only a genuinely expired question may be skipped — this is not a "next" button.
+      if (!isAssessmentExpired(preTestWindow(room, preTestProgressOf(player)))) return
+      transaction.update(playerRef, {
+        preTestProgress: index + 1,
+        preTestQuestionStartedAt: Date.now(),
+      })
     })
   }
 
@@ -1179,35 +1225,71 @@ export class FirebaseGameService implements GameService {
     const roomRef = doc(db, 'rooms', roomCode)
     const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
     await runTransaction(db, async (transaction) => {
-      const [roomSnapshot, playerSnapshot] = await Promise.all([transaction.get(roomRef), transaction.get(playerRef)])
-      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลห้องหรือผู้เล่นของคุณ')
+      const [roomSnapshot, playerSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(playerRef),
+      ])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
       const room = mapRoom(roomSnapshot.data())
       const player = mapPlayer(playerSnapshot)
       if (room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
       if (room.postTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบหลังเรียน')
-      if (isAssessmentExpired(postTestWindow(room, player.postTestAnswers))) {
+      // The CURRENT question's window — keyed on this student's own progress, not on the room.
+      if (isAssessmentExpired(postTestWindow(room, postTestProgressOf(player)))) {
         throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
       }
-      // The bank is the only authority on correctness — never the caller.
-      const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
-      if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+      // Progress — NOT answers.length — is the current question index, so a timed-out item can
+      // never hold the student on the same question.
+      const index = player.postTestProgress
+      const expectedQuestion = POST_TEST_QUESTIONS[index]
+      if (index >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
         throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
       }
-      // Idempotent: the first answer for a question is the one that counts.
       if (player.postTestAnswers.some((item) => item.questionId === answer.questionId)) return
-      // Sequential: the submitted question must be the next unanswered item, and the caller's
-      // expected index must agree with the server's own count.
-      if (player.postTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+      if (index !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
         throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
       }
       const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
       if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
-      const postTestAnswers = [...player.postTestAnswers, {
-        questionId: answer.questionId,
-        selectedChoiceId: answer.selectedChoiceId,
-        answeredAt: Date.now(),
-      }]
-      transaction.update(playerRef, { postTestAnswers })
+      const now = Date.now()
+      transaction.update(playerRef, {
+        postTestAnswers: [...player.postTestAnswers, {
+          questionId: answer.questionId,
+          selectedChoiceId: answer.selectedChoiceId,
+          answeredAt: now,
+        }],
+        // Advance, and start the next question's full window from this instant.
+        postTestProgress: index + 1,
+        postTestQuestionStartedAt: now,
+      })
+    })
+  }
+
+  // Timeout advance. Creates NO answer record — the item simply stays unanswered, and the gap
+  // between progress and answers.length is what marks it as timed out.
+  //
+  // Idempotent by expected-index token: a duplicate call, a second tab, or a reconnect that
+  // re-detects the same expiry all find progress already moved and no-op.
+  async advancePostTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void> {
+    const roomRef = doc(db, 'rooms', roomCode)
+    const playerRef = doc(db, 'rooms', roomCode, 'players', playerId)
+    await runTransaction(db, async (transaction) => {
+      const [roomSnapshot, playerSnapshot] = await Promise.all([
+        transaction.get(roomRef),
+        transaction.get(playerRef),
+      ])
+      if (!roomSnapshot.exists() || !playerSnapshot.exists()) return
+      const room = mapRoom(roomSnapshot.data())
+      const player = mapPlayer(playerSnapshot)
+      if (room.phase !== 'postTest' || room.postTestStartedAt == null) return
+      const index = player.postTestProgress
+      if (index !== expectedIndex || index >= ASSESSMENT_QUESTION_COUNT) return
+      // Only a genuinely expired question may be skipped — this is not a "next" button.
+      if (!isAssessmentExpired(postTestWindow(room, postTestProgressOf(player)))) return
+      transaction.update(playerRef, {
+        postTestProgress: index + 1,
+        postTestQuestionStartedAt: Date.now(),
+      })
     })
   }
 
@@ -1636,6 +1718,10 @@ export class FirebaseGameService implements GameService {
         recallAnswers: [],
         preTestAnswers: [],
         postTestAnswers: [],
+        preTestProgress: 0,
+        postTestProgress: 0,
+        preTestQuestionStartedAt: null,
+        postTestQuestionStartedAt: null,
         surveyResponses: [],
         submitted: false,
         finishedAt: null,
@@ -1684,6 +1770,10 @@ export class FirebaseGameService implements GameService {
         recallAnswers: [],
         preTestAnswers: [],
         postTestAnswers: [],
+        preTestProgress: 0,
+        postTestProgress: 0,
+        preTestQuestionStartedAt: null,
+        postTestQuestionStartedAt: null,
         surveyResponses: [],
         submitted: false,
         finishedAt: null,
@@ -1937,6 +2027,31 @@ export class FirebaseGameService implements GameService {
     const roomRef = doc(db, 'rooms', roomCode)
     const magicRef = doc(db, 'rooms', roomCode, 'magic', teamId)
 
+    // Illusion is fairness-sensitive: it changes what the question LOOKS like, so it may only be
+    // cast while the whole team is still undecided. Once any member has locked an answer for this
+    // question, casting it would either waste the effect or retroactively change the board under a
+    // teammate who already committed.
+    //
+    // Checked outside the transaction because a whole collection cannot be read inside one — the
+    // same best-effort shape startRoom already uses for its team-readiness checks. Rejected before
+    // any write, so the item is NOT consumed.
+    if (itemType === 'illusion') {
+      const roomSnapshot = await getDoc(roomRef)
+      const currentQuestionId = roomSnapshot.exists()
+        ? mapRoom(roomSnapshot.data()).questionIds[mapRoom(roomSnapshot.data()).currentQuestionIndex]
+        : undefined
+      if (currentQuestionId) {
+        const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
+        const someoneAnswered = playerSnapshots.docs
+          .map(mapPlayer)
+          .some((member) => member.teamId === teamId
+            && member.answers.some((entry) => entry.questionId === currentQuestionId))
+        if (someoneAnswered) {
+          throw new Error('ผู้ใช้:มีเพื่อนร่วมทีมตอบข้อนี้ไปแล้ว จึงใช้มนตร์ลวงตากับข้อนี้ไม่ได้')
+        }
+      }
+    }
+
     await runTransaction(db, async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef)
       if (!roomSnapshot.exists()) throw new Error('ผู้ใช้:ไม่พบรหัสห้องนี้')
@@ -2009,19 +2124,16 @@ export class FirebaseGameService implements GameService {
       const finalTargetTeamId = itemType === 'score_seal' ? (targetTeamId as string) : teamId
       const now = Date.now()
 
-      // Milestone 4.1: the hidden choice is chosen exactly ONCE, right here, and stored on the
-      // queued effect — never recomputed later (resolution just marks the event 'applied' and
-      // consumes the item, it never touches hiddenChoiceId again). This is what makes every team
-      // member see the identical hidden choice and makes a refresh/retry unable to reroll it.
-      let hiddenChoiceId: string | undefined
+      const illusionQuestionId = room.questionIds[affectedQuestionIndex]
+
+      // Chosen exactly ONCE here and stored on the queued effect — see the demo service for why.
+      let hiddenChoiceIds: string[] | undefined
       if (itemType === 'illusion') {
-        const targetQuestionId = room.questionIds[affectedQuestionIndex]
-        const targetQuestion = targetQuestionId ? questionsById.get(targetQuestionId) : undefined
+        const targetQuestion = illusionQuestionId ? questionsById.get(illusionQuestionId) : undefined
         if (!targetQuestion) {
-          logRejectedEvent(finalTargetTeamId)
           throw new Error('ผู้ใช้:ไม่พบคำถามข้อที่จะมีผล กรุณาลองใหม่')
         }
-        hiddenChoiceId = pickIllusionHiddenChoice(targetQuestion)
+        hiddenChoiceIds = pickIllusionHiddenChoices(targetQuestion)
       }
 
       transaction.update(magicRef, {
@@ -2032,7 +2144,7 @@ export class FirebaseGameService implements GameService {
           targetTeamId: finalTargetTeamId,
           affectedQuestionIndex,
           createdAt: now,
-          ...(hiddenChoiceId ? { hiddenChoiceId } : {}),
+          ...(hiddenChoiceIds ? { hiddenChoiceIds } : {}),
         },
       })
       transaction.set(eventRef, {

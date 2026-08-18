@@ -81,7 +81,7 @@ service cloud.firestore {
     // Mirrors lib/magic.ts's isEligibleQuestionIndex / getMagicActivationWindow so a holder's
     // queuedEffect write can be validated server-side, not just trusted from the client.
     function isEligibleQuestionIndex(roomCode, index) {
-      return index > 0 && index < room(roomCode).questionIds.size() - 1;
+      return index >= 0 && index < room(roomCode).questionIds.size();
     }
 
     // Milestone 2.2: activation is a room.status == 'playing' concept only — selecting a
@@ -95,7 +95,7 @@ service cloud.firestore {
     function isValidActivationWindow(roomCode, index) {
       return room(roomCode).status == 'playing'
         && room(roomCode).phase == 'main'
-        && index == room(roomCode).currentQuestionIndex + 1
+        && index == room(roomCode).currentQuestionIndex
         && isEligibleQuestionIndex(roomCode, index);
     }
 
@@ -240,7 +240,15 @@ service cloud.firestore {
             (
               room(roomCode).status == 'waiting'
               && room(roomCode).phase == 'preTest'
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['preTestAnswers'])
+              // Progress + question-start move alongside the answers array: a saved answer
+              // writes all three, and a TIMEOUT advance writes only the last two (no answer is
+              // created). hasOnly still pins the blast radius — score, answers, bossAnswers,
+              // recallAnswers, teamId and identity remain untouchable from this branch.
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['preTestAnswers', 'preTestProgress', 'preTestQuestionStartedAt'])
+              // Progress only ever moves forward, one question at a time, and never past the bank.
+              && request.resource.data.preTestProgress >= resource.data.preTestProgress
+              && request.resource.data.preTestProgress <= resource.data.preTestProgress + 1
+              && request.resource.data.preTestProgress <= 10
               && (
                 request.resource.data.preTestAnswers.size() == resource.data.preTestAnswers.size() + 1
                 || request.resource.data.preTestAnswers.size() == resource.data.preTestAnswers.size()
@@ -251,7 +259,15 @@ service cloud.firestore {
             (
               room(roomCode).status == 'playing'
               && room(roomCode).phase == 'postTest'
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['postTestAnswers'])
+              // Progress + question-start move alongside the answers array: a saved answer
+              // writes all three, and a TIMEOUT advance writes only the last two (no answer is
+              // created). hasOnly still pins the blast radius — score, answers, bossAnswers,
+              // recallAnswers, teamId and identity remain untouchable from this branch.
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['postTestAnswers', 'postTestProgress', 'postTestQuestionStartedAt'])
+              // Progress only ever moves forward, one question at a time, and never past the bank.
+              && request.resource.data.postTestProgress >= resource.data.postTestProgress
+              && request.resource.data.postTestProgress <= resource.data.postTestProgress + 1
+              && request.resource.data.postTestProgress <= 10
               && (
                 request.resource.data.postTestAnswers.size() == resource.data.postTestAnswers.size() + 1
                 || request.resource.data.postTestAnswers.size() == resource.data.postTestAnswers.size()
@@ -320,23 +336,23 @@ service cloud.firestore {
             (
               // Activation: the item type must have at least one currently-available count for
               // this team; the target/self-target rule must match the item type; the affected
-              // question must be an eligible next question, requested only during a valid
-              // activation window (never question 1/10, never mid-question, never during the
-              // boss phase); no unknown fields; inventory itself is untouched here (consumption
+              // question must be the question currently being answered, requested only during a
+              // valid activation window (main phase, inside the round's question list, never during
+              // the boss phase); no unknown fields; inventory itself is untouched here (consumption
               // happens later, at resolution, which is teacher-only) — hasOnly(['queuedEffect'])
               // below already guarantees this structurally, since nothing else is in the diff.
               // Milestone 4: multiple teams may queue a score_seal at the same target — there is
               // no "already targeted" restriction here anymore, matching the app-level stacking
               // change (seals resolve multiplicatively, see computeHostileMultiplier).
-              // Milestone 4.1: illusion joins power_surge as a valid, self-only-targetable
-              // activation type; its hiddenChoiceId cannot be validated here at all (the
+              // Illusion joins power_surge as a valid, self-only-targetable activation type; its
+              // hiddenChoiceIds cannot be validated here at all (the
               // question bank isn't Firestore data — it's a static client bundle, exactly like
               // correctChoiceId is never rules-validated for saveAnswer either), so it's simply
               // an allowed optional key, trusted from the app layer like the rest of the
               // question-bank-dependent logic in this codebase.
               resource.data.queuedEffect == null
               && request.resource.data.queuedEffect != null
-              && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt', 'hiddenChoiceId'])
+              && request.resource.data.queuedEffect.keys().hasOnly(['id', 'itemType', 'sourceTeamId', 'targetTeamId', 'affectedQuestionIndex', 'createdAt', 'hiddenChoiceIds'])
               && request.resource.data.queuedEffect.itemType in ['power_surge', 'score_seal', 'illusion']
               && resource.data.inventory[request.resource.data.queuedEffect.itemType].available > 0
               && request.resource.data.queuedEffect.sourceTeamId == teamId

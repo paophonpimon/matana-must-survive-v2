@@ -135,25 +135,30 @@ export const GamePage = () => {
   const breakdown = magicState.data?.lastResolvedBreakdown
   const showBreakdown = Boolean(!isBossPhase && breakdown && breakdown.questionIndex === questionIndex && timeExpired)
 
-  // Milestone 4.1: illusion hides exactly one incorrect choice for every member of the
-  // holder's team on the question it targets — never boss questions (illusion's queuedEffect
-  // can only ever target a main questionIds index in the first place). The hidden choice was
-  // chosen once, server-side, at activation time (see hiddenChoiceId's doc comment in
-  // types/game.ts) — this only ever READS it, never recomputes it, so a refresh can't reroll it.
+  // Illusion hides exactly TWO incorrect choices for every member of the holder's team on the
+  // question it targets — never boss questions (illusion's queuedEffect can only ever target a
+  // main questionIds index in the first place). The hidden choices were chosen once, service-side,
+  // at activation time (see hiddenChoiceIds' doc comment in types/game.ts) — this only ever READS
+  // them, never recomputes them, so a refresh or reconnect cannot reroll them.
   const illusionEffect = magicState.data?.queuedEffect
-  const illusionHiddenChoiceId = !isBossPhase && illusionEffect?.itemType === 'illusion' && illusionEffect.affectedQuestionIndex === questionIndex
-    ? illusionEffect.hiddenChoiceId ?? null
-    : null
-  // Illusion removes a choice BY ID, before ordering — so the hidden choice is the same one for
-  // every member of the team regardless of the order each of them sees, and it can never be
-  // "the third button" for one student and a different choice for another.
+  // Memoised so the array identity is stable across renders — it feeds the visibleChoices memo,
+  // which must not recompute (and so must not reshuffle) on every render.
+  const illusionHiddenChoiceIds = useMemo(
+    () => (!isBossPhase && illusionEffect?.itemType === 'illusion' && illusionEffect.affectedQuestionIndex === questionIndex
+      ? illusionEffect.hiddenChoiceIds ?? []
+      : []),
+    [isBossPhase, illusionEffect, questionIndex],
+  )
+  // Illusion removes choices BY ID, before ordering — so the removed pair is identical for every
+  // member of the team regardless of the order each of them sees, and can never be "the third
+  // button" for one student and a different choice for another.
   const visibleChoices = useMemo(
     () => shuffleChoicesForPlayer(
-      question ? question.choices.filter((choice) => choice.id !== illusionHiddenChoiceId) : [],
+      question ? question.choices.filter((choice) => !illusionHiddenChoiceIds.includes(choice.id)) : [],
       player?.id ?? '',
       question?.id ?? '',
     ),
-    [question, illusionHiddenChoiceId, player?.id],
+    [question, illusionHiddenChoiceIds, player?.id],
   )
 
   // Visual-only: is an item effect landing on the question currently on screen? Derived entirely
@@ -342,6 +347,7 @@ export const GamePage = () => {
             player={player}
             room={room}
             onAnswer={(input) => service.savePostTestAnswer(normalizedCode, player.id, input)}
+            onTimeout={(expectedIndex) => service.advancePostTestQuestion(normalizedCode, player.id, expectedIndex)}
           />
         ) : room.phase === 'preTest' ? (
           // Assessment Layer: individual, self-paced pre-test. Rendered inside the existing game
@@ -350,6 +356,7 @@ export const GamePage = () => {
             player={player}
             room={room}
             onAnswer={(input) => service.savePreTestAnswer(normalizedCode, player.id, input)}
+            onTimeout={(expectedIndex) => service.advancePreTestQuestion(normalizedCode, player.id, expectedIndex)}
           />
         ) : room.phase === 'recall' ? (
           // Learning Layer: mandatory individual "ทบทวนเรื่องราว" phase, before Main's timer
@@ -549,8 +556,8 @@ export const GamePage = () => {
               })() : null}
               <div className="flex items-center justify-between gap-3"><span className="category-chip">{categoryLabel}</span><span className="text-sm text-[#aaa298]">เปลี่ยนคำตอบได้จนหมดเวลา</span></div>
               <h1 className="mt-5 text-xl font-semibold leading-relaxed sm:text-2xl">{question.question}</h1>
-              {illusionHiddenChoiceId ? (
-                <p className="mt-2 flex items-center gap-1.5 text-xs text-[#c9a5f0]"><MagicItemIcon itemType="illusion" size="sm" /> มนตร์ลวงตากำลังมีผลในข้อนี้ — ตัดตัวเลือกที่ผิดออกแล้ว 1 ตัว</p>
+              {illusionHiddenChoiceIds.length > 0 ? (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-[#c9a5f0]"><MagicItemIcon itemType="illusion" size="sm" /> ✨ ตัดคำตอบผิดออกแล้ว 2 ตัว</p>
               ) : null}
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 {visibleChoices.map((choice, index) => (

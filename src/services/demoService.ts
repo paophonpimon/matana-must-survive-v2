@@ -4,9 +4,9 @@ import { ASSESSMENT_QUESTION_COUNT, POST_TEST_QUESTIONS, PRE_TEST_QUESTIONS } fr
 import { isValidSurveyValue, SURVEY_ITEMS, SURVEY_ITEM_COUNT } from '../data/surveyItems'
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
 import { evaluateChoice, generateRoomCode, selectRoundQuestions } from '../lib/game'
-import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestWindow, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
+import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, mainQuestionTiming, postTestProgressOf, postTestWindow, preTestProgressOf, preTestWindow, recallQuestionTiming } from '../lib/gameFlow'
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
-import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoice } from '../lib/magic'
+import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoices } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
@@ -144,6 +144,10 @@ const createPlayer = (
   recallAnswers: [],
   preTestAnswers: [],
   postTestAnswers: [],
+  preTestProgress: 0,
+  postTestProgress: 0,
+  preTestQuestionStartedAt: null,
+  postTestQuestionStartedAt: null,
   surveyResponses: [],
   submitted: false,
   finishedAt: null,
@@ -268,6 +272,11 @@ const normalizeState = (state: DemoState): DemoState => {
     Object.values(roomState.answerProgress).forEach((entry) => { entry.currentRound ??= 1 })
     Object.values(roomState.players).forEach((player) => {
       player.bossAnswers ??= []
+      // Assessment progress: saved state from before this existed had progress == answers.length.
+      player.preTestProgress ??= player.preTestAnswers?.length ?? 0
+      player.postTestProgress ??= player.postTestAnswers?.length ?? 0
+      player.preTestQuestionStartedAt ??= null
+      player.postTestQuestionStartedAt ??= null
       // Learning Layer: older saved demo state predates Story Recall entirely.
       player.recallAnswers ??= []
       // Assessment Layer: older saved demo state predates pre/post-test and the survey entirely.
@@ -814,32 +823,55 @@ export class DemoGameService implements GameService {
     const player = roomState?.players[playerId]
     if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
     if (roomState.room.phase !== 'preTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบก่อนเรียน')
-    // Two server-side gates, both derived only from room state so a refresh cannot bypass either:
-    //   not open yet -> the teacher has not started the test
-    //   expired      -> the budget ran out; already-saved answers stay, nothing is fabricated
     if (roomState.room.preTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบก่อนเรียน')
-    if (isAssessmentExpired(preTestWindow(roomState.room, player.preTestAnswers))) {
+    // The CURRENT question's window — keyed on this student's own progress, not on the room.
+    if (isAssessmentExpired(preTestWindow(roomState.room, preTestProgressOf(player)))) {
       throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
     }
-    // The bank is the only authority on correctness — never the caller.
-    const expectedQuestion = PRE_TEST_QUESTIONS[player.preTestAnswers.length]
-    if (player.preTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+    // Progress — NOT answers.length — is the current question index, so a timed-out item can
+    // never hold the student on the same question.
+    const index = player.preTestProgress
+    const expectedQuestion = PRE_TEST_QUESTIONS[index]
+    if (index >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
       throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
     }
     // Idempotent: the first answer for a question is the one that counts.
     if (player.preTestAnswers.some((item) => item.questionId === answer.questionId)) return
-    // Sequential: the submitted question must be the next unanswered item, and the caller's
-    // expected index must agree with the server's own count.
-    if (player.preTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+    if (index !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
     }
     const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
     if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+    const now = Date.now()
     player.preTestAnswers = [...player.preTestAnswers, {
       questionId: answer.questionId,
       selectedChoiceId: answer.selectedChoiceId,
-      answeredAt: Date.now(),
+      answeredAt: now,
     }]
+    // Advance, and start the next question's full window from this instant.
+    player.preTestProgress = index + 1
+    player.preTestQuestionStartedAt = now
+    await writeState(state)
+  }
+
+  // Timeout advance. Creates NO answer record — the item simply stays unanswered, and the gap
+  // between progress and answers.length is what marks it as timed out.
+  //
+  // Idempotent by expected-index token: a duplicate call, a second tab, or a reconnect that
+  // re-detects the same expiry all find progress already moved and no-op.
+  async advancePreTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.phase !== 'preTest') return
+    if (roomState.room.preTestStartedAt == null) return
+    const index = player.preTestProgress
+    if (index !== expectedIndex || index >= ASSESSMENT_QUESTION_COUNT) return
+    // Only a genuinely expired question may be skipped — this is not a "next" button.
+    if (!isAssessmentExpired(preTestWindow(roomState.room, preTestProgressOf(player)))) return
+    player.preTestProgress = index + 1
+    player.preTestQuestionStartedAt = Date.now()
     await writeState(state)
   }
 
@@ -850,28 +882,54 @@ export class DemoGameService implements GameService {
     if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
     if (roomState.room.phase !== 'postTest') throw new Error('ผู้ใช้:ไม่ได้อยู่ในช่วงแบบทดสอบหลังเรียน')
     if (roomState.room.postTestStartedAt == null) throw new Error('ผู้ใช้:ครูยังไม่ได้เริ่มแบบทดสอบหลังเรียน')
-    if (isAssessmentExpired(postTestWindow(roomState.room, player.postTestAnswers))) {
+    // The CURRENT question's window — keyed on this student's own progress, not on the room.
+    if (isAssessmentExpired(postTestWindow(roomState.room, postTestProgressOf(player)))) {
       throw new Error('ผู้ใช้:หมดเวลาข้อนี้แล้ว')
     }
-    // The bank is the only authority on correctness — never the caller.
-    const expectedQuestion = POST_TEST_QUESTIONS[player.postTestAnswers.length]
-    if (player.postTestAnswers.length >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
+    // Progress — NOT answers.length — is the current question index, so a timed-out item can
+    // never hold the student on the same question.
+    const index = player.postTestProgress
+    const expectedQuestion = POST_TEST_QUESTIONS[index]
+    if (index >= ASSESSMENT_QUESTION_COUNT || !expectedQuestion) {
       throw new Error('ผู้ใช้:ทำแบบทดสอบครบทุกข้อแล้ว')
     }
     // Idempotent: the first answer for a question is the one that counts.
     if (player.postTestAnswers.some((item) => item.questionId === answer.questionId)) return
-    // Sequential: the submitted question must be the next unanswered item, and the caller's
-    // expected index must agree with the server's own count.
-    if (player.postTestAnswers.length !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
+    if (index !== answer.expectedIndex || expectedQuestion.id !== answer.questionId) {
       throw new Error('ผู้ใช้:ลำดับคำถามไม่ถูกต้อง กรุณาโหลดหน้าใหม่')
     }
     const evaluated = evaluateChoice(expectedQuestion, answer.selectedChoiceId)
     if (!evaluated.valid) throw new Error('ผู้ใช้:ไม่พบตัวเลือกคำตอบนี้ กรุณาโหลดหน้าใหม่')
+    const now = Date.now()
     player.postTestAnswers = [...player.postTestAnswers, {
       questionId: answer.questionId,
       selectedChoiceId: answer.selectedChoiceId,
-      answeredAt: Date.now(),
+      answeredAt: now,
     }]
+    // Advance, and start the next question's full window from this instant.
+    player.postTestProgress = index + 1
+    player.postTestQuestionStartedAt = now
+    await writeState(state)
+  }
+
+  // Timeout advance. Creates NO answer record — the item simply stays unanswered, and the gap
+  // between progress and answers.length is what marks it as timed out.
+  //
+  // Idempotent by expected-index token: a duplicate call, a second tab, or a reconnect that
+  // re-detects the same expiry all find progress already moved and no-op.
+  async advancePostTestQuestion(roomCode: string, playerId: string, expectedIndex: number): Promise<void> {
+    const state = await readState()
+    const roomState = state.rooms[roomCode]
+    const player = roomState?.players[playerId]
+    if (!roomState || !player) throw new Error('ผู้ใช้:ไม่พบข้อมูลผู้เล่นของคุณ')
+    if (roomState.room.phase !== 'postTest') return
+    if (roomState.room.postTestStartedAt == null) return
+    const index = player.postTestProgress
+    if (index !== expectedIndex || index >= ASSESSMENT_QUESTION_COUNT) return
+    // Only a genuinely expired question may be skipped — this is not a "next" button.
+    if (!isAssessmentExpired(postTestWindow(roomState.room, postTestProgressOf(player)))) return
+    player.postTestProgress = index + 1
+    player.postTestQuestionStartedAt = Date.now()
     await writeState(state)
   }
 
@@ -1207,6 +1265,10 @@ export class DemoGameService implements GameService {
         recallAnswers: [],
         preTestAnswers: [],
         postTestAnswers: [],
+        preTestProgress: 0,
+        postTestProgress: 0,
+        preTestQuestionStartedAt: null,
+        postTestQuestionStartedAt: null,
         surveyResponses: [],
         submitted: false,
         finishedAt: null,
@@ -1267,6 +1329,10 @@ export class DemoGameService implements GameService {
         recallAnswers: [],
         preTestAnswers: [],
         postTestAnswers: [],
+        preTestProgress: 0,
+        postTestProgress: 0,
+        preTestQuestionStartedAt: null,
+        postTestQuestionStartedAt: null,
         surveyResponses: [],
         submitted: false,
         finishedAt: null,
@@ -1557,20 +1623,35 @@ export class DemoGameService implements GameService {
       // "already targeted" rejection here.
     }
 
-    // Milestone 4.1: the hidden choice is chosen exactly ONCE, right here, and stored on the
-    // queued effect — never recomputed later (resolution just marks the event 'applied' and
-    // consumes the item, it never touches hiddenChoiceId again). This is what makes every team
-    // member see the identical hidden choice and makes a refresh/retry unable to reroll it.
-    let hiddenChoiceId: string | undefined
+    // Illusion is a fairness-sensitive item: it changes what the question LOOKS like, so it may
+    // only be cast while the whole team is still undecided. Once any member has locked an answer
+    // for this question, casting it would either waste the effect or retroactively change the
+    // board under a teammate who already committed.
+    //
+    // Rejected BEFORE anything is written, so the item is not consumed and the team keeps it.
+    const illusionQuestionId = roomState.room.questionIds[affectedQuestionIndex]
     if (itemType === 'illusion') {
-      const targetQuestionId = roomState.room.questionIds[affectedQuestionIndex]
-      const targetQuestion = targetQuestionId ? questionsById.get(targetQuestionId) : undefined
+      const someoneAnswered = Object.values(roomState.players)
+        .some((member) => member.teamId === teamId
+          && member.answers.some((entry) => entry.questionId === illusionQuestionId))
+      if (someoneAnswered) {
+        throw new Error('ผู้ใช้:มีเพื่อนร่วมทีมตอบข้อนี้ไปแล้ว จึงใช้มนตร์ลวงตากับข้อนี้ไม่ได้')
+      }
+    }
+
+    // The hidden choices are chosen exactly ONCE, right here, and stored on the queued effect —
+    // never recomputed later (resolution only marks the event 'applied' and consumes the item, it
+    // never touches hiddenChoiceIds again). That is what makes every team member see the identical
+    // two removed choices and makes a refresh/retry unable to reroll them.
+    let hiddenChoiceIds: string[] | undefined
+    if (itemType === 'illusion') {
+      const targetQuestion = illusionQuestionId ? questionsById.get(illusionQuestionId) : undefined
       if (!targetQuestion) {
         rejectEvent()
         await writeState(state)
         throw new Error('ผู้ใช้:ไม่พบคำถามข้อที่จะมีผล กรุณาลองใหม่')
       }
-      hiddenChoiceId = pickIllusionHiddenChoice(targetQuestion)
+      hiddenChoiceIds = pickIllusionHiddenChoices(targetQuestion)
     }
 
     const effectId = `magic-${createId()}`
@@ -1581,7 +1662,7 @@ export class DemoGameService implements GameService {
       targetTeamId: resolvedTargetTeamId as string,
       affectedQuestionIndex,
       createdAt: now,
-      ...(hiddenChoiceId ? { hiddenChoiceId } : {}),
+      ...(hiddenChoiceIds ? { hiddenChoiceIds } : {}),
     }
     roomState.magicEvents.push({
       id: effectId,

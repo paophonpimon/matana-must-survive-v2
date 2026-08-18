@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
 import type { AssessmentWindow } from '../lib/gameFlow'
 import { shuffleChoicesForPlayer } from '../lib/choiceOrder'
@@ -10,8 +10,12 @@ import type { AssessmentQuestion } from '../data/assessmentQuestions'
 export interface AssessmentPhaseProps {
   /** Seeds this student's own choice order. Never affects correctness, which is id-based. */
   playerId: string
-  /** The student's own saved answers for THIS test — its length is the resume point. */
-  answers: Array<{ questionId: string; answeredAt: number }>
+  /** The student's own saved answers. Real answers only — a timed-out item is simply absent. */
+  answers: Array<{ questionId: string }>
+  /** Questions moved PAST (answered or timed out). This, not answers.length, is the index. */
+  progress: number
+  /** Advances past the current question once its time is up. Idempotent, keyed on the index. */
+  onTimeout: (expectedIndex: number) => Promise<void>
   bank: readonly AssessmentQuestion[]
   /** Null until the teacher opens the test. Authoritative, persisted on the room. */
   startedAt: number | null
@@ -43,6 +47,8 @@ export interface AssessmentPhaseProps {
 export const AssessmentPhase = ({
   playerId,
   answers,
+  progress,
+  onTimeout,
   bank,
   startedAt,
   questionWindow,
@@ -60,9 +66,22 @@ export const AssessmentPhase = ({
   // resets the countdown to the full configured value with nothing stored per question.
   const clock = useAssessmentClock(questionWindow)
 
+  // Timeout advance. No answer is written — the item stays unanswered and the student moves on,
+  // which is what stops an expired question from becoming a dead end. Guarded per index so a
+  // rerender cannot fire it twice, and the service no-ops on a duplicate regardless.
+  const advancingRef = useRef(-1)
+  useEffect(() => {
+    if (startedAt == null || !clock.expired) return
+    if (progress >= ASSESSMENT_QUESTION_COUNT) return
+    if (advancingRef.current === progress) return
+    advancingRef.current = progress
+    void onTimeout(progress).catch(() => { advancingRef.current = -1 })
+  }, [clock.expired, progress, startedAt, onTimeout])
+
   const answeredCount = answers.length
-  const finished = answeredCount >= ASSESSMENT_QUESTION_COUNT
-  const currentQuestion = bank[answeredCount]
+  // Progress drives the flow; answeredCount only reports how many were really answered.
+  const finished = progress >= ASSESSMENT_QUESTION_COUNT
+  const currentQuestion = bank[progress]
   // Per-student order, derived from (playerId, questionId) — stable across rerender, refresh and
   // reconnect, and never reshuffled once an answer is chosen because nothing here is random at
   // render time.
@@ -79,7 +98,7 @@ export const AssessmentPhase = ({
       // The service re-checks the open/expired gates and the ordering, and derives correctness
       // from the bank. Advancing happens implicitly: the saved answer grows the array, which moves
       // the index above — there is no local "next question" state to drift out of sync.
-      await onAnswer({ questionId: currentQuestion.id, selectedChoiceId, expectedIndex: answeredCount })
+      await onAnswer({ questionId: currentQuestion.id, selectedChoiceId, expectedIndex: progress })
     } catch (reason) {
       setError(friendlyError(reason))
     } finally {
@@ -107,18 +126,16 @@ export const AssessmentPhase = ({
 
   // 2. Done, or the budget ran out. Both land here; the message differs so a student who ran out
   //    of time is told so plainly rather than being shown a silent dead end.
-  if (finished || clock.expired) {
+  if (finished) {
     return (
       <section className="glass-panel w-full p-6 text-center sm:p-8" aria-live="polite">
         <p className="eyebrow">{eyebrow}</p>
-        <h1 className="mt-2 text-2xl font-semibold sm:text-3xl">
-          {finished ? finishedTitle : 'หมดเวลาข้อนี้'}
-        </h1>
-        {!finished ? (
-          <p className="mt-3 text-sm text-[#d8d1c5]">
-            คำตอบที่ทำไว้ {answeredCount} จาก {ASSESSMENT_QUESTION_COUNT} ข้อ ถูกบันทึกไว้เรียบร้อยแล้ว
-          </p>
-        ) : null}
+        <h1 className="mt-2 text-2xl font-semibold sm:text-3xl">{finishedTitle}</h1>
+        {/* States plainly how many were actually answered — never pretends all 10 were. */}
+        <p className="mt-3 text-sm text-[#d8d1c5]">
+          ตอบไปทั้งหมด {answeredCount} จาก {ASSESSMENT_QUESTION_COUNT} ข้อ
+          {answeredCount < ASSESSMENT_QUESTION_COUNT ? ' (มีข้อที่หมดเวลา)' : ''}
+        </p>
         <div className="waiting-banner mt-6">
           <span className="pulse-dot" aria-hidden="true" />
           <span>

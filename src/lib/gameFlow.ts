@@ -172,35 +172,42 @@ export const recallQuestionTiming = (room: RecallTimingRoom): TimedQuestionState
 // Assessment timing is PER QUESTION and per student, because each student works through the test
 // at their own pace — there is no shared question index to key a room-wide countdown off.
 //
-// Each item's start instant is derived, never stored:
-//   question 1 -> the persisted instant the teacher opened the test (+ the phase-intro offset)
-//   question N -> the answeredAt of question N-1, i.e. the moment this item appeared
+// The window is the student's OWN persisted question-start instant, written by the service every
+// time they move on (answer or timeout). Falling back to the room's open instant covers the first
+// question and any record written before this field existed.
 //
-// Both are already-persisted values, so a refresh or a reconnect recomputes the same deadline for
-// whichever question the student is currently on. Nothing is stored per question.
-export interface AnsweredAtRecord {
-  answeredAt: number
+// The phase-intro offset applies only to the very first question, which is the one the intro
+// plays over.
+export interface AssessmentProgress {
+  questionStartedAt: number | null
+  progress: number
 }
 
 const assessmentQuestionWindow = (
   openedAt: number | null,
   secondsPerQuestion: number,
-  answers: readonly AnsweredAtRecord[],
-): AssessmentWindow => {
-  const answeredCount = answers.length
-  if (answeredCount === 0) {
-    // First item: the intro plays over it, so the offset applies here and nowhere else.
-    return { startedAt: openedAt, durationSeconds: secondsPerQuestion, introOffsetMs: PHASE_INTRO_MILLISECONDS }
-  }
-  return {
-    startedAt: answers[answeredCount - 1].answeredAt,
-    durationSeconds: secondsPerQuestion,
-    introOffsetMs: 0,
-  }
-}
+  student: AssessmentProgress,
+): AssessmentWindow => ({
+  startedAt: student.questionStartedAt ?? openedAt,
+  durationSeconds: secondsPerQuestion,
+  introOffsetMs: student.progress === 0 ? PHASE_INTRO_MILLISECONDS : 0,
+})
 
-export const preTestWindow = (room: PreTestRoom, answers: readonly AnsweredAtRecord[] = []): AssessmentWindow =>
-  assessmentQuestionWindow(room.preTestStartedAt, room.assessmentSecondsPerQuestion, answers)
+export const preTestWindow = (
+  room: PreTestRoom,
+  student: AssessmentProgress = { questionStartedAt: null, progress: 0 },
+): AssessmentWindow =>
+  assessmentQuestionWindow(room.preTestStartedAt, room.assessmentSecondsPerQuestion, student)
 
-export const postTestWindow = (room: PostTestRoom, answers: readonly AnsweredAtRecord[] = []): AssessmentWindow =>
-  assessmentQuestionWindow(room.postTestStartedAt, room.assessmentSecondsPerQuestion, answers)
+export const postTestWindow = (
+  room: PostTestRoom,
+  student: AssessmentProgress = { questionStartedAt: null, progress: 0 },
+): AssessmentWindow =>
+  assessmentQuestionWindow(room.postTestStartedAt, room.assessmentSecondsPerQuestion, student)
+
+// Convenience readers so call sites never assemble the progress shape by hand.
+export const preTestProgressOf = (player: Pick<Player, 'preTestProgress' | 'preTestQuestionStartedAt'>): AssessmentProgress =>
+  ({ questionStartedAt: player.preTestQuestionStartedAt, progress: player.preTestProgress })
+
+export const postTestProgressOf = (player: Pick<Player, 'postTestProgress' | 'postTestQuestionStartedAt'>): AssessmentProgress =>
+  ({ questionStartedAt: player.postTestQuestionStartedAt, progress: player.postTestProgress })

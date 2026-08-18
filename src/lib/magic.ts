@@ -11,10 +11,10 @@ import type { MagicEvent, MagicInventory, MagicItemType, Player, Question, Room,
 // copy uses "ข้อต่อไป" throughout, so these short descriptions now match it verbatim instead of
 // a near-synonym, per the "terminology consistent with the grimoire" requirement.
 export const MAGIC_ITEM_INFO: Record<MagicItemType, { label: string; description: string; icon: string }> = {
-  power_surge: { label: 'มนตร์ทวีพลัง', description: 'ทีมของคุณได้รับคะแนนแข่งขัน 2 เท่าในคำถามข้อต่อไปที่ใช้ได้', icon: '⚡' },
-  score_seal: { label: 'มนตร์ผนึกคะแนน', description: 'ทีมเป้าหมายได้รับคะแนนแข่งขันเพียงครึ่งหนึ่งในคำถามข้อต่อไปที่ใช้ได้ (ผนึกซ้อนกันได้จากหลายทีม)', icon: '🔒' },
-  rose_shield: { label: 'เกราะกุหลาบ', description: 'ปิดกั้นไอเทมฝ่ายตรงข้ามที่เข้ามาหนึ่งครั้งต่อเกราะหนึ่งชิ้น แล้วถูกใช้ไปทันที', icon: '🛡️' },
-  illusion: { label: 'มนตร์ลวงตา', description: 'ตัดตัวเลือกที่ผิดออก 1 ตัวเลือกให้ทุกคนในทีมในคำถามข้อต่อไปที่ใช้ได้ (ไม่มีผลต่อคะแนน)', icon: '🔮' },
+  power_surge: { label: 'มนตร์ทวีพลัง', description: 'เพิ่มคะแนนของทีมในข้อนี้เป็น 2 เท่า', icon: '⚡' },
+  score_seal: { label: 'มนตร์ผนึกคะแนน', description: 'ผนึกคะแนนทีมเป้าหมายในข้อนี้ ให้เหลือ 50% (ผนึกซ้อนกันได้จากหลายทีม)', icon: '🔒' },
+  rose_shield: { label: 'เกราะกุหลาบ', description: 'ปิดกั้นไอเทมโจมตีที่เข้ามาโดยอัตโนมัติ 1 ครั้งต่อเกราะ 1 ชิ้น แล้วถูกใช้ไปทันทีที่ป้องกันสำเร็จ', icon: '🛡️' },
+  illusion: { label: 'มนตร์ลวงตา', description: 'ตัดคำตอบผิดออก 2 ตัว เหลือให้เลือก 2 ตัว ในข้อนี้ (ไม่มีผลต่อคะแนน)', icon: '🔮' },
 }
 
 export const MAGIC_ITEM_TYPES: MagicItemType[] = ['power_surge', 'score_seal', 'rose_shield', 'illusion']
@@ -27,8 +27,8 @@ export const MAGIC_ITEM_TYPES: MagicItemType[] = ['power_surge', 'score_seal', '
 // app can be checked against this as the canonical source. rose_shield's `activation`/`timing`/
 // `effect` slots are populated with the same meaning as the other three (who/how it triggers,
 // when/how long, what it does) even though its mechanic reads in a different order than the
-// three next-question items — never described as "next question only" (it persists until it
-// blocks a Score Seal, then is consumed).
+// three activatable items — the shield is never described as affecting a particular question
+// (it persists until it blocks a Score Seal, then is consumed).
 export interface MagicGrimoireEntry {
   activation: string
   timing: string
@@ -39,24 +39,24 @@ export interface MagicGrimoireEntry {
 export const MAGIC_GRIMOIRE: Record<MagicItemType, MagicGrimoireEntry> = {
   power_surge: {
     activation: 'หัวหน้าทีมกดใช้',
-    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
-    effect: 'คะแนนที่ทีมทำได้ในข้อนั้น ×2',
+    timing: 'มีผลกับคำถามข้อที่กำลังตอบอยู่ เพียง 1 ข้อ',
+    effect: 'คะแนนที่ทีมทำได้ในข้อนี้ ×2',
   },
   score_seal: {
     activation: 'หัวหน้าทีมเลือกทีมเป้าหมายแล้วกดใช้',
-    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
-    effect: 'คะแนนของทีมเป้าหมายในข้อนั้นเหลือ 50%',
-    note: 'หากมีเกราะกุหลาบ การโจมตีจะถูกป้องกัน',
+    timing: 'มีผลกับคำถามข้อที่กำลังตอบอยู่ เพียง 1 ข้อ',
+    effect: 'คะแนนของทีมเป้าหมายในข้อนี้เหลือ 50%',
+    note: 'หากทีมเป้าหมายมีเกราะกุหลาบ การโจมตีจะถูกป้องกัน',
   },
   rose_shield: {
-    activation: 'ไม่ต้องกดใช้',
-    timing: 'เกราะจะคงอยู่จนกว่าจะป้องกันการโจมตีสำเร็จ แล้วหายไป 1 ชิ้น',
-    effect: 'ระบบป้องกันมนตร์ผนึกคะแนนให้อัตโนมัติ 1 ครั้ง',
+    activation: 'ไม่ต้องกดใช้ ระบบป้องกันให้อัตโนมัติ',
+    timing: 'เกราะจะคงอยู่จนกว่าจะป้องกันการโจมตีสำเร็จ แล้วถูกใช้ไป 1 ชิ้น',
+    effect: 'ปิดกั้นมนตร์ผนึกคะแนนที่เข้ามา 1 ครั้ง',
   },
   illusion: {
-    activation: 'หัวหน้าทีมกดใช้',
-    timing: 'มีผลในคำถามข้อต่อไปเพียง 1 ข้อ',
-    effect: 'ระบบตัดตัวเลือกที่ผิดออก 1 ตัวให้สมาชิกทั้งทีม',
+    activation: 'หัวหน้าทีมกดใช้ ก่อนที่จะมีใครในทีมตอบข้อนี้',
+    timing: 'มีผลกับคำถามข้อที่กำลังตอบอยู่ เพียง 1 ข้อ',
+    effect: 'ตัดคำตอบผิดออก 2 ตัว เหลือให้เลือก 2 ตัว ให้สมาชิกทั้งทีม',
   },
 }
 
@@ -106,22 +106,31 @@ export const pickElectedCaptain = (
   return shuffle(topCandidates, random)[0] ?? null
 }
 
-// Milestone 4.1: chosen exactly ONCE, at activation time, and stored on the QueuedMagicEffect
-// (see hiddenChoiceId's doc comment in types/game.ts) — callers must never call this again for
-// an already-queued illusion effect; that discipline is what makes "retry/refresh never rerolls
-// the hidden choice" true by construction, since nothing ever recomputes it on read.
-export const pickIllusionHiddenChoice = (
+// How many wrong choices Illusion removes. With a 4-choice question this leaves exactly one
+// correct and one wrong choice visible.
+export const ILLUSION_HIDDEN_CHOICE_COUNT = 2
+
+// Chosen exactly ONCE, at activation time, and stored on the QueuedMagicEffect (see
+// hiddenChoiceIds' doc comment in types/game.ts) — callers must never call this again for an
+// already-queued illusion effect. That discipline is what makes "retry/refresh never rerolls the
+// hidden choices" true by construction, since nothing recomputes them on read.
+//
+// Only ever returns INCORRECT choices: the correct one is filtered out before the shuffle, so it
+// cannot be removed no matter how the shuffle lands. Returns fewer than the target count only if
+// the question has fewer wrong choices than that, which the approved banks never do.
+export const pickIllusionHiddenChoices = (
   question: Pick<Question, 'choices' | 'correctChoiceId'>,
   random: () => number = Math.random,
-): string => {
+): string[] => {
   const incorrectChoices = question.choices.filter((choice) => choice.id !== question.correctChoiceId)
-  return shuffle(incorrectChoices, random)[0].id
+  return shuffle(incorrectChoices, random).slice(0, ILLUSION_HIDDEN_CHOICE_COUNT).map((choice) => choice.id)
 }
 
-// Question 1 (index 0) and the final question (index length-1, "question 10" in a 10-question
-// round) can never be affected by an item.
+// Items now affect the question being answered RIGHT NOW, so every main question is a valid
+// target — there is no longer a "too early"/"too late" question. The bounds check only keeps the
+// index inside the round's own question list.
 export const isEligibleQuestionIndex = (index: number, totalQuestions: number): boolean =>
-  index > 0 && index < totalQuestions - 1
+  index >= 0 && index < totalQuestions
 
 interface ActivationWindowRoom {
   status: Room['status']
@@ -134,24 +143,19 @@ export interface MagicActivationWindow {
   affectedQuestionIndex: number | null
 }
 
-// Milestone 2.2: activation is a `room.status === 'playing'` concept only — selecting a
-// starting item (in the waiting lobby, via chooseStartingItem) is a separate action from
-// activating it, and never implies immediate use. Once playing, the holder may activate at any
-// point in the CURRENT question's lifecycle (answering or reveal — this is deliberately no
-// longer time-gated; a team.status shouldn't have to race a clock to use its own item), and the
-// effect always targets the very next question (currentQuestionIndex + 1). Question 1 (index 0)
-// can never be a target because activation itself requires status === 'playing', which only
-// starts once question 1 (index 0) is already underway; the final question is excluded by
-// isEligibleQuestionIndex. Once the target would be (or past) the final question, there is no
-// eligible next question left and activation is unavailable for the rest of the round.
+// Activation is a `room.status === 'playing'` concept only — selecting a starting item (in the
+// waiting lobby, via chooseStartingItem) is a separate action from activating it. Once playing,
+// the holder may activate at any point in the CURRENT question's lifecycle, and the effect lands
+// on that same question: the team sees it take hold immediately rather than having to remember it
+// for the next one.
 //
-// Milestone 4: this window is deliberately unaware of the boss phase — callers that could be in
-// either phase (e.g. GamePage) must additionally check room.phase === 'main' before treating a
-// `valid: true` result as actionable, since boss questions are never part of questionIds and
-// magic is not usable during the boss mini-game.
+// This window is deliberately unaware of the boss phase — callers that could be in either phase
+// (e.g. GamePage) must additionally check room.phase === 'main' before treating a `valid: true`
+// result as actionable, since boss questions are never part of questionIds and items are not
+// usable during the boss mini-game.
 export const getMagicActivationWindow = (room: ActivationWindowRoom): MagicActivationWindow => {
   if (room.status !== 'playing') return { valid: false, affectedQuestionIndex: null }
-  const affectedQuestionIndex = room.currentQuestionIndex + 1
+  const affectedQuestionIndex = room.currentQuestionIndex
   return { valid: isEligibleQuestionIndex(affectedQuestionIndex, room.questionIds.length), affectedQuestionIndex }
 }
 
@@ -256,28 +260,26 @@ export interface MagicEventCopy {
   body: string
 }
 
-// Item 4 (follow-up): every "next eligible question" body explicitly says คำถามข้อต่อไป — never
-// "ข้อนี้"/"this question" — since activation always targets the NEXT eligible question, never
-// the one currently being answered. The specific number is kept alongside for precision, but the
-// wording itself must never suggest an immediate/current-question effect.
+// Activation lands on the question being answered right now, so every body says ข้อนี้ and keeps
+// the question number alongside for precision. Nothing here may imply a next-question effect.
 export const buildIncomingSealCopy = (count: number, questionNumber: number): MagicEventCopy => ({
   tone: 'seal',
   headline: 'ทีมของคุณถูกสาปผนึกคะแนน!',
   body: count >= 2
-    ? `ถูกผนึกคะแนน ${count} ครั้ง — คำถามข้อต่อไป (ข้อ ${questionNumber}) คะแนนของทีมคุณจะเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`
-    : `คำถามข้อต่อไป (ข้อ ${questionNumber}) คะแนนของทีมคุณจะเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`,
+    ? `ถูกผนึกคะแนน ${count} ครั้ง — ข้อนี้ (ข้อ ${questionNumber}) คะแนนของทีมคุณเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`
+    : `ข้อนี้ (ข้อ ${questionNumber}) คะแนนของทีมคุณเหลือ ${formatHostilePercent(computeHostileMultiplier(count))}%`,
 })
 
 export const buildPowerSurgeCopy = (questionNumber: number): MagicEventCopy => ({
   tone: 'surge',
   headline: 'ทีมของคุณร่ายมนตร์ทวีพลัง!',
-  body: `คำถามข้อต่อไป (ข้อ ${questionNumber}) ทีมของคุณจะได้รับคะแนน x2`,
+  body: `ข้อนี้ (ข้อ ${questionNumber}) ทีมของคุณได้รับคะแนน ×2`,
 })
 
 export const buildIllusionCopy = (questionNumber: number): MagicEventCopy => ({
   tone: 'illusion',
   headline: 'ทีมของคุณใช้มายาลวงตา!',
-  body: `คำถามข้อต่อไป (ข้อ ${questionNumber}) ตัวเลือกที่ผิด 1 ตัวจะถูกซ่อนให้ทุกคนในทีม — คำตอบยังต้องเลือกเองตามปกติ`,
+  body: `ข้อนี้ (ข้อ ${questionNumber}) ตัดคำตอบผิดออก 2 ตัวให้ทุกคนในทีม — คำตอบยังต้องเลือกเองตามปกติ`,
 })
 
 export const buildShieldBlockCopy = (): MagicEventCopy => ({
@@ -302,13 +304,13 @@ export const buildTeacherSpellEventCopy = (
     }
   }
   if (event.itemType === 'power_surge') {
-    return { tone: 'surge', headline: `ทีม${sourceTeamName}ร่ายมนตร์ทวีพลัง!`, body: `คำถามข้อต่อไป ทีม${sourceTeamName}จะได้รับคะแนน x2` }
+    return { tone: 'surge', headline: `ทีม${sourceTeamName}ร่ายมนตร์ทวีพลัง!`, body: `ข้อนี้ ทีม${sourceTeamName}ได้รับคะแนน ×2` }
   }
   if (event.itemType === 'score_seal') {
-    return { tone: 'seal', headline: `ทีม${sourceTeamName}สาปผนึกคะแนนใส่ทีม${targetTeamName ?? '-'}!`, body: `คำถามข้อต่อไป คะแนนของทีม${targetTeamName ?? '-'}จะเหลือลดลง` }
+    return { tone: 'seal', headline: `ทีม${sourceTeamName}ใช้ผนึกคะแนนใส่ทีม${targetTeamName ?? '-'}`, body: `ข้อนี้ คะแนนของทีม${targetTeamName ?? '-'}เหลือ 50%` }
   }
   if (event.itemType === 'illusion') {
-    return { tone: 'illusion', headline: `ทีม${sourceTeamName}ใช้มายาลวงตา!`, body: `คำถามข้อต่อไป ตัวเลือกที่ผิด 1 ตัวจะถูกซ่อนให้ทีม${sourceTeamName}` }
+    return { tone: 'illusion', headline: `ทีม${sourceTeamName}ใช้มายาลวงตา!`, body: `ข้อนี้ ทีม${sourceTeamName}ตัดคำตอบผิดออก 2 ตัว` }
   }
   return { tone: 'shield', headline: `ทีม${sourceTeamName}ใช้เกราะกุหลาบ!`, body: 'พร้อมป้องกันมนตร์โจมตีครั้งถัดไป' }
 }

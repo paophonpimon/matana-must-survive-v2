@@ -87,10 +87,10 @@ describe('Magic item eligibility across the boss transition', () => {
       }
     }
 
-    // Items target the NEXT question, so they are offered on Q1..Q8: Q9's target would be Q10
-    // (excluded by design as the final question) and Q10 has no next question at all.
-    // Critically Q6, Q7 and Q8 — every Main question after the boss — must be present.
-    expect(usableOn).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    // Items land on the question being answered, so every Main question is usable — including Q1
+    // and Q10, which the old next-question model excluded. Critically Q6-Q10, every question after
+    // the boss, must be present.
+    expect(usableOn).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     // The boss mini-game itself stays item-disabled, as designed.
     expect(bossUsable).toEqual([false, false, false])
 
@@ -153,7 +153,8 @@ describe('Magic item eligibility across the boss transition', () => {
     await service.activateItem(code, teamId, captainOf.get(teamId) as string, 'power_surge')
     await vi.waitFor(() => {
       const after = magic.value.find((entry) => entry.teamId === teamId) as TeamMagicState
-      expect(after.queuedEffect?.affectedQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 2)
+      // Lands on the question being answered right now (Q6), not the one after it.
+      expect(after.queuedEffect?.affectedQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1)
     })
 
     stopMagic()
@@ -207,9 +208,9 @@ describe('Magic item eligibility across the boss transition', () => {
     }
     await vi.waitFor(() => expect(liveRoom.value?.currentQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX))
 
-    // Activate on Q5. The effect targets Q6 — the question on the far side of the boss.
+    // Activate on Q5. The effect targets Q5 itself — the question being answered.
     await service.activateItem(code, teamId, captainId, 'power_surge')
-    await vi.waitFor(() => expect(magicOf().queuedEffect?.affectedQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1))
+    await vi.waitFor(() => expect(magicOf().queuedEffect?.affectedQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX))
 
     await service.advanceQuestion(code, 'teacher-1', BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX)
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('boss'))
@@ -217,14 +218,11 @@ describe('Magic item eligibility across the boss transition', () => {
       await service.advanceBossQuestion(code, 'teacher-1', bossIndex)
     }
     await vi.waitFor(() => expect(liveRoom.value?.bossAwaitingContinue).toBe(true))
-    // The effect survived the boss intact — not silently dropped, not consumed early.
-    expect(magicOf().queuedEffect?.affectedQuestionIndex).toBe(BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1)
+    // Q5 was already left when the boss triggered, so the effect resolved and was consumed there —
+    // a current-question effect never lingers across the boss.
+    expect(magicOf().queuedEffect).toBeNull()
     await service.continueAfterBoss(code, 'teacher-1', (liveRoom.value as Room).currentRound)
     await vi.waitFor(() => expect(liveRoom.value?.phase).toBe('main'))
-
-    // Q6 plays with the effect live, then leaving Q6 resolves and consumes it...
-    await service.advanceQuestion(code, 'teacher-1', BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX + 1)
-    await vi.waitFor(() => expect(magicOf().queuedEffect).toBeNull())
     // ...so the team is never left permanently blocked with an unresolvable queued effect.
     const inventory = magicOf().inventory
     const remaining = inventory.power_surge.available + inventory.score_seal.available
