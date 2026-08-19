@@ -10,6 +10,7 @@ import { ConfirmDialog, ErrorPanel, LoadingPanel, ScenePage, StatusPill } from '
 import { MagicItemIcon } from '../components/MagicItemIcon'
 import { NumberStepper, SettingStepper } from '../components/NumberStepper'
 import { TeacherAssessmentStage } from '../components/TeacherAssessmentStage'
+import { TeacherResultCommandCenter } from '../components/TeacherResultCommandCenter'
 import { TeamItemStatus } from '../components/TeamItemStatus'
 import { useGame } from '../context/GameContext'
 import { useBackgroundMusic } from '../hooks/useBackgroundMusic'
@@ -391,7 +392,6 @@ export const TeacherPage = () => {
   const overallAverage = competitionStats.length > 0 ? competitionStats.reduce((total, team) => total + team.competitionAverage, 0) / competitionStats.length : 0
   const leadingTeams = competitionStats.filter((team) => team.memberCount > 0 && team.competitionAverage === highestAverage)
   const leadingTeamLabel = leadingTeams.length > 1 ? `${leadingTeams.length} ทีมคะแนนเท่ากัน` : (leadingTeams[0] ? guardianDisplayName(leadingTeams[0].id) : '-')
-  const podiumFollowers = competitionStats.filter((team) => team.competitionAverage < highestAverage).slice(0, 2)
   const unassignedCount = sortedPlayers.filter((player) => player.teamId == null).length
   // Milestone 4.1: mirrors startRoom's own server-side gate, purely for a clearer disabled
   // button + helper message — the service call remains the actual enforcement.
@@ -1774,88 +1774,36 @@ export const TeacherPage = () => {
                 teacher having no action available at all. */}
             {!isLobbyPhase && !isPreTestPhase && !isRecallPhase && !isPostTestPhase && !isSurveyPhase ? (
               <>
-            {finalMode && teamStats.length > 0 ? (
-              <section className="teacher-victory-stage" aria-labelledby="victory-stage-title">
-                <div className="victory-fireworks" aria-hidden="true"><i /><i /><i /><i /></div>
-                <div className="victory-rays" aria-hidden="true" />
-                <div className="victory-stage-content">
-                  <p className="victory-kicker">✦ ประกาศผลภารกิจรอบที่ {roomState.data.currentRound} ✦</p>
-                  <h2 id="victory-stage-title">ทีมอันดับหนึ่ง</h2>
-                  <div className="champion-medal" aria-hidden="true"><span>1</span></div>
-                  {leadingTeams.length > 1 ? <p className="champion-tie-label">{leadingTeamLabel}</p> : null}
-                  <div className={`champion-team-list ${leadingTeams.length > 1 ? 'champion-team-list-tied' : ''}`}>
-                    {leadingTeams.map((team) => (
-                      <div className="champion-team" key={team.id}>
-                        <strong>{guardianDisplayName(team.id)}</strong>
-                        <span>{sortedPlayers.filter((player) => player.teamId === team.id).map((player) => player.displayName).join(', ')}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="champion-score"><strong>{highestAverage.toFixed(1)}</strong><span>คะแนนเฉลี่ย</span></div>
-                  {podiumFollowers.length > 0 ? (
-                    <div className={`podium-followers ${podiumFollowers.length === 1 ? 'podium-followers-single' : ''}`}>
-                      {podiumFollowers.map((team) => {
-                        const rank = competitionStats.findIndex((rankedTeam) => rankedTeam.id === team.id) + 1
-                        return (
-                          <article className={`podium-place podium-place-${Math.min(rank, 3)}`} key={team.id}>
-                            <RankEmblem rank={rank} leading={false} />
-                            <div><small>อันดับที่ {rank}</small><strong>{guardianDisplayName(team.id)}</strong><span>{team.memberCount} คน</span></div>
-                            <b>{team.competitionAverage.toFixed(1)}<span>เฉลี่ย</span></b>
-                          </article>
-                        )
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-              </section>
-            ) : null}
-
-            {/* Learning Layer: keeps the existing competitive podium/scoreboard as the primary
-                result — this is additional, appended below it, never replacing it. */}
+            {/* Teacher final-result screen. Replaces the old oversized victory podium + stacked
+                learning-summary panel with one command centre: compact hero, four tabs, and room
+                controls that stay visible without scrolling. Purely presentational — every figure
+                is passed in already-computed (team ranking, the single shared evidence
+                aggregation, the recall summary), so this screen cannot drift from the printout or
+                the workbook, and no new score is derived here. */}
             {finalMode ? (
-              <section className="learning-summary-panel glass-panel mt-6 p-5" aria-label="สรุปการเรียนรู้ของห้อง">
-                <p className="eyebrow">สรุปผลรอบนี้</p>
-                {/* Per-concept review detail only. The class averages that used to sit here were
-                    removed: the "main" figure was overallAverage, which is the magic-adjusted
-                    COMPETITION average, shown under a knowledge-score label — so a team's items
-                    could move a number the teacher read as individual knowledge evidence. The
-                    evidence panel below reports both figures from raw individual data instead,
-                    which also removes the duplicate summary block. */}
-                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">ผลการทบทวน รายหัวข้อ</h2>
-                <div className="learning-summary-concepts mt-4">
-                  {classRecallSummary.concepts.map((concept) => (
-                    <div key={concept.conceptId} className="learning-summary-concept-row">
-                      <span className="learning-summary-concept-label">{recallQuestionsById.get(concept.conceptId)?.label ?? concept.conceptId}</span>
-                      <span className="learning-summary-concept-stat">ตอบถูก {concept.recallCorrectCount}/{concept.totalStudents}</span>
-                    </div>
-                  ))}
-                </div>
-                {/* Report actions, deliberately at the top of the final summary rather than
-                    buried in the collapsed history section below. */}
-                <div className="learning-report-actions">
-                  <button type="button" className="primary-button" onClick={() => window.print()}>
-                    ⬇ ดาวน์โหลด PDF
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => downloadLearningWorkbook(exportEntries, roomCode)}>
-                    ⬇ ดาวน์โหลด Excel
-                  </button>
-                </div>
-                {/* Evidence summary. Descriptive only: it reports what the numbers were, never
-                    that the activity caused them. One classroom, no control group, no
-                    randomisation — no causal wording, and no inferential statistic.
-                    Shown only for a genuinely completed round, never a merely closed room. */}
-                {isCompletedRound && selectedEvidence ? (
-                  <EvidenceSummaryPanel summary={selectedEvidence} title="สรุปหลักฐานการเรียนรู้" />
-                ) : null}
-
-                {/* Ranked by review accuracy alone — which topics the class recalled well and
-                    which they did not. Not a statement about learning or change. */}
-                <p className="mt-3 text-sm text-[#d8d1c5]">
-                  ทบทวนได้ดีที่สุด: <strong>{classRecallSummary.strongestConceptId ? recallQuestionsById.get(classRecallSummary.strongestConceptId)?.label ?? classRecallSummary.strongestConceptId : '-'}</strong>
-                  {' · '}
-                  ทบทวนได้น้อยที่สุด: <strong>{classRecallSummary.weakestConceptId ? recallQuestionsById.get(classRecallSummary.weakestConceptId)?.label ?? classRecallSummary.weakestConceptId : '-'}</strong>
-                </p>
-              </section>
+              <TeacherResultCommandCenter
+                round={roomState.data.currentRound}
+                roomStatus={roomState.data.status}
+                competitionStats={competitionStats}
+                teamStatsById={teamStatsById}
+                players={sortedPlayers}
+                teamDisplayName={guardianDisplayName}
+                recallSummary={classRecallSummary}
+                recallLabelFor={(conceptId) => recallQuestionsById.get(conceptId)?.label ?? conceptId}
+                evidence={isCompletedRound ? selectedEvidence : null}
+                busy={busy}
+                onPrint={() => window.print()}
+                onExportExcel={() => downloadLearningWorkbook(exportEntries, roomCode)}
+                onPrepareNextRound={() => setConfirmAction('prepare')}
+                onCloseRoom={() => setConfirmAction('close')}
+                closedRoomAction={
+                  service.isDemo && roomCode === service.demoRoomCode ? (
+                    <button type="button" className="result-room-primary" onClick={() => void openDemoRoom()} disabled={busy}>รีเซ็ตห้องสาธิต {service.demoRoomCode}</button>
+                  ) : (
+                    <button type="button" className="result-room-primary" onClick={() => { setRoomCode(''); setNotice('') }}>สร้างห้องใหม่</button>
+                  )
+                }
+              />
             ) : null}
 
             {/* The teamSetup stage renders its own roster and controls above, so the dashboard's
@@ -1863,7 +1811,10 @@ export const TeacherPage = () => {
                 for that stage. Every other stage still gets the full dashboard. */}
             {/* Inline style, not the `hidden` attribute: Tailwind's `grid` utility would otherwise
                 win over `[hidden] { display: none }` and the block would stay visible. */}
-            <div style={isTeamSetupPhase || isPostTestPhase || isSurveyPhase ? { display: 'none' } : undefined} className={`teacher-dashboard mt-6 grid items-start gap-6 ${finalMode ? 'teacher-final-dashboard ' : ''}${broadcastMode ? '' : 'lg:grid-cols-[1.45fr_0.75fr]'}`}>
+            {/* finalMode joins this list: the result command centre above now carries the team
+                board, the per-student view and the room controls, so the dashboard's copy of all
+                three would be a duplicate screen below the fold. */}
+            <div style={isTeamSetupPhase || isPostTestPhase || isSurveyPhase || finalMode ? { display: 'none' } : undefined} className={`teacher-dashboard mt-6 grid items-start gap-6 ${finalMode ? 'teacher-final-dashboard ' : ''}${broadcastMode ? '' : 'lg:grid-cols-[1.45fr_0.75fr]'}`}>
               <section className={`glass-panel teacher-scoreboard overflow-hidden ${broadcastMode ? 'teacher-scoreboard-live' : ''}`}>
                 {/* Item 3: header is centered while playing (LIVE badge sits directly under the
                     title, not pinned top-right) — the close/reveal/advance-now controls used to
@@ -2200,7 +2151,7 @@ export const TeacherPage = () => {
                 reference the teacher may want to consult before a single item is ever used. */}
             {/* On the teamSetup stage this trigger lives inside the settings panel instead, so no
                 lone button floats between sections. */}
-            {roomState.data.teams.length > 0 && !isTeamSetupPhase ? (
+            {roomState.data.teams.length > 0 && !isTeamSetupPhase && !finalMode ? (
               <div className="mt-6 flex justify-end">
                 <button type="button" className="grimoire-trigger-button" onClick={() => setGrimoireOpen(true)}>
                   📜 คัมภีร์มนตรา
@@ -2229,7 +2180,7 @@ export const TeacherPage = () => {
             {/* Learning history: every round already recorded for this room, newest data kept
                 immutable by the service layer. Collapsed by default so it never competes with the
                 live dashboard, and available even after the room is closed. */}
-            {roundHistoryState.data.length > 0 ? (
+            {roundHistoryState.data.length > 0 && !finalMode ? (
               <section className="glass-panel mt-6 p-5" aria-label="ประวัติผลการเรียน">
                 <div className="learning-history-heading">
                   <div>
@@ -2307,7 +2258,7 @@ export const TeacherPage = () => {
               </section>
             ) : null}
 
-            {magicEventsState.data.length > 0 ? (
+            {magicEventsState.data.length > 0 && !finalMode ? (
               <section className="glass-panel mt-6 p-5" aria-label="ประวัติมนตรา">
                 <p className="eyebrow">ประวัติ</p>
                 <h2 className="mt-1 text-xl font-semibold text-[#fff7df]">กิจกรรมมนตราล่าสุด</h2>

@@ -22,19 +22,62 @@ export const MAIN_QUESTION_COUNT = 10
 const average = (values: number[]): number =>
   (values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length)
 
+// Null, never 0, when there is nothing to average — an absent measurement must never read as a
+// score of zero.
+const averageOrNull = (values: number[]): number | null =>
+  (values.length === 0 ? null : values.reduce((total, value) => total + value, 0) / values.length)
+
+// THE shared percentage rule. Every ratio in the evidence report goes through this, so a
+// percentage can never be computed against a different denominator in one place than another.
+// An empty denominator yields null ("unavailable"), never 0% — 0% would assert that nobody
+// improved, when in fact nobody was eligible to be measured.
+export const percentOf = (numerator: number, denominator: number): number | null =>
+  (denominator <= 0 ? null : (numerator / denominator) * 100)
+
+// THE shared percentage formatter. Rounds to 1 decimal for presentation only — the stored value
+// stays exact. 26/30 -> "86.7%", 30/30 -> "100%", unavailable -> "-".
+export const formatPercent = (value: number | null): string => {
+  if (value === null || !Number.isFinite(value)) return '-'
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`
+}
+
+// Shared average formatter. Unavailable reads "-", never "0.0". Digits stay a caller choice so
+// each figure keeps the precision it already used.
+export const formatAverage = (value: number | null, digits = 2): string =>
+  (value === null || !Number.isFinite(value) ? '-' : value.toFixed(digits))
+
+// Signed form for the pre/post difference, so a gain reads "+1.5" and a drop "-1.5".
+export const formatSignedAverage = (value: number | null, digits = 2): string =>
+  (value === null || !Number.isFinite(value) ? '-' : `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`)
+
+// Count + denominator + percentage, the traceable form every headline figure is reported in:
+// "26/30 คน · 86.7%" rather than a bare "86.7%".
+export const formatCountWithPercent = (numerator: number, denominator: number, unit = 'คน'): string =>
+  (denominator <= 0
+    ? '-'
+    : `${numerator}/${denominator} ${unit} · ${formatPercent(percentOf(numerator, denominator))}`)
+
 export interface PrePostSummary {
   // Only students who finished BOTH tests. Anyone who did not is excluded entirely rather than
-  // counted as zero, which would fabricate a drop.
+  // counted as zero, which would fabricate a drop. This is the DENOMINATOR for every pre/post
+  // percentage below — never totalStudents.
   comparedCount: number
   totalStudents: number
-  preAverage: number
-  postAverage: number
-  averageDifference: number
+  // null when comparedCount is 0: with nobody eligible there is no average, and reporting 0/10
+  // would read as a real score of zero.
+  preAverage: number | null
+  postAverage: number | null
+  averageDifference: number | null
   improvedCount: number
   unchangedCount: number
   declinedCount: number
-  // Share of the COMPARED students who scored higher after than before (0 when none compared).
-  improvedPercent: number
+  // All three are shares of comparedCount (NOT totalStudents), and null when comparedCount is 0.
+  // They sum to 100% whenever they are available, which is what lets the three counts be
+  // reconciled against the per-student table.
+  improvedPercent: number | null
+  unchangedPercent: number | null
+  declinedPercent: number | null
   totalCount: number
 }
 
@@ -43,6 +86,8 @@ export interface MainSummary {
   totalCount: number
   completedCount: number
   totalStudents: number
+  // completedCount / totalStudents. Null when the room has no students.
+  completionPercent: number | null
 }
 
 export interface RecallSummary {
@@ -50,6 +95,9 @@ export interface RecallSummary {
   totalCount: number
   completedCount: number
   totalStudents: number
+  // completedCount / totalStudents. Null when the room has no students. Review/readiness only —
+  // never a baseline, never compared with Main or pre/post.
+  completionPercent: number | null
 }
 
 export interface SurveyItemSummary {
@@ -64,6 +112,9 @@ export interface SurveySummary {
   // Denominator for the satisfaction figures below: only students who answered all 6 items.
   completedCount: number
   totalStudents: number
+  // completedCount / totalStudents — how much of the class is represented by the averages.
+  // Null when the room has no students.
+  completionPercent: number | null
   // Mean across every response from a COMPLETED survey. A partially finished survey is excluded
   // entirely rather than contributing its first few answers — otherwise a student who quit after
   // item 1 would weight that item more heavily than the rest and skew satisfaction.
@@ -183,35 +234,46 @@ export const computeEvidenceSummaryFromSources = (players: EvidenceSource[]): Ev
 
   // --- pre/post, over the compared subset only ---
   const compared = students.filter((student) => student.preScore !== null && student.postScore !== null)
+  const improvedCount = compared.filter((student) => (student.difference as number) > 0).length
+  const unchangedCount = compared.filter((student) => (student.difference as number) === 0).length
+  const declinedCount = compared.filter((student) => (student.difference as number) < 0).length
   const prePost: PrePostSummary = {
     comparedCount: compared.length,
     totalStudents,
-    preAverage: average(compared.map((student) => student.preScore as number)),
-    postAverage: average(compared.map((student) => student.postScore as number)),
-    averageDifference: average(compared.map((student) => student.difference as number)),
-    improvedCount: compared.filter((student) => (student.difference as number) > 0).length,
-    unchangedCount: compared.filter((student) => (student.difference as number) === 0).length,
-    declinedCount: compared.filter((student) => (student.difference as number) < 0).length,
-    improvedPercent: compared.length === 0
-      ? 0
-      : (compared.filter((student) => (student.difference as number) > 0).length / compared.length) * 100,
+    preAverage: averageOrNull(compared.map((student) => student.preScore as number)),
+    postAverage: averageOrNull(compared.map((student) => student.postScore as number)),
+    averageDifference: averageOrNull(compared.map((student) => student.difference as number)),
+    improvedCount,
+    unchangedCount,
+    declinedCount,
+    // Denominator is compared.length — the paired-complete subset — never totalStudents.
+    improvedPercent: percentOf(improvedCount, compared.length),
+    unchangedPercent: percentOf(unchangedCount, compared.length),
+    declinedPercent: percentOf(declinedCount, compared.length),
     totalCount: ASSESSMENT_QUESTION_COUNT,
   }
 
   // --- main game, over every student ---
+  const mainCompletedCount = students.filter((student) => student.mainCompleted).length
   const main: MainSummary = {
+    // Raw individual knowledge only: player.mainScore is the /10 answer score. Boss (/3), team
+    // competition scores and every magic-item modifier are computed elsewhere and never reach
+    // this figure.
     averageScore: average(players.map((player) => player.mainScore)),
     totalCount: MAIN_QUESTION_COUNT,
-    completedCount: students.filter((student) => student.mainCompleted).length,
+    completedCount: mainCompletedCount,
     totalStudents,
+    completionPercent: percentOf(mainCompletedCount, totalStudents),
   }
 
   // --- recall, reported entirely on its own ---
+  const recallCompletedCount = players.filter((player) => player.recallAnsweredCount >= RECALL_QUESTION_COUNT).length
   const recall: RecallSummary = {
     averageCorrect: average(players.map((player) => player.recallCorrectCount)),
     totalCount: RECALL_QUESTION_COUNT,
-    completedCount: players.filter((player) => player.recallAnsweredCount >= RECALL_QUESTION_COUNT).length,
+    completedCount: recallCompletedCount,
     totalStudents,
+    completionPercent: percentOf(recallCompletedCount, totalStudents),
   }
 
   // --- survey, over COMPLETED surveys only ---
@@ -233,6 +295,7 @@ export const computeEvidenceSummaryFromSources = (players: EvidenceSource[]): Ev
   const survey: SurveySummary = {
     completedCount: completedSurveyPlayers.length,
     totalStudents,
+    completionPercent: percentOf(completedSurveyPlayers.length, totalStudents),
     overallAverage: average(completedResponses.map((response) => numericValue(response.value))),
     responseCount: completedResponses.length,
     items,

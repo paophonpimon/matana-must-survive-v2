@@ -1,5 +1,5 @@
 import { RECALL_QUESTIONS } from '../data/recallQuestions'
-import { computeEvidenceSummaryFromHistory } from './evidenceSummary'
+import { computeEvidenceSummaryFromHistory, percentOf } from './evidenceSummary'
 import { buildXlsx, type SheetData } from './xlsx'
 import type { RoundHistoryEntry } from '../types/game'
 
@@ -98,6 +98,11 @@ const roundsOf = (entries: RoundHistoryEntry[]): number[] =>
   [...new Set(entries.map((entry) => entry.round))].sort((a, b) => a - b)
 
 const round2 = (value: number): number => Math.round(value * 100) / 100
+// Unavailable stays "-" in the sheet: an absent measurement must never export as a real 0.
+const round2OrDash = (value: number | null): number | string =>
+  (value === null || !Number.isFinite(value) ? '-' : Math.round(value * 100) / 100)
+const round1OrDash = (value: number | null): number | string =>
+  (value === null || !Number.isFinite(value) ? '-' : Math.round(value * 10) / 10)
 
 export const buildEvidenceSummarySheet = (entries: RoundHistoryEntry[]): SheetData => ({
   name: 'สรุปหลักฐาน',
@@ -116,11 +121,11 @@ export const buildEvidenceSummarySheet = (entries: RoundHistoryEntry[]): SheetDa
         round,
         summary.totalStudents,
         summary.prePost.comparedCount,
-        round2(summary.prePost.preAverage),
-        round2(summary.prePost.postAverage),
-        round2(summary.prePost.averageDifference),
+        round2OrDash(summary.prePost.preAverage),
+        round2OrDash(summary.prePost.postAverage),
+        round2OrDash(summary.prePost.averageDifference),
         summary.prePost.improvedCount,
-        round2(summary.prePost.improvedPercent),
+        round1OrDash(summary.prePost.improvedPercent),
         summary.prePost.unchangedCount,
         summary.prePost.declinedCount,
         round2(summary.main.averageScore),
@@ -130,6 +135,53 @@ export const buildEvidenceSummarySheet = (entries: RoundHistoryEntry[]): SheetDa
         summary.survey.completedCount,
         round2(summary.survey.overallAverage),
       ] as (string | number)[]
+    }),
+  ],
+})
+
+// One row per indicator, in the auditable form: numerator, denominator, percentage, value.
+// The denominator is stated explicitly on every row because the pre/post rows are taken over the
+// paired-complete subset while the completion rows are taken over the whole class — reading a
+// percentage without its denominator is exactly the ambiguity this sheet removes.
+//
+// Every figure comes from computeEvidenceSummaryFromHistory, the same aggregation the screen and
+// the printout use. Nothing is recomputed here.
+export const buildEvidenceTraceabilitySheet = (entries: RoundHistoryEntry[]): SheetData => ({
+  name: 'ที่มาของตัวเลข',
+  rows: [
+    ['รอบ', 'ตัวชี้วัด', 'จำนวนที่เข้าเกณฑ์', 'ตัวหาร', 'ฐานที่ใช้', 'ร้อยละ', 'ค่าเฉลี่ย/ผลลัพธ์'],
+    ...roundsOf(entries).flatMap((round) => {
+      const s = computeEvidenceSummaryFromHistory(entries.filter((entry) => entry.round === round))
+      const paired = 'ผู้ทำครบทั้งก่อนและหลังเรียน'
+      const everyone = 'นักเรียนทั้งหมด'
+      return [
+        [round, 'มีข้อมูลก่อน–หลังครบทั้งสองชุด', s.prePost.comparedCount, s.totalStudents, everyone,
+          round1OrDash(percentOf(s.prePost.comparedCount, s.totalStudents)), '-'],
+        [round, 'คะแนนหลังเรียนสูงกว่าก่อนเรียน', s.prePost.improvedCount, s.prePost.comparedCount, paired,
+          round1OrDash(s.prePost.improvedPercent), '-'],
+        [round, 'คะแนนหลังเรียนเท่าเดิม', s.prePost.unchangedCount, s.prePost.comparedCount, paired,
+          round1OrDash(s.prePost.unchangedPercent), '-'],
+        [round, 'คะแนนหลังเรียนต่ำกว่าก่อนเรียน', s.prePost.declinedCount, s.prePost.comparedCount, paired,
+          round1OrDash(s.prePost.declinedPercent), '-'],
+        [round, 'ก่อนเรียน เฉลี่ย /10', '-', s.prePost.comparedCount, paired, '-',
+          round2OrDash(s.prePost.preAverage)],
+        [round, 'หลังเรียน เฉลี่ย /10', '-', s.prePost.comparedCount, paired, '-',
+          round2OrDash(s.prePost.postAverage)],
+        [round, 'ผลต่างเฉลี่ย', '-', s.prePost.comparedCount, paired, '-',
+          round2OrDash(s.prePost.averageDifference)],
+        [round, 'ทำกิจกรรมหลักครบ 10 ข้อ', s.main.completedCount, s.totalStudents, everyone,
+          round1OrDash(s.main.completionPercent), '-'],
+        [round, 'เกมหลัก เฉลี่ย /10 (คะแนนความรู้รายบุคคล)', '-', s.totalStudents, everyone, '-',
+          round2OrDash(s.main.averageScore)],
+        [round, 'ทำการทบทวนครบ 5 ข้อ', s.recall.completedCount, s.totalStudents, everyone,
+          round1OrDash(s.recall.completionPercent), '-'],
+        [round, 'ผลการทบทวน เฉลี่ย /5', '-', s.totalStudents, everyone, '-',
+          round2OrDash(s.recall.averageCorrect)],
+        [round, 'ทำแบบประเมินครบ 6 ข้อ', s.survey.completedCount, s.totalStudents, everyone,
+          round1OrDash(s.survey.completionPercent), '-'],
+        [round, 'ความพึงพอใจ เฉลี่ย /5', '-', s.survey.completedCount, 'ผู้ทำแบบประเมินครบ', '-',
+          round2OrDash(s.survey.responseCount === 0 ? null : s.survey.overallAverage)],
+      ] as (string | number)[][]
     }),
   ],
 })
@@ -184,6 +236,7 @@ export const buildLearningWorkbook = (entries: RoundHistoryEntry[]): Uint8Array 
     buildPerQuestionSheet(ordered),
     buildClassSummarySheet(ordered),
     buildEvidenceSummarySheet(ordered),
+    buildEvidenceTraceabilitySheet(ordered),
     buildStudentEvidenceSheet(ordered),
     buildSurveyItemSheet(ordered),
   ])

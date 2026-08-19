@@ -3469,3 +3469,394 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .boss-board-aura, .boss-board-live, .boss-board-timer.is-urgent { animation: none; }
   .boss-team-card { transition: none; transform: none; }
 }
+
+/* ==========================================================================
+   Teacher final result — "ศูนย์บัญชาการ" command centre
+   ==========================================================================
+   Target viewport 1180x820 landscape tablet. Summary first, details on demand:
+   the hero + tabs + room bar occupy the first screen, and only the active tab
+   expands. Long content scrolls INSIDE its panel (.rcc-panel-scroll) so the
+   page itself never grows tall because a class roster is long.
+
+   Surfaces are CSS, not image slices — ivory panels, tab chips, buttons, table
+   rows, borders and shadows are all drawn here. The production artwork is used
+   only for atmosphere (background, rank emblems, divider, medallion, roses).   */
+
+.teacher-final-page .scene-fallback {
+  background-image: url('/assets/teacher-result/teacher-result-bg.png');
+  background-size: cover;
+  background-position: center;
+}
+
+/* The command centre supplies its own ivory reading surface, so the page-level
+   dark wash is lightened — otherwise the navy frame reads almost black. */
+.teacher-final-page .scene-overlay { background: linear-gradient(180deg, rgba(4,6,26,0.58), rgba(4,6,26,0.72)); }
+
+/* The final-result screen is viewport-locked so the command centre can claim exactly the
+   leftover height: hero + nav are fixed-size, the tab panel takes the remainder and scrolls
+   INTERNALLY, and the room bar sits at the end — visible without scrolling and without fixed
+   positioning.
+   min-height: 0 on every link of the chain is the load-bearing part: a flex item defaults to
+   min-height:auto and refuses to shrink below its content, which is what let a long evidence
+   table or roster push the room bar off-screen instead of scrolling inside its own panel. */
+.teacher-final-page { height: 100dvh; overflow: hidden; }
+.teacher-final-page > div { min-height: 0; height: 100%; }
+.teacher-final-page .teacher-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: 1rem;
+}
+
+.rcc-cc {
+  flex: 1;
+  min-height: 0;
+  --cc-ivory: #f7f1e3;
+  --cc-ivory-deep: #ede3cf;
+  --cc-navy: #101a3f;
+  --cc-gold-soft: #e2bd65;
+  --cc-crimson: #9d1f36;
+  --cc-ink: #2a2418;
+  --cc-ink-soft: #6b6151;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.45rem;
+}
+
+/* Hero */
+.rcc-hero {
+  flex: none;
+  min-height: 9.5rem;
+  display: grid;
+  grid-template-columns: minmax(9rem, 20fr) minmax(0, 53fr) minmax(11rem, 27fr);
+  align-items: stretch;
+  gap: 0.8rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.9rem;
+  background: linear-gradient(180deg, var(--cc-ivory), var(--cc-ivory-deep));
+  border: 1px solid rgba(201,162,39,0.55);
+  box-shadow: 0 1.2rem 2.6rem rgba(2,4,20,0.42), inset 0 1px 0 rgba(255,255,255,0.7);
+}
+
+.rcc-hero-round { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 0.1rem; min-width: 0; }
+.rcc-hero-round-label { font-size: 0.8rem; line-height: 1.25; color: var(--cc-ink-soft); }
+/* Typographic, not an emblem — see the note in TeacherResultCommandCenter. */
+.rcc-hero-round-value { font-size: 2.9rem; font-weight: 800; line-height: 1; color: var(--cc-ink); font-variant-numeric: tabular-nums; }
+
+.rcc-hero-champion {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.65rem 1rem;
+  border-radius: 0.8rem;
+  background: linear-gradient(135deg, #8d1b30, #b8283f 55%, #8d1b30);
+  border: 1px solid rgba(226,189,101,0.75);
+  box-shadow: 0 0.7rem 1.6rem rgba(120,18,38,0.4), inset 0 1px 0 rgba(255,255,255,0.22);
+  color: #fff6e6;
+}
+.rcc-hero-champion-empty { display: block; text-align: center; }
+.rcc-hero-champion-empty p { margin: 0; padding: 0.6rem 0; color: #fff6e6; }
+.rcc-hero-champion-body { min-width: 0; display: flex; flex-direction: column; }
+.rcc-hero-champion-body small { font-size: 0.8rem; opacity: 0.9; }
+.rcc-hero-champion-body strong { font-size: 1.7rem; font-weight: 800; line-height: 1.15; overflow-wrap: anywhere; }
+.rcc-hero-champion-score { text-align: center; padding-left: 0.75rem; border-left: 1px solid rgba(255,246,230,0.32); }
+.rcc-hero-champion-score small { display: block; font-size: 0.78rem; opacity: 0.9; }
+.rcc-hero-champion-score strong { font-size: 1.95rem; font-weight: 800; line-height: 1.1; }
+
+.rcc-hero-runner {
+  display: flex; align-items: center; gap: 0.55rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.75rem;
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(247,241,227,0.75));
+  border: 1px solid rgba(201,162,39,0.45);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+}
+.rcc-hero-runner-body { min-width: 0; flex: 1; display: flex; flex-direction: column; line-height: 1.2; }
+.rcc-hero-runner-body small { font-size: 0.72rem; color: var(--cc-ink-soft); }
+.rcc-hero-runner-body strong { font-size: 1.12rem; font-weight: 700; color: var(--cc-ink); overflow-wrap: anywhere; }
+.rcc-hero-runner-score { flex: none; text-align: right; }
+.rcc-hero-runner-score small { display: block; font-size: 0.68rem; color: var(--cc-ink-soft); }
+.rcc-hero-runner-score strong { font-size: 1.45rem; font-weight: 800; color: var(--cc-ink); line-height: 1.1; }
+
+/* Rank badge: emblem art + real HTML rank number */
+.rcc-rank-badge { position: relative; display: grid; place-items: center; flex: none; }
+.rcc-rank-badge img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.rcc-rank-badge b {
+  position: relative;
+  font-weight: 800;
+  color: #fff3d6;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+}
+.rcc-rank-badge-lg { width: 5rem; height: 5rem; }
+.rcc-rank-badge-lg b { font-size: 1.55rem; margin-top: 0.35rem; }
+.rcc-rank-badge-md { width: 3.7rem; height: 3.7rem; }
+.rcc-rank-badge-md b { font-size: 1.15rem; margin-top: 0.26rem; }
+.rcc-rank-badge-sm { width: 2.3rem; height: 2.3rem; }
+.rcc-rank-badge-sm b { font-size: 0.82rem; margin-top: 0.16rem; }
+/* Rank 4+ has no approved artwork — a clean CSS chip instead of invented art. */
+.rcc-rank-badge-plain {
+  border-radius: 50%;
+  background: linear-gradient(180deg, #e9dec4, #d5c5a2);
+  border: 1px solid rgba(201,162,39,0.7);
+}
+.rcc-rank-badge-plain b { color: var(--cc-ink); text-shadow: none; }
+
+/* Tabs + utilities */
+/* Tabs and utilities read as ONE command bar: a single ivory strip, one baseline, one height
+   rhythm — navigation on the left, smaller utility actions on the right. */
+.rcc-navrow {
+  flex: none;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 0.75rem;
+  background: linear-gradient(180deg, rgba(247,241,227,0.9), rgba(237,227,207,0.82));
+  border: 1px solid rgba(201,162,39,0.4);
+}
+.rcc-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.rcc-tab {
+  height: 2.2rem;
+  display: inline-flex; align-items: center;
+  padding: 0 0.85rem;
+  border-radius: 0.55rem;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--cc-ink);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.rcc-tab:hover { background: rgba(255,255,255,0.85); }
+.rcc-tab:focus-visible { outline: 2px solid var(--cc-gold-soft); outline-offset: 2px; }
+.rcc-tab.is-active {
+  background: linear-gradient(180deg, #a5203a, #7f1329);
+  border-color: rgba(226,189,101,0.85);
+  color: #fff3d6;
+  box-shadow: 0 0.2rem 0.5rem rgba(120,18,38,0.28);
+}
+
+.rcc-utilities { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; padding-left: 0.5rem; border-left: 1px solid rgba(42,36,24,0.14); }
+.rcc-utility {
+  height: 1.85rem;
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0 0.65rem;
+  border-radius: 0.45rem;
+  background: rgba(255,255,255,0.75);
+  border: 1px solid rgba(42,36,24,0.16);
+  color: var(--cc-ink-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.rcc-utility:hover { background: #fffaf0; color: var(--cc-ink); }
+.rcc-utility:focus-visible { outline: 2px solid var(--cc-gold-soft); outline-offset: 2px; }
+
+/* Panel frame */
+.rcc-panel-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  border-radius: 0.9rem;
+  background: linear-gradient(180deg, var(--cc-ivory), var(--cc-ivory-deep));
+  border: 1px solid rgba(201,162,39,0.55);
+  box-shadow: 0 1.2rem 2.6rem rgba(2,4,20,0.4), inset 0 1px 0 rgba(255,255,255,0.7);
+  overflow: hidden;
+}
+/* Faint rose watermark, low weight so it never competes with the data. */
+.rcc-panel-frame::after {
+  content: '';
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 17rem; height: 11rem;
+  background: url('/assets/teacher-result/rose-watermark-faint.png') no-repeat right bottom / contain;
+  opacity: 0.1;
+  mix-blend-mode: multiply;
+  pointer-events: none;
+}
+/* Internal scrolling: every panel is the scroll container, so long rosters/evidence never grow
+   the page. Tab 1 is sized to fit without scrolling at the 1180x820 target. */
+.rcc-panel { position: relative; z-index: 1; flex: 1; min-height: 0; overflow-y: auto; padding: 0.75rem; }
+.rcc-panel-scroll { max-height: none; }
+.rcc-panel-note { margin: 0.6rem 0 0; font-size: 0.8rem; color: var(--cc-ink-soft); }
+
+/* Three columns, top-aligned, with the review list given a little more room than the two
+   summary cards either side of it. */
+.rcc-panel-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr); gap: 0.65rem; align-items: start; }
+
+.rcc-card {
+  position: relative;
+  padding: 0.7rem;
+  border-radius: 0.7rem;
+  background: linear-gradient(180deg, rgba(255,253,247,0.95), rgba(250,244,231,0.88));
+  border: 1px solid rgba(201,162,39,0.35);
+  box-shadow: 0 0.25rem 0.7rem rgba(60,45,20,0.07);
+}
+/* One reusable corner ornament, mirrored, on the summary cards only. */
+.rcc-card::before,
+.rcc-card::after {
+  content: '';
+  position: absolute;
+  width: 1.1rem; height: 1.1rem;
+  background: url('/assets/teacher-result/panel-corner-gold.png') no-repeat center / contain;
+  opacity: 0.3;
+  pointer-events: none;
+}
+.rcc-card::before { top: 0.2rem; left: 0.2rem; }
+.rcc-card::after { bottom: 0.2rem; right: 0.2rem; transform: rotate(180deg); }
+
+.rcc-card-title { display: flex; align-items: center; gap: 0.45rem; margin: 0 0 0.45rem; font-size: 0.92rem; font-weight: 700; color: var(--cc-ink); }
+.rcc-card-key {
+  display: grid; place-items: center;
+  width: 1.3rem; height: 1.3rem;
+  border-radius: 0.4rem;
+  background: var(--cc-navy);
+  color: #ffe9b0;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.rcc-champion-block { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; padding: 0.55rem; border-radius: 0.6rem; background: linear-gradient(180deg, rgba(157,31,54,0.09), rgba(157,31,54,0.03)); border: 1px solid rgba(157,31,54,0.22); }
+.rcc-champion-block small { font-size: 0.78rem; color: var(--cc-ink-soft); }
+.rcc-champion-block strong { font-size: 1.12rem; font-weight: 800; color: var(--cc-crimson); text-align: center; overflow-wrap: anywhere; }
+.rcc-champion-block b { font-size: 1.5rem; font-weight: 800; color: var(--cc-ink); line-height: 1.1; }
+
+.rcc-runner-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.45rem; padding: 0.4rem 0.5rem; border-radius: 0.6rem; background: rgba(255,255,255,0.75); border: 1px solid rgba(42,36,24,0.12); }
+.rcc-runner-row span { flex: 1; min-width: 0; font-weight: 600; color: var(--cc-ink); overflow-wrap: anywhere; }
+.rcc-runner-row b { font-size: 1.1rem; font-weight: 800; color: var(--cc-ink); }
+.rcc-runner-row b small { display: block; font-size: 0.65rem; font-weight: 500; color: var(--cc-ink-soft); }
+
+.rcc-topic-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.22rem; }
+.rcc-topic-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; padding: 0.28rem 0.45rem; border-radius: 0.4rem; background: rgba(255,255,255,0.8); font-size: 0.85rem; color: var(--cc-ink); }
+.rcc-topic-list li b { flex: none; font-weight: 700; color: var(--cc-ink-soft); font-size: 0.84rem; }
+.rcc-topic-divider { display: block; width: 100%; max-width: 11rem; margin: 0.5rem auto 0.4rem; opacity: 0.55; }
+.rcc-topic-extremes { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.rcc-topic-extremes div { text-align: center; }
+.rcc-topic-extremes small { display: block; font-size: 0.75rem; color: var(--cc-ink-soft); }
+.rcc-topic-extremes strong { font-size: 0.95rem; color: var(--cc-ink); overflow-wrap: anywhere; }
+
+.rcc-evidence-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+.rcc-evidence-cell { display: flex; flex-direction: column; align-items: center; gap: 0.12rem; padding: 0.45rem 0.3rem; border-radius: 0.55rem; background: rgba(255,255,255,0.85); border: 1px solid rgba(201,162,39,0.28); text-align: center; }
+.rcc-medallion { position: relative; display: grid; place-items: center; width: 2.4rem; height: 2.4rem; }
+.rcc-medallion img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.rcc-medallion i { position: relative; font-style: normal; font-size: 1.1rem; }
+.rcc-evidence-cell small { font-size: 0.72rem; line-height: 1.2; color: var(--cc-ink-soft); }
+.rcc-evidence-cell strong { font-size: 0.98rem; font-weight: 800; color: var(--cc-ink); }
+
+.rcc-empty { margin: 0.6rem 0 0; padding: 0.8rem; border-radius: 0.6rem; background: rgba(42,36,24,0.05); color: var(--cc-ink-soft); font-size: 0.88rem; text-align: center; }
+
+/* Team board (tab 3) */
+.rcc-team-board { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.rcc-team-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.7rem; padding: 0.55rem 0.7rem; border-radius: 0.7rem; background: rgba(255,255,255,0.72); border: 1px solid rgba(42,36,24,0.12); }
+.rcc-team-row.is-champion { background: linear-gradient(180deg, rgba(157,31,54,0.1), rgba(255,255,255,0.7)); border-color: rgba(157,31,54,0.3); }
+.rcc-team-identity { min-width: 0; display: flex; flex-direction: column; }
+.rcc-team-identity strong { font-size: 1.02rem; font-weight: 700; color: var(--cc-ink); overflow-wrap: anywhere; }
+.rcc-team-identity small { font-size: 0.78rem; color: var(--cc-ink-soft); }
+.rcc-team-score { text-align: right; }
+.rcc-team-score small { display: block; font-size: 0.7rem; color: var(--cc-ink-soft); }
+.rcc-team-score strong { font-size: 1.3rem; font-weight: 800; color: var(--cc-ink); }
+
+/* Evidence + roster on the ivory surface.
+   The shared EvidenceSummaryPanel is dark-surface by default; on this ivory
+   command centre its type and table need the light-surface treatment. */
+.rcc-panel .evidence-summary { margin-top: 0; }
+.rcc-panel .evidence-summary-title { color: var(--cc-ink); }
+.rcc-panel .evidence-summary-note,
+.rcc-panel .evidence-block-title span,
+.rcc-panel .evidence-survey-score small { color: var(--cc-ink-soft); }
+.rcc-panel .evidence-block { background: rgba(255,255,255,0.7); border-color: rgba(42,36,24,0.12); }
+.rcc-panel .evidence-block-title,
+.rcc-panel .evidence-grid dd,
+.rcc-panel .evidence-survey-statement,
+.rcc-panel .evidence-survey-score { color: var(--cc-ink); }
+.rcc-panel .evidence-grid dt { color: var(--cc-ink-soft); }
+.rcc-panel .evidence-empty { background: rgba(42,36,24,0.05); color: var(--cc-ink-soft); }
+.rcc-panel .learning-history-scroll { max-height: none; }
+.rcc-panel .learning-history-table th { position: sticky; top: 0; z-index: 1; background: var(--cc-ivory-deep); color: var(--cc-ink); }
+.rcc-panel .learning-history-table td { color: var(--cc-ink); border-color: rgba(42,36,24,0.1); }
+
+/* Room controls, pinned in view */
+.rcc-roombar {
+  flex: none;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 3.5rem;
+  padding: 0.45rem 1rem;
+  border-radius: 0.85rem;
+  background: linear-gradient(180deg, rgba(16,26,63,0.92), rgba(10,16,42,0.96));
+  border: 1px solid rgba(201,162,39,0.45);
+  overflow: hidden;
+}
+.rcc-roombar-rose { position: absolute; bottom: -0.3rem; width: 5rem; opacity: 0.55; pointer-events: none; }
+.rcc-roombar-rose-left { left: -0.5rem; }
+.rcc-roombar-rose-right { right: -0.5rem; }
+.rcc-roombar-actions { position: relative; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.8rem; }
+
+.rcc-room-primary,
+.rcc-room-danger {
+  padding: 0.55rem 1.6rem;
+  border-radius: 0.6rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms ease, filter 140ms ease;
+}
+.rcc-room-primary {
+  background: linear-gradient(180deg, #a5203a, #7f1329);
+  border: 1px solid rgba(226,189,101,0.8);
+  color: #fff3d6;
+}
+.rcc-room-danger {
+  background: rgba(247,241,227,0.94);
+  border: 1px solid rgba(157,31,54,0.6);
+  color: #8d1b30;
+}
+.rcc-room-primary:hover:not(:disabled),
+.rcc-room-danger:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+.rcc-room-primary:focus-visible,
+.rcc-room-danger:focus-visible { outline: 2px solid var(--cc-gold-soft); outline-offset: 2px; }
+.rcc-room-primary:disabled,
+.rcc-room-danger:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Compact tablet landscape (the 1180x820 target) — trim the hero and give the
+   scrolling panels a little less height so the room bar stays in view. */
+/* Shorter viewports: trim the hero further so the panel keeps most of the height. */
+/* Shorter viewports: trim the hero a little so the panel keeps most of the height. */
+@media (max-height: 800px) {
+  .rcc-hero { min-height: 8.5rem; padding: 0.6rem 0.9rem; }
+  .rcc-hero-round-value { font-size: 2.4rem; }
+  .rcc-hero-champion-body strong { font-size: 1.45rem; }
+  .rcc-hero-champion-score strong { font-size: 1.7rem; }
+  .rcc-rank-badge-lg { width: 4.2rem; height: 4.2rem; }
+  .rcc-rank-badge-md { width: 3.2rem; height: 3.2rem; }
+}
+
+@media (max-width: 900px) {
+  .rcc-cc { flex: none; }
+  .rcc-hero { grid-template-columns: 1fr; }
+  .rcc-hero-runner { justify-content: space-between; }
+  .rcc-evidence-grid { grid-template-columns: 1fr; }
+}
+
+/* Decorative artwork is atmosphere, not information — it never prints. */
+@media print {
+  .rcc-cc { display: none; }
+}
+
+/* Evidence traceability: count + denominator + percentage, so a headline figure can always be
+   traced back to the students it was computed over. */
+.evidence-trace-list { list-style: none; margin: 0.6rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.evidence-trace-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; font-size: 0.85rem; }
+.evidence-trace-list li span { color: inherit; opacity: 0.85; }
+.evidence-trace-list li b { flex: none; font-variant-numeric: tabular-nums; font-weight: 700; }
+/* Light-surface variant inside the result command centre. */
+.rcc-panel .evidence-trace-list li { color: var(--cc-ink); }
+.rcc-panel .evidence-trace-list li span { color: var(--cc-ink-soft); opacity: 1; }
+/* Compact denominator line under each Tab 1 preview value. */
+.rcc-evidence-trace { font-size: 0.66rem; font-style: normal; line-height: 1.25; color: var(--cc-ink-soft); font-variant-numeric: tabular-nums; }

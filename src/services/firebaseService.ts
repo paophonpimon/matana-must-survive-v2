@@ -2061,22 +2061,37 @@ export class FirebaseGameService implements GameService {
     // question, casting it would either waste the effect or retroactively change the board under a
     // teammate who already committed.
     //
-    // Checked outside the transaction because a whole collection cannot be read inside one — the
-    // same best-effort shape startRoom already uses for its team-readiness checks. Rejected before
-    // any write, so the item is NOT consumed.
+    // Read from answerProgress, NOT from the players collection. players/{id} is deliberately
+    // `allow list: if isTeacher(roomCode)` — a student may read their OWN player doc but may never
+    // enumerate the roster — so the original getDocs(players) here was permission-denied for the
+    // very captain it was meant to gate, and Illusion could never be activated against real
+    // Firebase. answerProgress is the collection built for exactly this signal: broadly readable
+    // by design (`allow read: if signedIn()`), carrying only playerId/teamId/questionId/
+    // currentRound/answeredAt — never a choice, never correctness — and it already powers the
+    // "teammates answered X/Y" display. The query is narrowed to this team, so nothing outside the
+    // caller's own team is read.
+    //
+    // currentRound must be compared as well as questionId: answerProgress is not wiped between
+    // rounds, so a stale entry from an earlier round that happens to reuse the same question id
+    // would otherwise read as "a teammate already answered" (see AnswerProgressEntry's doc
+    // comment). Checked outside the transaction — a collection query cannot run inside one — and
+    // rejected before any write, so the item is NOT consumed.
     if (itemType === 'illusion') {
       const roomSnapshot = await getDoc(roomRef)
-      const currentQuestionId = roomSnapshot.exists()
-        ? mapRoom(roomSnapshot.data()).questionIds[mapRoom(roomSnapshot.data()).currentQuestionIndex]
-        : undefined
-      if (currentQuestionId) {
-        const playerSnapshots = await getDocs(collection(db, 'rooms', roomCode, 'players'))
-        const someoneAnswered = playerSnapshots.docs
-          .map(mapPlayer)
-          .some((member) => member.teamId === teamId
-            && member.answers.some((entry) => entry.questionId === currentQuestionId))
-        if (someoneAnswered) {
-          throw new Error('ผู้ใช้:มีเพื่อนร่วมทีมตอบข้อนี้ไปแล้ว จึงใช้มนตร์ลวงตากับข้อนี้ไม่ได้')
+      if (roomSnapshot.exists()) {
+        const room = mapRoom(roomSnapshot.data())
+        const currentQuestionId = room.questionIds[room.currentQuestionIndex]
+        if (currentQuestionId) {
+          const progressSnapshots = await getDocs(query(
+            collection(db, 'rooms', roomCode, 'answerProgress'),
+            where('teamId', '==', teamId),
+          ))
+          const someoneAnswered = progressSnapshots.docs
+            .map(mapAnswerProgressEntry)
+            .some((entry) => entry.questionId === currentQuestionId && entry.currentRound === room.currentRound)
+          if (someoneAnswered) {
+            throw new Error('ผู้ใช้:มีเพื่อนร่วมทีมตอบข้อนี้ไปแล้ว จึงใช้มนตร์ลวงตากับข้อนี้ไม่ได้')
+          }
         }
       }
     }

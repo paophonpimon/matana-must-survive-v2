@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom'
-import type { EvidenceSummary } from '../lib/evidenceSummary'
+import { formatAverage, formatCountWithPercent, formatPercent, formatSignedAverage, type EvidenceSummary  } from '../lib/evidenceSummary'
 import type { PrintablePlayer } from '../lib/roomHistory'
 
 interface TeacherReportPrintViewProps {
@@ -70,41 +70,43 @@ export const TeacherReportPrintView = ({
       ) : (
         <>
           <dl className="print-report-summary">
-            <div><dt>ก่อนเรียน (เฉลี่ย)</dt><dd>{evidence.prePost.preAverage.toFixed(1)}/{evidence.prePost.totalCount}</dd></div>
-            <div><dt>หลังเรียน (เฉลี่ย)</dt><dd>{evidence.prePost.postAverage.toFixed(1)}/{evidence.prePost.totalCount}</dd></div>
-            <div><dt>ผลต่างเฉลี่ย</dt><dd>{evidence.prePost.averageDifference >= 0 ? '+' : ''}{evidence.prePost.averageDifference.toFixed(1)}</dd></div>
+            <div><dt>ก่อนเรียน (เฉลี่ย)</dt><dd>{formatAverage(evidence.prePost.preAverage, 2)}/{evidence.prePost.totalCount}</dd></div>
+            <div><dt>หลังเรียน (เฉลี่ย)</dt><dd>{formatAverage(evidence.prePost.postAverage, 2)}/{evidence.prePost.totalCount}</dd></div>
+            <div><dt>ผลต่างเฉลี่ย</dt><dd>{formatSignedAverage(evidence.prePost.averageDifference, 2)}</dd></div>
           </dl>
           <p className="print-report-meta">
-            คะแนนหลังเรียนสูงกว่าก่อนเรียน {evidence.prePost.improvedCount} คน ({evidence.prePost.improvedPercent.toFixed(0)}%)
-            {' · '}เท่าเดิม {evidence.prePost.unchangedCount} คน
-            {' · '}ต่ำกว่า {evidence.prePost.declinedCount} คน
+            จากผู้เรียนที่มีข้อมูลก่อน–หลังครบ {evidence.prePost.comparedCount} คน
+            <br />
+            คะแนนหลังเรียนสูงกว่าก่อนเรียน {evidence.prePost.improvedCount}/{evidence.prePost.comparedCount} คน ({formatPercent(evidence.prePost.improvedPercent)})
+            {' · '}เท่าเดิม {evidence.prePost.unchangedCount}/{evidence.prePost.comparedCount} คน ({formatPercent(evidence.prePost.unchangedPercent)})
+            {' · '}ต่ำกว่า {evidence.prePost.declinedCount}/{evidence.prePost.comparedCount} คน ({formatPercent(evidence.prePost.declinedPercent)})
           </p>
         </>
       )}
 
       <h2 className="print-section-title">ผลการเล่นเกมหลัก</h2>
       <dl className="print-report-summary">
-        <div><dt>คะแนนเฉลี่ย</dt><dd>{evidence.main.averageScore.toFixed(1)}/{evidence.main.totalCount}</dd></div>
-        <div><dt>ทำครบ 10 ข้อ</dt><dd>{evidence.main.completedCount}/{evidence.totalStudents} คน</dd></div>
+        <div><dt>คะแนนเฉลี่ย</dt><dd>{formatAverage(evidence.main.averageScore, 2)}/{evidence.main.totalCount}</dd></div>
+        <div><dt>ทำกิจกรรมหลักครบ</dt><dd>{formatCountWithPercent(evidence.main.completedCount, evidence.totalStudents)}</dd></div>
       </dl>
 
       {/* Reported on its own. Never compared with Main or with pre/post. */}
       <h2 className="print-section-title">ผลการทบทวน</h2>
       <dl className="print-report-summary">
-        <div><dt>คะแนนเฉลี่ย</dt><dd>{evidence.recall.averageCorrect.toFixed(1)}/{evidence.recall.totalCount}</dd></div>
-        <div><dt>ทำครบ 5 ข้อ</dt><dd>{evidence.recall.completedCount}/{evidence.totalStudents} คน</dd></div>
+        <div><dt>คะแนนเฉลี่ย</dt><dd>{formatAverage(evidence.recall.averageCorrect, 2)}/{evidence.recall.totalCount}</dd></div>
+        <div><dt>ทำการทบทวนครบ</dt><dd>{formatCountWithPercent(evidence.recall.completedCount, evidence.totalStudents)}</dd></div>
         <div><dt>ทบทวนได้ดีที่สุด</dt><dd>{strongestConceptLabel}</dd></div>
         <div><dt>ทบทวนได้น้อยที่สุด</dt><dd>{weakestConceptLabel}</dd></div>
       </dl>
 
       <h2 className="print-section-title">แบบประเมินกิจกรรม</h2>
-      <p className="print-report-meta">ทำครบ {evidence.survey.completedCount} / {evidence.totalStudents} คน</p>
+      <p className="print-report-meta">ทำแบบประเมินครบ {formatCountWithPercent(evidence.survey.completedCount, evidence.totalStudents)}</p>
       {evidence.survey.responseCount === 0 ? (
         <p className="print-report-empty">ยังไม่มีแบบประเมินที่ทำครบทุกข้อ</p>
       ) : (
         <>
           <dl className="print-report-summary">
-            <div><dt>ค่าเฉลี่ยรวม</dt><dd>{evidence.survey.overallAverage.toFixed(2)}/5</dd></div>
+            <div><dt>ค่าเฉลี่ยรวม</dt><dd>{formatAverage(evidence.survey.overallAverage, 2)}/5</dd></div>
           </dl>
           <table className="print-report-table print-survey-table">
             <thead>

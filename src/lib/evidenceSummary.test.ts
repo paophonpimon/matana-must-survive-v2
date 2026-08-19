@@ -48,12 +48,25 @@ const makePlayer = (overrides: Partial<Player> & { id: string }): Player => ({
 })
 
 describe('computeEvidenceSummary', () => {
-  it('an empty class produces zeroes everywhere and never divides by zero', () => {
+  // Traceability pass: an empty class no longer reports 0 for the pre/post figures. A 0 there
+  // would assert "nobody improved" when in truth nobody was eligible to be measured, so those
+  // now read null and the UI renders "-". The counts stay 0 (genuinely zero students), and
+  // nothing divides by zero either way.
+  it('an empty class reports unavailable pre/post values, not zeroes, and never divides by zero', () => {
     const summary = computeEvidenceSummary([])
     expect(summary.totalStudents).toBe(0)
     expect(summary.prePost.comparedCount).toBe(0)
-    expect(summary.prePost.preAverage).toBe(0)
-    expect(summary.prePost.improvedPercent).toBe(0)
+    expect(summary.prePost.preAverage).toBeNull()
+    expect(summary.prePost.postAverage).toBeNull()
+    expect(summary.prePost.averageDifference).toBeNull()
+    expect(summary.prePost.improvedPercent).toBeNull()
+    expect(summary.prePost.unchangedPercent).toBeNull()
+    expect(summary.prePost.declinedPercent).toBeNull()
+    // Completion percentages have no denominator either, so they are unavailable too.
+    expect(summary.main.completionPercent).toBeNull()
+    expect(summary.recall.completionPercent).toBeNull()
+    expect(summary.survey.completionPercent).toBeNull()
+    // Class-wide averages keep their existing 0-for-empty convention, unchanged by this pass.
     expect(summary.main.averageScore).toBe(0)
     expect(summary.recall.averageCorrect).toBe(0)
     expect(summary.survey.overallAverage).toBe(0)

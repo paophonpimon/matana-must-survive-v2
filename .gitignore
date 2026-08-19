@@ -18,3 +18,7 @@ tmp/
 
 # Local-only Claude Code settings (launch.json is shared, settings.local.json is per-machine)
 .claude/settings.local.json
+
+# Local roster data — real student identities must never be committed.
+*.csv
+/local-roster/
