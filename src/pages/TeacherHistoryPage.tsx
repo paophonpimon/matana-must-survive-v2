@@ -3,19 +3,28 @@ import { Link } from 'react-router-dom'
 import { BrandHeader, LoadingPanel, ScenePage } from '../components/Layout'
 import { EvidenceSummaryPanel } from '../components/EvidenceSummaryPanel'
 import { TeacherReportPrintView } from '../components/TeacherReportPrintView'
+import { TeacherResultCommandCenter } from '../components/TeacherResultCommandCenter'
 import { useGame } from '../context/GameContext'
 import { computeEvidenceSummaryFromHistory } from '../lib/evidenceSummary'
+import { parseRosterCsv } from '../lib/rosterCsv'
+import { SHOWCASE_ROOM_CODE } from '../lib/showcaseRound'
+import { computeClassRecallSummary } from '../lib/learning'
+import { computeTeamCompetitionStats } from '../lib/magic'
+import { computeTeamStats } from '../lib/teamScoring'
+import { recallQuestionsById } from '../data/recallQuestions'
 import { downloadLearningWorkbook } from '../lib/learningExport'
 import {
   distinctStudentCount,
   entriesForRound,
+  historyToDerivedPlayers,
   historyToPrintablePlayers,
   questionIdsFromHistory,
   summarizeRoundHistory,
   teamNamesFromHistory,
+  teamsFromHistory,
 } from '../lib/roomHistory'
 import { friendlyError } from '../services/gameService'
-import type { RoundHistoryEntry, TeacherRoomSummary } from '../types/game'
+import type { Player, RoundHistoryEntry, TeacherRoomSummary } from '../types/game'
 
 const STATUS_LABELS: Record<TeacherRoomSummary['status'], string> = {
   waiting: 'ห้องรอ',
@@ -47,6 +56,10 @@ export const TeacherHistoryPage = () => {
   const [entriesLoading, setEntriesLoading] = useState(false)
   const [selectedRound, setSelectedRound] = useState<number | null>(null)
   const [printing, setPrinting] = useState(false)
+  // Opens the polished Result command centre over the SELECTED stored round, read-only.
+  const [resultViewOpen, setResultViewOpen] = useState(false)
+  const [importBusy, setImportBusy] = useState(false)
+  const [importNotice, setImportNotice] = useState('')
 
   useEffect(() => {
     if (!uid) return
@@ -93,6 +106,31 @@ export const TeacherHistoryPage = () => {
   const printQuestionIds = useMemo(() => questionIdsFromHistory(roundEntries), [roundEntries])
   const printTeamNames = useMemo(() => teamNamesFromHistory(roundEntries), [roundEntries])
 
+  // ── Result command centre reconstruction, from the snapshot alone ────────────────────────────
+  // Every figure below comes from an EXISTING aggregator fed player-shaped rows rebuilt from the
+  // recorded round. No formula is re-implemented here, and no live player document is needed.
+  const derivedPlayers = useMemo(() => historyToDerivedPlayers(roundEntries), [roundEntries])
+  const historyTeams = useMemo(() => teamsFromHistory(roundEntries), [roundEntries])
+  const historyTeamStats = useMemo(
+    () => computeTeamStats(derivedPlayers as unknown as Player[], historyTeams),
+    [derivedPlayers, historyTeams],
+  )
+  const historyTeamStatsById = useMemo(
+    () => new Map(historyTeamStats.map((team) => [team.id, team])),
+    [historyTeamStats],
+  )
+  // No magic events are recorded in history, so the competition score equals the raw team score —
+  // which is correct for a replay: an item effect that was applied live is already baked into the
+  // per-question correctness the snapshot holds.
+  const historyCompetitionStats = useMemo(
+    () => computeTeamCompetitionStats(derivedPlayers as unknown as Player[], historyTeams, printQuestionIds, [], selectedRound ?? 1),
+    [derivedPlayers, historyTeams, printQuestionIds, selectedRound],
+  )
+  const historyRecallSummary = useMemo(
+    () => computeClassRecallSummary(derivedPlayers as unknown as Player[]),
+    [derivedPlayers],
+  )
+
   // Mounts the print view for THIS room and THIS round, then prints. The active-room report lives
   // on a different page entirely, so it cannot be printed from here by accident.
   const handlePrint = useCallback(() => {
@@ -110,6 +148,27 @@ export const TeacherHistoryPage = () => {
     setSelectedRoomCode(roomCode)
   }
 
+  // Showcase import. Runs entirely on the teacher's existing authenticated session: ownership is
+  // taken from `uid`, never entered by hand. The roster is read from a file the teacher picks
+  // here and is never stored in this application.
+  const handleImportShowcase = async (file: File): Promise<void> => {
+    if (!uid) return
+    setImportBusy(true)
+    setImportNotice('')
+    setError('')
+    try {
+      const roster = parseRosterCsv(await file.text(), 'ม.5/1')
+      await service.importShowcaseRound(SHOWCASE_ROOM_CODE, uid, roster)
+      setImportNotice(`นำเข้าห้องสาธิต ${SHOWCASE_ROOM_CODE} เรียบร้อย (ข้อมูลผลลัพธ์เป็นข้อมูลจำลองสำหรับนำเสนอ)`)
+      const summaries = await service.listTeacherRooms(uid)
+      setRooms(summaries)
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   if (!uid) {
     return (
       <ScenePage image="/images/lobby.png">
@@ -117,6 +176,45 @@ export const TeacherHistoryPage = () => {
         <div className="mx-auto flex w-full max-w-3xl flex-1 items-center px-5 py-12">
           <LoadingPanel />
         </div>
+      </ScenePage>
+    )
+  }
+
+  // Full-screen read-only Result command centre over the selected stored round. Rendered instead
+  // of the list (not on top of it) so the existing History page keeps its own layout untouched.
+  if (resultViewOpen && selectedRound != null && roundEntries.length > 0) {
+    return (
+      <ScenePage compact className="teacher-final-page">
+        <BrandHeader />
+        <div className="teacher-shell mx-auto w-full max-w-7xl flex-1 px-5 pt-4 sm:px-8">
+          <TeacherResultCommandCenter
+            round={selectedRound}
+            roomStatus="completed"
+            competitionStats={historyCompetitionStats}
+            teamStatsById={historyTeamStatsById}
+            players={derivedPlayers as unknown as Player[]}
+            teamDisplayName={(teamId) => printTeamNames.get(teamId) ?? teamId}
+            recallSummary={historyRecallSummary}
+            recallLabelFor={(conceptId) => recallQuestionsById.get(conceptId)?.label ?? conceptId}
+            evidence={evidence}
+            busy={false}
+            onPrint={handlePrint}
+            onExportExcel={() => downloadLearningWorkbook(roundEntries, `${selectedRoomCode}-รอบ${selectedRound}`)}
+            historical={{ roomCode: selectedRoomCode, onBack: () => setResultViewOpen(false) }}
+          />
+        </div>
+        {printing ? (
+          <TeacherReportPrintView
+            roomCode={selectedRoomCode}
+            round={selectedRound}
+            players={printPlayers}
+            questionIds={printQuestionIds}
+            teamNameById={printTeamNames}
+            evidence={evidence}
+            strongestConceptLabel={historyRecallSummary.strongestConceptId ? recallQuestionsById.get(historyRecallSummary.strongestConceptId)?.label ?? '-' : '-'}
+            weakestConceptLabel={historyRecallSummary.weakestConceptId ? recallQuestionsById.get(historyRecallSummary.weakestConceptId)?.label ?? '-' : '-'}
+          />
+        ) : null}
       </ScenePage>
     )
   }
@@ -139,11 +237,36 @@ export const TeacherHistoryPage = () => {
         </section>
 
         {error ? <p className="error-message mt-4" role="alert">{error}</p> : null}
+        {importNotice ? <p className="success-message mt-4" role="status">{importNotice}</p> : null}
 
         {!selectedRoomCode ? (
           <section className="glass-panel mt-4">
             <h2 className="text-lg font-semibold">ห้องของคุณ</h2>
             <p className="mt-1 text-sm text-[#c0b7ab]">แสดงเฉพาะห้องที่บัญชีครูนี้เป็นผู้สร้าง เรียงจากใหม่ไปเก่า</p>
+            {/* Showcase import. Ownership comes from the signed-in teacher session automatically —
+                no uid is entered. The roster file is read in the browser and never stored here;
+                only simulated evidence is generated from it. */}
+            <details className="showcase-import mt-4">
+              <summary>นำเข้าห้องสาธิตสำหรับนำเสนอ</summary>
+              <p className="mt-2 text-sm text-[#c0b7ab]">
+                สร้างห้อง <strong>{SHOWCASE_ROOM_CODE}</strong> จากไฟล์รายชื่อในเครื่องของคุณ
+                ผลการเรียนทั้งหมดเป็น<strong>ข้อมูลจำลองสำหรับนำเสนอ</strong> ไม่ใช่ผลการวัดจริง
+                ระบบจะไม่เขียนทับห้องเรียนปกติ
+              </p>
+              <label className="showcase-import-file mt-2">
+                <span>{importBusy ? 'กำลังนำเข้า...' : 'เลือกไฟล์รายชื่อ (.csv)'}</span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  disabled={importBusy}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.target.value = ''
+                    if (file) void handleImportShowcase(file)
+                  }}
+                />
+              </label>
+            </details>
             {roomsLoading ? <LoadingPanel text="กำลังโหลดรายการห้อง..." /> : rooms.length === 0 ? (
               <p className="mt-4 text-sm text-[#8b8377]">ยังไม่มีห้องที่บันทึกไว้</p>
             ) : (
@@ -205,6 +328,11 @@ export const TeacherHistoryPage = () => {
               <>
                 <section className="glass-panel mt-4">
                   <div className="flex flex-wrap gap-2">
+                    {/* Opens the same polished Result command centre the live screen uses, over
+                        this stored round. Read-only — see the historical prop. */}
+                    <button type="button" className="primary-button" onClick={() => setResultViewOpen(true)}>
+                      เปิดมุมมองผลลัพธ์
+                    </button>
                     <button type="button" className="primary-button" onClick={handlePrint}>พิมพ์รายงาน / PDF</button>
                     {/* Selected round only. */}
                     <button

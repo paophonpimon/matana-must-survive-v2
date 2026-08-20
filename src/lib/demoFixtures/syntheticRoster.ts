@@ -13,15 +13,8 @@
 //  that lives outside this repository — see scripts/seed-showcase-m51.ts.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-/** Minimal roster identity the showcase generator needs. Satisfied by both this synthetic roster
- *  and by a row parsed from the teacher's external CSV. */
-export interface RosterStudent {
-  studentId: string
-  firstName: string
-  lastName: string
-  className: string
-  studentNumber: number
-}
+export type { RosterStudent } from '../showcaseRound'
+import type { RosterStudent } from '../showcaseRound'
 
 /** Class label used by the synthetic roster. Not an identity — just a grouping string. */
 export const SYNTHETIC_CLASS_NAME = 'ม.5/1'
@@ -50,6 +43,3 @@ export const SYNTHETIC_ROSTER: RosterStudent[] = Array.from({ length: 30 }, (_, 
   }
 })
 
-/** Display name, formatted the same way the seed script formats a real roster row. */
-export const rosterDisplayName = (student: RosterStudent): string =>
-  `${student.firstName} ${student.lastName}`

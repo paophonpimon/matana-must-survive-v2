@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildRoundHistoryEntry } from '../roundHistory'
+import { buildRoundHistoryEntry } from './roundHistory'
+import type { EvidenceSummary } from './evidenceSummary'
 import {
   computeEvidenceSummary,
   computeEvidenceSummaryFromHistory,
@@ -7,7 +8,7 @@ import {
   formatCountWithPercent,
   formatPercent,
   formatSignedAverage,
-} from '../evidenceSummary'
+} from './evidenceSummary'
 import {
   SHOWCASE_COMPLETED_AT,
   SHOWCASE_MODE_FIELD,
@@ -20,8 +21,9 @@ import {
   buildShowcasePlayers,
   showcaseTeamIdFor,
   showcaseTeamNameFor,
+  type RosterStudent,
 } from './showcaseRound'
-import { SYNTHETIC_ROSTER, type RosterStudent } from './syntheticRoster'
+import { SYNTHETIC_ROSTER } from './demoFixtures/syntheticRoster'
 
 // The showcase round is SIMULATED presentation data. These tests drive it with a SYNTHETIC roster
 // — no real student identity exists anywhere in this repository — and pin that every headline
@@ -129,14 +131,14 @@ describe('derived presentation aggregates', () => {
 
   it('aggregate counts reconcile against the 30 individual rows', () => {
     const evidence = summary()
-    const improved = evidence.students.filter((s) => s.difference !== null && (s.difference as number) > 0)
-    const same = evidence.students.filter((s) => s.difference === 0)
-    const declined = evidence.students.filter((s) => s.difference !== null && (s.difference as number) < 0)
+    const improved = evidence.students.filter((s: EvidenceSummary['students'][number]) => s.difference !== null && (s.difference as number) > 0)
+    const same = evidence.students.filter((s: EvidenceSummary['students'][number]) => s.difference === 0)
+    const declined = evidence.students.filter((s: EvidenceSummary['students'][number]) => s.difference !== null && (s.difference as number) < 0)
     expect(improved).toHaveLength(26)
     expect(same).toHaveLength(3)
     expect(declined).toHaveLength(1)
-    expect(evidence.students.filter((s) => s.mainCompleted)).toHaveLength(evidence.main.completedCount)
-    expect(evidence.students.filter((s) => s.surveyCompleted)).toHaveLength(evidence.survey.completedCount)
+    expect(evidence.students.filter((s: EvidenceSummary['students'][number]) => s.mainCompleted)).toHaveLength(evidence.main.completedCount)
+    expect(evidence.students.filter((s: EvidenceSummary['students'][number]) => s.surveyCompleted)).toHaveLength(evidence.survey.completedCount)
   })
 
   it('no Boss, team competition or item score enters the Main /10 evidence', () => {
@@ -191,7 +193,7 @@ describe('the seeded round survives the durable history path identically', () =>
 describe('seed safety', () => {
   const seedSource = async (): Promise<string> =>
     import('node:fs/promises').then((fs) =>
-      fs.readFile(new URL('../../../scripts/seed-showcase-m51.ts', import.meta.url), 'utf8'))
+      fs.readFile(new URL('../../scripts/seed-showcase-m51.ts', import.meta.url), 'utf8'))
 
   it('reads the roster from an external CSV and never from a committed fixture', async () => {
     const source = await seedSource()
@@ -231,7 +233,11 @@ describe('seed safety', () => {
 })
 
 describe('fixtures stay out of the deployed bundle', () => {
-  it('is imported by no production module', async () => {
+  // The generator SHIPS: the in-browser showcase importer needs it, and it contains only
+  // simulated scores keyed by roster position — no identity of any kind. What must never ship is
+  // the synthetic roster, because a roster module in production is exactly the shape of mistake
+  // that put the real one in the bundle.
+  it('the synthetic roster is imported by no production module', async () => {
     const { readdir, readFile } = await import('node:fs/promises')
     const { join, relative } = await import('node:path')
     const srcRoot = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
@@ -251,7 +257,7 @@ describe('fixtures stay out of the deployed bundle', () => {
       if (file.includes('.test.')) continue
       if (file.includes('demoFixtures')) continue
       const contents = await readFile(file, 'utf8')
-      if (contents.includes('showcaseRound') || contents.includes('syntheticRoster') || contents.includes('demoFixtures')) {
+      if (contents.includes('syntheticRoster') || contents.includes('demoFixtures')) {
         offenders.push(relative(srcRoot, file))
       }
     }

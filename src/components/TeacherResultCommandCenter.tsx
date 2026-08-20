@@ -64,10 +64,18 @@ interface TeacherResultCommandCenterProps {
   busy: boolean
   onPrint: () => void
   onExportExcel: () => void
-  onPrepareNextRound: () => void
-  onCloseRoom: () => void
+  // Live-room controls. Omitted entirely in historical mode — a recorded round has nothing to
+  // prepare and nothing to end, and offering either would imply this screen can still mutate it.
+  onPrepareNextRound?: () => void
+  onCloseRoom?: () => void
   // Rendered instead of ยุติห้อง once the room is already closed.
-  closedRoomAction: React.ReactNode
+  closedRoomAction?: React.ReactNode
+  // Read-only reconstruction of a stored round. Swaps the room controls for a way back to the
+  // history list, and drops the room-history utility (you are already inside it).
+  historical?: {
+    roomCode: string
+    onBack: () => void
+  }
 }
 
 export const TeacherResultCommandCenter = ({
@@ -86,6 +94,7 @@ export const TeacherResultCommandCenter = ({
   onPrepareNextRound,
   onCloseRoom,
   closedRoomAction,
+  historical,
 }: TeacherResultCommandCenterProps) => {
   const [tab, setTab] = useState<TabId>('summary')
 
@@ -166,7 +175,7 @@ export const TeacherResultCommandCenter = ({
         <div className="rcc-utilities">
           <button type="button" className="rcc-utility" onClick={onPrint}>ดาวน์โหลด PDF</button>
           <button type="button" className="rcc-utility" onClick={onExportExcel}>ดาวน์โหลด Excel</button>
-          <Link className="rcc-utility" to="/teacher/history">ประวัติห้อง</Link>
+          {historical ? null : <Link className="rcc-utility" to="/teacher/history">ประวัติห้อง</Link>}
         </div>
       </div>
 
@@ -327,14 +336,26 @@ export const TeacherResultCommandCenter = ({
       </div>
 
       {/* ── Room controls, always visible without scrolling ─────────────────── */}
+      {/* Historical mode is strictly read-only: a recorded round has nothing to prepare and
+          nothing to end, so neither control is rendered at all — not merely disabled. The only
+          action offered is the way back to the history list. */}
       <div className="rcc-roombar">
         <img className="rcc-roombar-rose rcc-roombar-rose-left" src="/assets/teacher-result/result-rose-cluster-left.png" alt="" aria-hidden="true" />
         <div className="rcc-roombar-actions">
-          {roomStatus === 'completed' ? (
-            <button type="button" className="rcc-room-primary" onClick={onPrepareNextRound} disabled={busy}>เตรียมภารกิจรอบใหม่</button>
-          ) : null}
-          {roomStatus === 'closed' ? closedRoomAction : (
-            <button type="button" className="rcc-room-danger" onClick={onCloseRoom} disabled={busy}>ยุติห้อง</button>
+          {historical ? (
+            <>
+              <span className="rcc-roombar-note">ผลย้อนหลัง ห้อง {historical.roomCode} · อ่านอย่างเดียว</span>
+              <button type="button" className="rcc-room-primary" onClick={historical.onBack}>กลับไปประวัติห้อง</button>
+            </>
+          ) : (
+            <>
+              {roomStatus === 'completed' && onPrepareNextRound ? (
+                <button type="button" className="rcc-room-primary" onClick={onPrepareNextRound} disabled={busy}>เตรียมภารกิจรอบใหม่</button>
+              ) : null}
+              {roomStatus === 'closed' ? closedRoomAction : (
+                onCloseRoom ? <button type="button" className="rcc-room-danger" onClick={onCloseRoom} disabled={busy}>ยุติห้อง</button> : null
+              )}
+            </>
           )}
         </div>
         <img className="rcc-roombar-rose rcc-roombar-rose-right" src="/assets/teacher-result/result-rose-cluster-right.png" alt="" aria-hidden="true" />

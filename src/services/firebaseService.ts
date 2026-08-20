@@ -12,6 +12,8 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
+  updateDoc,
   where,
   writeBatch,
   type DocumentData,
@@ -29,6 +31,8 @@ import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, main
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoices } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
+import { buildShowcaseDocuments, showcaseCollisionMessage, showcaseHistoryDocId } from '../lib/showcaseImport'
+import { SHOWCASE_MODE_FIELD, type RosterStudent } from '../lib/showcaseRound'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import { ensureAnonymousUser, resolveOwnerUid } from './firebaseAuth'
 import { resolveJoinPermissionDeniedMessage, type AnswerInput, type AnswerResult, type BossAnswerInput, type GameService, type PostTestAnswerInput, type PreTestAnswerInput, type RecallAnswerInput, type SurveyResponseInput } from './gameService'
@@ -1831,6 +1835,48 @@ export class FirebaseGameService implements GameService {
     // history available after the room is closed.
     if (closingRoom) await queueRoundHistorySnapshot(batch, roomCode, closingRoom, playerSnapshots)
     playerSnapshots.docs.forEach((playerDocument) => batch.update(playerDocument.ref, { status: 'stopped' }))
+    await batch.commit()
+  }
+
+  // Teacher-only showcase import, running entirely on the CURRENT browser session — no admin
+  // credentials, no service account. Every write it makes is one the existing rules already allow
+  // the owning teacher to make:
+  //   rooms/{code}            create (status must start 'waiting', owner must be the caller)
+  //                           then update, as isTeacher, to the finished showcase state
+  //   roundHistory/*          create/update, isTeacher
+  //   rosters/*  teamNames/*  write, isTeacher
+  // It creates NO player documents: players/{id} may only be created by the student who owns it,
+  // and a showcase is never worth forging that.
+  async importShowcaseRound(roomCode: string, teacherSessionId: string, roster: RosterStudent[]): Promise<void> {
+    const documents = buildShowcaseDocuments(roomCode, teacherSessionId, roster)
+    const roomRef = doc(db, 'rooms', roomCode)
+
+    // Read ONLY the intended room. Nothing else is listed, read, or touched.
+    const existing = await getDoc(roomRef)
+    if (existing.exists()) {
+      const data = existing.data()
+      if (data?.[SHOWCASE_MODE_FIELD] !== true) throw new Error(showcaseCollisionMessage(roomCode))
+      await updateDoc(roomRef, { ...documents.initialRoom, ...documents.completedRoomUpdate })
+    } else {
+      // Two steps because `allow create` pins a new room to status 'waiting'; the update that
+      // follows is authorized by isTeacher(), which now holds because the create set the owner.
+      await setDoc(roomRef, documents.initialRoom)
+      await updateDoc(roomRef, documents.completedRoomUpdate)
+    }
+
+    const batch = writeBatch(db)
+    documents.historyEntries.forEach((entry) => {
+      batch.set(doc(db, 'rooms', roomCode, 'roundHistory', showcaseHistoryDocId(entry)), entry)
+    })
+    documents.rosters.forEach(({ teamId, roster: teamRoster }) => {
+      batch.set(doc(db, 'rooms', roomCode, 'rosters', teamId), {
+        teamName: teamRoster.teamName,
+        members: teamRoster.members,
+      })
+    })
+    documents.teamNames.forEach((entry) => {
+      batch.set(doc(db, 'rooms', roomCode, 'teamNames', entry.teamId), entry)
+    })
     await batch.commit()
   }
 

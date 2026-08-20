@@ -8,6 +8,8 @@ import { bossQuestionTiming, getRemainingMilliseconds, isAssessmentExpired, main
 import { computeBossRanking, pickRandomMagicItem, selectBossQuestions } from '../lib/boss'
 import { MAGIC_ITEM_TYPES, computeTeamQuestionBreakdown, getMagicActivationWindow, hasAnyMagicItem, pickElectedCaptain, pickIllusionHiddenChoices } from '../lib/magic'
 import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory'
+import { buildShowcaseDocuments, showcaseCollisionMessage, showcaseHistoryDocId } from '../lib/showcaseImport'
+import { SHOWCASE_MODE_FIELD, type RosterStudent } from '../lib/showcaseRound'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
 import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
 import {
@@ -1379,6 +1381,32 @@ export class DemoGameService implements GameService {
       player.status = 'stopped'
     })
     expireQueuedEffects(roomState, Date.now())
+    await writeState(state)
+  }
+
+  // Teacher-only showcase import. Same document set as the Firebase path (one shared builder),
+  // and the same refusal to overwrite a non-showcase room. No player records are created.
+  async importShowcaseRound(roomCode: string, teacherSessionId: string, roster: RosterStudent[]): Promise<void> {
+    const documents = buildShowcaseDocuments(roomCode, teacherSessionId, roster)
+    const state = await readState()
+    const existing = state.rooms[roomCode]
+    if (existing && existing.room[SHOWCASE_MODE_FIELD as keyof typeof existing.room] !== true) {
+      throw new Error(showcaseCollisionMessage(roomCode))
+    }
+    const room = { ...documents.initialRoom, ...documents.completedRoomUpdate } as unknown as Room
+    state.rooms[roomCode] = {
+      room,
+      // Deliberately empty: the showcase renders entirely from roundHistory.
+      players: {},
+      magic: {},
+      magicEvents: [],
+      rosters: Object.fromEntries(documents.rosters.map((entry) => [entry.teamId, entry.roster])),
+      answerProgress: {},
+      captainVotes: {},
+      captainVoteProgress: {},
+      teamNames: Object.fromEntries(documents.teamNames.map((entry) => [entry.teamId, entry])),
+      roundHistory: Object.fromEntries(documents.historyEntries.map((entry) => [showcaseHistoryDocId(entry), entry])),
+    }
     await writeState(state)
   }
 

@@ -3860,3 +3860,13 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .rcc-panel .evidence-trace-list li span { color: var(--cc-ink-soft); opacity: 1; }
 /* Compact denominator line under each Tab 1 preview value. */
 .rcc-evidence-trace { font-size: 0.66rem; font-style: normal; line-height: 1.25; color: var(--cc-ink-soft); font-variant-numeric: tabular-nums; }
+
+/* Historical (read-only) result command centre: no room controls, just provenance + a way back. */
+.rcc-roombar-note { color: #e9dec4; font-size: 0.85rem; opacity: 0.9; }
+
+/* Showcase import — a quiet utility on the history list, collapsed by default. */
+.showcase-import { border: 1px solid rgba(226,189,101,0.28); border-radius: 0.7rem; padding: 0.6rem 0.8rem; background: rgba(77,49,19,0.16); }
+.showcase-import > summary { cursor: pointer; color: #f2d58d; font-size: 0.88rem; font-weight: 600; }
+.showcase-import-file { display: inline-flex; align-items: center; gap: 0.5rem; }
+.showcase-import-file > span { display: inline-flex; align-items: center; min-height: 2.4rem; border: 1px solid rgba(226,189,101,0.28); border-radius: 0.6rem; padding: 0.3rem 0.8rem; color: #f2d58d; background: rgba(77,49,19,0.3); font-size: 0.82rem; }
+.showcase-import-file > input { max-width: 15rem; font-size: 0.78rem; color: #c0b7ab; }

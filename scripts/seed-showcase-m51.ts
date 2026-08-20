@@ -38,7 +38,7 @@ import {
   assertShowcaseRoster,
   buildShowcasePlayers,
   showcaseTeamNameFor,
-} from '../src/lib/demoFixtures/showcaseRound'
+} from '../src/lib/showcaseRound'
 import { readRosterCsv } from './readRosterCsv'
 
 const args = process.argv.slice(2)

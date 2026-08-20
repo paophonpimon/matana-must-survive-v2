@@ -1,4 +1,5 @@
 import type { AnswerProgressEntry, CaptainVote, CaptainVoteProgress, JoinInput, JoinResult, MagicEvent, MagicItemType, Player, Room, RoundHistoryEntry, TeacherRoomSummary, TeamGuardianName, TeamMagicState, TeamRosterSummary, Unsubscribe, Winner } from '../types/game'
+import type { RosterStudent } from '../lib/showcaseRound'
 
 export interface AnswerInput {
   questionId: string
@@ -91,6 +92,15 @@ export interface GameService {
   // duplicate timer callback a safe no-op instead of a skipped question.
   advanceRecallQuestion(roomCode: string, teacherSessionId: string, expectedRecallIndex: number): Promise<void>
   saveRecallAnswer(roomCode: string, playerId: string, answer: RecallAnswerInput): Promise<void>
+  // Teacher-only showcase import. Writes ONE dedicated presentation room owned by the calling
+  // teacher — room doc, roundHistory, rosters and teamNames — and deliberately NO player
+  // documents: a recorded round already reconstructs every individual result from roundHistory,
+  // and creating 30 player docs would mean forging student ownership the rules rightly forbid.
+  //
+  // The roster arrives as an argument, parsed from a CSV the teacher picks at run time; no real
+  // identity is stored in this codebase. Aborts rather than overwriting a room that is not
+  // already marked showcaseMode.
+  importShowcaseRound(roomCode: string, teacherSessionId: string, roster: RosterStudent[]): Promise<void>
   // Assessment Layer (Milestone 1): data-foundation writes. Each one requires the room to be in
   // its own matching phase and appends exactly one record to its own round-scoped array, using
   // the same expected-index guard Recall/Main already use. Nothing calls these yet — no UI and no

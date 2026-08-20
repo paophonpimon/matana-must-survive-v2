@@ -1,10 +1,24 @@
-import { PRE_TEST_QUESTIONS, POST_TEST_QUESTIONS } from '../../data/assessmentQuestions'
-import { questions } from '../../data/questions'
-import { RECALL_QUESTIONS } from '../../data/recallQuestions'
-import { SURVEY_ITEMS } from '../../data/surveyItems'
-import { ROUND_CATEGORY_COUNTS } from '../game'
-import type { Player, TeamMeta } from '../../types/game'
-import { rosterDisplayName, type RosterStudent } from './syntheticRoster'
+import { PRE_TEST_QUESTIONS, POST_TEST_QUESTIONS } from '../data/assessmentQuestions'
+import { questions } from '../data/questions'
+import { RECALL_QUESTIONS } from '../data/recallQuestions'
+import { SURVEY_ITEMS } from '../data/surveyItems'
+import { ROUND_CATEGORY_COUNTS } from './game'
+import type { Player, TeamMeta } from '../types/game'
+
+/** Minimal roster identity the showcase generator needs. Satisfied by a row parsed from the
+ *  teacher's external CSV, and by the synthetic roster the tests use. NO identity is stored in
+ *  this module — the roster always arrives as an argument. */
+export interface RosterStudent {
+  studentId: string
+  firstName: string
+  lastName: string
+  className: string
+  studentNumber: number
+}
+
+/** Display name, formatted the same way wherever a roster row is shown. */
+export const rosterDisplayName = (student: RosterStudent): string =>
+  `${student.firstName} ${student.lastName}`
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //  SHOWCASE ROUND GENERATOR — SIMULATED PRESENTATION DATA

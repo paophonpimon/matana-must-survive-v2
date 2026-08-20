@@ -66,7 +66,7 @@ describe('no real student roster in the repository', () => {
       .filter((file) => file.endsWith('.csv') || /roster|book-match/i.test(file))
       .map((file) => relative(repoRoot(), file))
       // The generator/guard modules legitimately mention "roster" in their filenames.
-      .filter((file) => !/syntheticRoster|readRosterCsv|noRealRosterInRepo/.test(file))
+      .filter((file) => !/syntheticRoster|readRosterCsv|rosterCsv|noRealRosterInRepo/.test(file))
     expect(offenders).toEqual([])
   })
 })

@@ -90,3 +90,65 @@ export const teamNamesFromHistory = (entries: RoundHistoryEntry[]): Map<string, 
   }
   return names
 }
+
+// ── Reconstructing the Result view from a stored round ─────────────────────────────────────────
+//
+// A recorded round holds everything the Teacher Result screen needs, so the polished command
+// centre can be reused for history without keeping the live player documents alive — and without
+// ever creating player docs just to render a past round.
+//
+// Nothing here re-implements a formula. Each helper rebuilds the minimal player-shaped object the
+// EXISTING aggregators already accept (computeTeamStats, computeTeamCompetitionStats,
+// computeClassRecallSummary), so the historical screen and the live screen cannot drift.
+
+// The live aggregators only ever read these fields off a player. Reconstructing exactly them —
+// and nothing else — keeps it obvious that no invented value is being fed in.
+export type HistoryDerivedPlayer = Pick<
+  Player,
+  'id' | 'displayName' | 'studentNumber' | 'teamId' | 'score' | 'answers' | 'recallAnswers' | 'submitted'
+>
+
+// Rebuilds the player-shaped rows the team/recall aggregators consume.
+//
+// `answers` carries the recorded per-question correctness; `selectedChoiceId` is deliberately
+// blank because a snapshot records WHETHER an answer was right, never which choice was picked,
+// and no consumer of these rows reads it. `submitted` is true for every recorded row: being in
+// the snapshot at all is what "finished the round" means.
+export const historyToDerivedPlayers = (entries: RoundHistoryEntry[]): HistoryDerivedPlayer[] =>
+  entries.map((entry) => ({
+    id: entry.playerId,
+    displayName: entry.displayName,
+    studentNumber: entry.studentNumber,
+    teamId: entry.teamId,
+    score: entry.knowledgeScore,
+    answers: entry.mainAnswers.map((answer) => ({
+      questionId: answer.questionId,
+      selectedChoiceId: '',
+      isCorrect: answer.isCorrect,
+      answeredAt: entry.completedAt,
+      // Never recorded in a snapshot, and never read by scoring or ranking — 0 is the honest
+      // "not captured" value here, not a real measurement.
+      responseTimeMs: 0,
+    })),
+    // Rounds recorded before per-item recall detail existed have no recallResults; they
+    // reconstruct as "nothing answered", which is what the recall summary already treats an
+    // absent item as. Never as a wrong answer.
+    recallAnswers: (entry.recallResults ?? [])
+      .filter((result) => result.answered)
+      .map((result) => ({
+        conceptId: result.conceptId,
+        selectedChoiceId: '',
+        isCorrect: result.isCorrect,
+        answeredAt: entry.completedAt,
+      })),
+    submitted: true,
+  }))
+
+// The teams that actually appear in a recorded round, in stable id order. Built from the snapshot
+// rather than the live room, whose teams may since have been re-randomized away.
+export const teamsFromHistory = (entries: RoundHistoryEntry[]): Array<{ id: string; name: string }> => {
+  const names = teamNamesFromHistory(entries)
+  return [...names.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.id.localeCompare(b.id, 'en'))
+}
