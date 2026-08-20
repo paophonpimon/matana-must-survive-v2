@@ -127,6 +127,31 @@ export const isAssessmentExpired = (window: AssessmentWindow, now = Date.now()):
 export const isAssessmentOpen = (window: AssessmentWindow, now = Date.now()): boolean =>
   window.startedAt != null && !isAssessmentExpired(window, now)
 
+// Latency rescue for a question that arrives already expired.
+//
+// A question's window opens at the instant the PREVIOUS answer was persisted, but the student's
+// device does not see it until that write has round-tripped. On a slow phone — and on a short
+// per-question budget — the round trip can eat the entire window, so the next question can reach
+// the screen with no time left on it. That time was spent by the network, not by the student, and
+// letting it stand means the timeout advance fires at once, writes the next question with the same
+// handicap, and carries the student through several items they never saw.
+//
+// So a window that is ALREADY expired the first time a client lays eyes on it is re-anchored to
+// `now` for a full fresh budget. `claim` gates it to once per question — a reload finds the claim
+// already spent and gets the real, expired window, so the rescue cannot be farmed.
+//
+// Returns null when no rescue applies, meaning "use the persisted window unchanged".
+export const rescueLateArrivingWindow = (
+  window: AssessmentWindow,
+  claim: () => boolean,
+  now = Date.now(),
+): AssessmentWindow | null => {
+  if (window.startedAt == null) return null
+  if (!isAssessmentExpired(window, now)) return null
+  if (!claim()) return null
+  return { startedAt: now, durationSeconds: window.durationSeconds, introOffsetMs: 0 }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Timing builders. Every caller — student pages, teacher auto-advance, and both services — goes
 // through one of these instead of hand-assembling a timing object, so the "does an intro play

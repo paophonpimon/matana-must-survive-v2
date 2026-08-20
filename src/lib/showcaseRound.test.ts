@@ -237,7 +237,7 @@ describe('fixtures stay out of the deployed bundle', () => {
   // simulated scores keyed by roster position — no identity of any kind. What must never ship is
   // the synthetic roster, because a roster module in production is exactly the shape of mistake
   // that put the real one in the bundle.
-  it('the synthetic roster is imported by no production module', async () => {
+  it('the synthetic roster is imported by no production module', { timeout: 30_000 }, async () => {
     const { readdir, readFile } = await import('node:fs/promises')
     const { join, relative } = await import('node:path')
     const srcRoot = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')

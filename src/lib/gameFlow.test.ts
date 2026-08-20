@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ANSWER_REVEAL_MILLISECONDS, areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore, getTeacherVisiblePlayer, isCurrentQuestionRevealed } from './gameFlow'
+import { ANSWER_REVEAL_MILLISECONDS, areAnswersLocked, getQuestionDeadline, getRemainingMilliseconds, getRevealRemainingMilliseconds, getTeacherVisibleScore, getTeacherVisiblePlayer, isCurrentQuestionRevealed, getAssessmentRemainingMilliseconds, isAssessmentExpired, rescueLateArrivingWindow, type AssessmentWindow } from './gameFlow'
 
 describe('timed game question flow', () => {
   it('uses one shared deadline for every team', () => {
@@ -118,5 +118,47 @@ describe('timed game question flow', () => {
     expect(revealed.answers.filter((answer) => answer.isCorrect)).toHaveLength(2)
     // The original record is never mutated.
     expect(player.answers).toHaveLength(2)
+  })
+})
+
+describe('latency rescue for a question that arrives already expired', () => {
+  const OPENED = 1_000_000
+  const window10s = { startedAt: OPENED, durationSeconds: 10 }
+  const always = () => true
+
+  it('leaves a window that still has time on it completely alone', () => {
+    expect(rescueLateArrivingWindow(window10s, always, OPENED + 4_000)).toBeNull()
+  })
+
+  it('does nothing before the teacher has opened the test', () => {
+    expect(rescueLateArrivingWindow({ startedAt: null, durationSeconds: 10 }, always, OPENED)).toBeNull()
+  })
+
+  it('re-anchors a window whose whole budget was consumed by the round trip', () => {
+    // The previous answer persisted at OPENED; this device only rendered the new question 12s
+    // later, so it arrives 2s past its deadline having never been on screen.
+    const arrivedAt = OPENED + 12_000
+    const rescued = rescueLateArrivingWindow(window10s, always, arrivedAt)
+    expect(rescued).toEqual({ startedAt: arrivedAt, durationSeconds: 10, introOffsetMs: 0 })
+    // A full fresh budget, and no intro offset — the intro belongs to question 1 only.
+    expect(getAssessmentRemainingMilliseconds(rescued as AssessmentWindow, arrivedAt)).toBe(10_000)
+    expect(isAssessmentExpired(rescued as AssessmentWindow, arrivedAt)).toBe(false)
+  })
+
+  it('cannot be farmed: the second arrival on the same question is refused', () => {
+    // What sessionStorage does in the component — the claim succeeds once, then never again.
+    let spent = false
+    const claimOnce = (): boolean => (spent ? false : ((spent = true), true))
+    const arrivedAt = OPENED + 12_000
+    expect(rescueLateArrivingWindow(window10s, claimOnce, arrivedAt)).not.toBeNull()
+    // A reload re-renders the same expired index; this time it gets the real window and times out.
+    expect(rescueLateArrivingWindow(window10s, claimOnce, arrivedAt + 500)).toBeNull()
+  })
+
+  it('never spends the claim on a question that did not need rescuing', () => {
+    let claims = 0
+    const counting = (): boolean => { claims += 1; return true }
+    rescueLateArrivingWindow(window10s, counting, OPENED + 1_000)
+    expect(claims).toBe(0)
   })
 })

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ASSESSMENT_QUESTION_COUNT } from '../data/assessmentQuestions'
-import type { AssessmentWindow } from '../lib/gameFlow'
+import { rescueLateArrivingWindow, type AssessmentWindow } from '../lib/gameFlow'
 import { shuffleChoicesForPlayer } from '../lib/choiceOrder'
 import { friendlyError } from '../services'
 import { useAssessmentClock } from '../hooks/useAssessmentClock'
@@ -27,6 +27,20 @@ export interface AssessmentPhaseProps {
   finishedTitle: string
   finishedHint: string
   onAnswer: (input: { questionId: string; selectedChoiceId: string; expectedIndex: number }) => Promise<void>
+}
+
+// Claims the one-per-question latency rescue. Returns true only the FIRST time it is asked for a
+// given key; a reload finds the mark already set and gets no second window. sessionStorage is the
+// right scope — it is per tab and dies with the test session, and a browser that refuses it (older
+// private modes) simply falls back to granting the rescue, which is the safe direction.
+const claimRescue = (key: string): boolean => {
+  try {
+    if (sessionStorage.getItem(key) != null) return false
+    sessionStorage.setItem(key, '1')
+    return true
+  } catch {
+    return true
+  }
 }
 
 // Shared body of the pre-test and post-test screens. The two differ only in their approved bank
@@ -61,10 +75,24 @@ export const AssessmentPhase = ({
 }: AssessmentPhaseProps) => {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  // Latency rescue — see rescueLateArrivingWindow. Evaluated once per question index, on the first
+  // render that shows it, and held in a ref so a later rerender cannot re-anchor a window that is
+  // now legitimately running down.
+  const rescueKey = `mms:assess-rescue:${playerId}:${bank[0]?.id ?? 'na'}:${progress}`
+  const arrivalRef = useRef<{ index: number; window: AssessmentWindow | null }>({ index: -1, window: null })
+  if (arrivalRef.current.index !== progress) {
+    arrivalRef.current = {
+      index: progress,
+      window: progress < ASSESSMENT_QUESTION_COUNT
+        ? rescueLateArrivingWindow(questionWindow, () => claimRescue(rescueKey))
+        : null,
+    }
+  }
   // Per-question clock. The window restarts for each item — question 1 from the instant the
   // teacher opened the test, every later one from the previous answer's answeredAt — so moving on
   // resets the countdown to the full configured value with nothing stored per question.
-  const clock = useAssessmentClock(questionWindow)
+  const clock = useAssessmentClock(arrivalRef.current.window ?? questionWindow)
 
   // Timeout advance. No answer is written — the item stays unanswered and the student moves on,
   // which is what stops an expired question from becoming a dead end. Guarded per index so a

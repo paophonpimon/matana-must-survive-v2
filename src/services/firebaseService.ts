@@ -7,7 +7,7 @@ import {
   enableNetwork,
   getDoc,
   getDocs,
-  getFirestore,
+  initializeFirestore,
   onSnapshot,
   query,
   runTransaction,
@@ -95,7 +95,19 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig)
 const auth = getAuth(app)
-const db = getFirestore(app)
+// Firestore's default realtime transport is a streaming WebChannel. On school wifi, carrier
+// networks and some mobile browsers that stream is silently blocked or truncated by a proxy, and
+// the SDK keeps retrying it instead of falling back — so onSnapshot listeners on THAT device never
+// fire while writes from the same device still succeed (the write path uses ordinary requests).
+// That is exactly the reported symptom: a student's phone stops following stage changes and its
+// question UI never becomes interactive, while another student on the teacher's own machine and
+// network sees everything normally.
+//
+// experimentalAutoDetectLongPolling makes the SDK probe the connection and switch to long-polling
+// when streaming does not work, which is Firebase's documented remedy for this class of network.
+// Detection costs one short probe at startup and nothing afterwards on networks where streaming
+// is fine.
+const db = initializeFirestore(app, { experimentalAutoDetectLongPolling: true })
 
 // Realtime staleness fix (remote-device boss/main-question transitions not rendering until a
 // manual reload): iOS/iPadOS Safari aggressively suspends a backgrounded tab's underlying
@@ -110,11 +122,21 @@ const db = getFirestore(app)
 // of bug: it makes the SDK actually re-establish its stream and re-deliver the current state to
 // every active listener. This is event-driven (fires only on a real foreground transition), not a
 // polling loop or a page reload.
+const forceReconnect = (): void => { void disableNetwork(db).then(() => enableNetwork(db)) }
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return
-    void disableNetwork(db).then(() => enableNetwork(db))
+    forceReconnect()
   })
+}
+
+// The visibility handler above only covers a tab that was BACKGROUNDED and came back. A phone
+// that switches wifi -> mobile data (or reattaches after a dead spot) never leaves the
+// foreground, so no visibilitychange fires, yet the old stream is just as dead. Listening for
+// 'online' covers that case — the same event-driven reconnect, no polling and no reload.
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', forceReconnect)
 }
 
 const toMillis = (value: unknown): number | null => {
