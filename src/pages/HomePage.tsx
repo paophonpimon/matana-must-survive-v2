@@ -41,6 +41,7 @@ export const HomePage = () => (
           <Link className="home-cta-primary" to="/join">เริ่มเล่น</Link>
           <Link className="home-cta-text" to="/teacher">สำหรับครู →</Link>
           <Link className="home-cta-demo" to="/demo/teacher">ทดลองสาธิต — ข้อมูลจำลอง</Link>
+          <Link className="home-cta-demo" to="/showcase">ดูตัวอย่างผลสรุป 30 คน</Link>
         </div>
       </section>
     </div>

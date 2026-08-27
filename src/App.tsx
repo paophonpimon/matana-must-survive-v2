@@ -10,6 +10,7 @@ import { JoinPage } from './pages/JoinPage'
 import { LobbyPage } from './pages/LobbyPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ResultPage } from './pages/ResultPage'
+import { ShowcaseResultsPage } from './pages/ShowcaseResultsPage'
 import { TeacherHistoryPage } from './pages/TeacherHistoryPage'
 import { TeacherPage } from './pages/TeacherPage'
 import { presentationDemoServicePromise } from './services'
@@ -33,6 +34,9 @@ const App = () => (
     <Routes>
       <Route path="/demo/teacher" element={<PresentationDemoScope><TeacherPage /></PresentationDemoScope>} />
       <Route path="/demo/student" element={<PresentationDemoScope><DemoStudentPage /></PresentationDemoScope>} />
+      {/* Reconstructed class-reporting sample. Pure local computation — no GameProvider, no
+          service, no Firebase, no gameplay. Kept separate from the interactive demo above. */}
+      <Route path="/showcase" element={<ShowcaseResultsPage />} />
       <Route element={<ProductionGameScope />}>
         <Route path="/" element={<HomePage />} />
         <Route path="/teacher" element={<TeacherPage />} />

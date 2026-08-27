@@ -228,7 +228,11 @@ export const buildSurveyItemSheet = (entries: RoundHistoryEntry[]): SheetData =>
 })
 
 export interface LearningWorkbookOptions {
+  // Marks the workbook as coming from the interactive demo (8 simulated students).
   demo?: boolean
+  // Marks the workbook as the reconstructed class-reporting sample (P01–P30). Distinct from `demo`
+  // so the two provenance notes never collide.
+  sample?: boolean
 }
 
 export const buildLearningWorkbook = (entries: RoundHistoryEntry[], options: LearningWorkbookOptions = {}): Uint8Array => {
@@ -252,6 +256,15 @@ export const buildLearningWorkbook = (entries: RoundHistoryEntry[], options: Lea
         ['เอกสารนี้สร้างจากโหมดสาธิต — ข้อมูลทั้งหมดเป็นข้อมูลจำลอง'],
       ],
     })
+  } else if (options.sample) {
+    sheets.unshift({
+      name: 'ข้อมูลตัวอย่าง',
+      rows: [
+        ['ข้อมูลตัวอย่าง'],
+        ['เอกสารนี้เป็นตัวอย่างผลลัพธ์ระดับชั้น 30 คน — ข้อมูลสร้างขึ้นเพื่อสาธิตระบบรายงานผล'],
+        ['ข้อมูลรายบุคคลที่สร้างขึ้นเพื่อให้สอดคล้องกับผลสรุประดับชั้น'],
+      ],
+    })
   }
   return buildXlsx(sheets)
 }
@@ -263,7 +276,8 @@ export const downloadLearningWorkbook = (entries: RoundHistoryEntry[], roomCode:
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `${options.demo ? 'ข้อมูลสาธิต-' : ''}ผลการเรียน-${roomCode}.xlsx`
+  const prefix = options.demo ? 'ข้อมูลสาธิต-' : options.sample ? 'ข้อมูลตัวอย่าง-' : ''
+  link.download = `${prefix}ผลการเรียน-${roomCode}.xlsx`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)

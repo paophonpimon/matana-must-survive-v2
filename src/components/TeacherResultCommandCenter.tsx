@@ -65,6 +65,10 @@ interface TeacherResultCommandCenterProps {
   onPrint: () => void
   onExportExcel: () => void
   demo?: boolean
+  // Provenance banner for the reconstructed class-reporting sample. `banner` shows at the top of
+  // the screen; `individual` shows above the per-student table so the reconstructed rows are never
+  // read as original measured records. Undefined for every live/demo/historical caller.
+  provenanceNotice?: { banner: string; individual: string }
   // Live-room controls. Omitted entirely in historical mode — a recorded round has nothing to
   // prepare and nothing to end, and offering either would imply this screen can still mutate it.
   onPrepareNextRound?: () => void
@@ -97,6 +101,7 @@ export const TeacherResultCommandCenter = ({
   closedRoomAction,
   historical,
   demo = false,
+  provenanceNotice,
 }: TeacherResultCommandCenterProps) => {
   const [tab, setTab] = useState<TabId>('summary')
 
@@ -112,6 +117,7 @@ export const TeacherResultCommandCenter = ({
   return (
     <div className="rcc-cc">
       {demo ? <div className="rcc-demo-label">โหมดสาธิต — ข้อมูลจำลอง</div> : null}
+      {provenanceNotice ? <div className="rcc-provenance-label">{provenanceNotice.banner}</div> : null}
       {/* ── Compact result hero ─────────────────────────────────────────────── */}
       <section className="rcc-hero" aria-label="ผลภารกิจรอบนี้">
         <div className="rcc-hero-round">
@@ -328,6 +334,7 @@ export const TeacherResultCommandCenter = ({
           <div className="rcc-panel rcc-panel-scroll" role="tabpanel" id="result-panel-students" aria-labelledby="result-tab-students">
             {/* The EXISTING per-student evidence view — not a leaderboard. Same rows, same
                 completeness semantics, rendered from the same shared summary as tab 2. */}
+            {provenanceNotice ? <p className="rcc-panel-note rcc-provenance-note">{provenanceNotice.individual}</p> : null}
             {evidence ? (
               <EvidenceSummaryPanel summary={evidence} title="รายบุคคล" sections="students" hideHeading />
             ) : (
@@ -347,8 +354,12 @@ export const TeacherResultCommandCenter = ({
         <div className="rcc-roombar-actions">
           {historical ? (
             <>
-              <span className="rcc-roombar-note">ผลย้อนหลัง ห้อง {historical.roomCode} · อ่านอย่างเดียว</span>
-              <button type="button" className="rcc-room-primary" onClick={historical.onBack}>กลับไปประวัติห้อง</button>
+              <span className="rcc-roombar-note">
+                {provenanceNotice ? `${provenanceNotice.banner} · อ่านอย่างเดียว` : `ผลย้อนหลัง ห้อง ${historical.roomCode} · อ่านอย่างเดียว`}
+              </span>
+              <button type="button" className="rcc-room-primary" onClick={historical.onBack}>
+                {provenanceNotice ? 'กลับหน้าแรก' : 'กลับไปประวัติห้อง'}
+              </button>
             </>
           ) : (
             <>

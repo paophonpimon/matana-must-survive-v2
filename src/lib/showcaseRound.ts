@@ -16,9 +16,10 @@ export interface RosterStudent {
   studentNumber: number
 }
 
-/** Display name, formatted the same way wherever a roster row is shown. */
+/** Display name, formatted the same way wherever a roster row is shown. Trimmed so a roster row
+ *  that carries an id-only identity (firstName set, lastName empty) shows just the id. */
 export const rosterDisplayName = (student: RosterStudent): string =>
-  `${student.firstName} ${student.lastName}`
+  `${student.firstName} ${student.lastName}`.trim()
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //  SHOWCASE ROUND GENERATOR — SIMULATED PRESENTATION DATA
@@ -80,7 +81,7 @@ export const SHOWCASE_QUESTION_IDS: string[] = Object.entries(ROUND_CATEGORY_COU
 //   paired pre/post 30/30 · pre 5.43 · post 8.33 · difference +2.90
 //   improved 26 · unchanged 3 · declined 1
 //   main complete 30/30 · main average 8.17 · recall average 4.13 · survey average 4.63
-interface ShowcasePerformance {
+export interface ShowcasePerformance {
   studentNumber: number
   /** SIMULATED pre-test correct count, out of 10. */
   preCorrect: number
@@ -90,8 +91,20 @@ interface ShowcasePerformance {
   mainScore: number
   /** SIMULATED recall correct count, out of 5 (all five items answered). */
   recallCorrect: number
-  /** SIMULATED: how many of the 6 survey items were answered 5; the rest are answered 4. */
-  surveyFives: number
+  /** SIMULATED: how many of the 6 survey items were answered 5; the rest are answered 4. Ignored
+   *  when `surveyResponses` is present. Optional so a row can specify responses directly instead. */
+  surveyFives?: number
+  /** SIMULATED, optional: the exact 0-indexed MAIN question positions answered wrong. Length must
+   *  equal `10 - mainScore`. When absent, the first `mainScore` questions are correct (the simple
+   *  default). Set it to vary WHICH questions each position misses so the per-question detail in
+   *  the printout and the spreadsheet is meaningful. */
+  mainWrongIndexes?: readonly number[]
+  /** SIMULATED, optional: the exact 0-indexed RECALL positions answered wrong. Length must equal
+   *  `5 - recallCorrect`. When absent, the first `recallCorrect` items are correct. */
+  recallWrongIndexes?: readonly number[]
+  /** SIMULATED, optional: the exact 6-value Likert array (each 1–5), one per survey item in
+   *  SURVEY_ITEMS order. Overrides `surveyFives` when present. */
+  surveyResponses?: readonly number[]
 }
 
 const SHOWCASE_PERFORMANCE: ShowcasePerformance[] = [
@@ -133,11 +146,16 @@ const SHOWCASE_PERFORMANCE: ShowcasePerformance[] = [
 const wrongFor = (question: { choices: Array<{ id: string }>; correctChoiceId: string }): string =>
   question.choices.find((choice) => choice.id !== question.correctChoiceId)?.id ?? ''
 
-const performanceFor = (studentNumber: number): ShowcasePerformance => {
-  const found = SHOWCASE_PERFORMANCE.find((entry) => entry.studentNumber === studentNumber)
+const performanceLookup = (rows: readonly ShowcasePerformance[]) => (studentNumber: number): ShowcasePerformance => {
+  const found = rows.find((entry) => entry.studentNumber === studentNumber)
   if (!found) throw new Error(`missing showcase performance for studentNumber ${studentNumber}`)
   return found
 }
+
+// Which 0-indexed positions in `bank` this row answered wrong. Explicit list wins; otherwise the
+// first `correctCount` positions are correct and the rest wrong.
+const wrongIndexSet = (correctCount: number, bankLength: number, explicit?: readonly number[]): Set<number> =>
+  new Set(explicit ?? Array.from({ length: bankLength }, (_, index) => index).slice(correctCount))
 
 /** team-1 … team-5, six students each, in roster order. */
 export const showcaseTeamIdFor = (studentNumber: number): string =>
@@ -170,17 +188,26 @@ export const assertShowcaseRoster = (roster: RosterStudent[]): void => {
  * CSV at seed time. Answers are REAL selections against the REAL banks, so correctness — and
  * therefore every average and percentage the report shows — is derived by production code, never
  * asserted here.
+ *
+ * `performanceRows` also defaults to SHOWCASE_PERFORMANCE; a caller may pass its own SIMULATED
+ * per-position rows (see the P01–P30 reporting sample) without changing this shared shaper.
  */
-export const buildShowcasePlayers = (roster: RosterStudent[]): Player[] => {
+export const buildShowcasePlayers = (
+  roster: RosterStudent[],
+  performanceRows: readonly ShowcasePerformance[] = SHOWCASE_PERFORMANCE,
+): Player[] => {
   assertShowcaseRoster(roster)
+  const performanceFor = performanceLookup(performanceRows)
   return [...roster]
     .sort((a, b) => a.studentNumber - b.studentNumber)
     .map((student) => {
       const performance = performanceFor(student.studentNumber)
+      const mainWrong = wrongIndexSet(performance.mainScore, SHOWCASE_QUESTION_IDS.length, performance.mainWrongIndexes)
+      const recallWrong = wrongIndexSet(performance.recallCorrect, RECALL_QUESTIONS.length, performance.recallWrongIndexes)
       const answers = SHOWCASE_QUESTION_IDS.map((questionId, index) => {
         const question = questions.find((entry) => entry.id === questionId)
         if (!question) throw new Error(`unknown showcase question id ${questionId}`)
-        const isCorrect = index < performance.mainScore
+        const isCorrect = !mainWrong.has(index)
         return {
           questionId,
           selectedChoiceId: isCorrect ? question.correctChoiceId : wrongFor(question),
@@ -204,8 +231,8 @@ export const buildShowcasePlayers = (roster: RosterStudent[]): Player[] => {
         bossAnswers: [],
         recallAnswers: RECALL_QUESTIONS.map((question, index) => ({
           conceptId: question.id,
-          selectedChoiceId: index < performance.recallCorrect ? question.correctChoiceId : wrongFor(question),
-          isCorrect: index < performance.recallCorrect,
+          selectedChoiceId: recallWrong.has(index) ? wrongFor(question) : question.correctChoiceId,
+          isCorrect: !recallWrong.has(index),
           answeredAt: SHOWCASE_COMPLETED_AT,
         })),
         preTestAnswers: PRE_TEST_QUESTIONS.map((question, index) => ({
@@ -224,7 +251,11 @@ export const buildShowcasePlayers = (roster: RosterStudent[]): Player[] => {
         postTestQuestionStartedAt: null,
         surveyResponses: SURVEY_ITEMS.map((item, index) => ({
           itemId: item.id,
-          value: index < performance.surveyFives ? '5' : '4',
+          value: String(
+            performance.surveyResponses
+              ? performance.surveyResponses[index]
+              : (index < (performance.surveyFives ?? 0) ? 5 : 4),
+          ),
           answeredAt: SHOWCASE_COMPLETED_AT,
         })),
         submitted: true,

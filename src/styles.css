@@ -3983,6 +3983,51 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   text-align: center;
 }
 
+/* Reconstructed class-reporting sample — neutral gold provenance, distinct from the demo brown. */
+.rcc-provenance-label {
+  margin-bottom: 0.6rem;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid rgba(242, 213, 141, 0.5);
+  border-radius: 0.55rem;
+  background: rgba(242, 213, 141, 0.12);
+  color: #f2d58d;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.rcc-provenance-note {
+  border: 1px dashed rgba(242, 213, 141, 0.45);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  color: #e7dcc7;
+  background: rgba(242, 213, 141, 0.06);
+}
+
+.showcase-results-header {
+  margin: 0.5rem 0 1rem;
+  text-align: center;
+  color: #fff7df;
+}
+.showcase-results-eyebrow {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #f2d58d;
+}
+.showcase-results-header h1 {
+  margin-top: 0.35rem;
+  font-size: clamp(1.35rem, 3vw, 1.9rem);
+  font-weight: 800;
+}
+.showcase-results-lede {
+  margin: 0.5rem auto 0;
+  max-width: 46rem;
+  font-size: 0.9rem;
+  color: #d8d1c5;
+}
+
 .presentation-demo-helper a.secondary-button {
   display: inline-flex;
   align-items: center;

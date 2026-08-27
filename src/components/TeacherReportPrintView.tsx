@@ -16,6 +16,9 @@ interface TeacherReportPrintViewProps {
   strongestConceptLabel: string
   weakestConceptLabel: string
   demo?: boolean
+  // Free-text provenance line for the reconstructed class-reporting sample. Rendered in the header
+  // like the demo label. Undefined for every live/demo/historical caller.
+  provenanceLabel?: string
 }
 
 // Print-only report for the finished round, rendered into the normal document and revealed by the
@@ -41,6 +44,7 @@ export const TeacherReportPrintView = ({
   strongestConceptLabel,
   weakestConceptLabel,
   demo = false,
+  provenanceLabel,
 }: TeacherReportPrintViewProps) => {
   const printedAt = new Date().toLocaleString('th-TH', {
     dateStyle: 'long',
@@ -55,6 +59,7 @@ export const TeacherReportPrintView = ({
     <div className="print-report" role="document" aria-hidden="true">
       <header className="print-report-header">
         {demo ? <p className="print-report-demo-label">ข้อมูลสาธิต</p> : null}
+        {!demo && provenanceLabel ? <p className="print-report-demo-label">{provenanceLabel}</p> : null}
         <h1>มัทนาต้องรอด</h1>
         <p className="print-report-subtitle">สรุปผลการเรียนรู้ — รอบที่ {round}</p>
         <p className="print-report-meta">
