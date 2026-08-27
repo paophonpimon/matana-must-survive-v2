@@ -40,6 +40,7 @@ export const HomePage = () => (
         <div className="home-actions">
           <Link className="home-cta-primary" to="/join">เริ่มเล่น</Link>
           <Link className="home-cta-text" to="/teacher">สำหรับครู →</Link>
+          <Link className="home-cta-demo" to="/demo/teacher">ทดลองสาธิต — ข้อมูลจำลอง</Link>
         </div>
       </section>
     </div>

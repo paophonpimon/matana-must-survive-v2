@@ -2,6 +2,12 @@ import type { PlayerSession, TeacherSession } from '../types/game'
 
 const PLAYER_SESSION_KEY = 'matana_player_session'
 const TEACHER_SESSION_KEY = 'matana_teacher_session'
+const PRESENTATION_DEMO_TEACHER_SESSION_KEY = 'matana_presentation_demo_teacher_session'
+
+export type TeacherSessionScope = 'production' | 'presentation-demo'
+
+const teacherSessionKey = (scope: TeacherSessionScope): string =>
+  scope === 'presentation-demo' ? PRESENTATION_DEMO_TEACHER_SESSION_KEY : TEACHER_SESSION_KEY
 
 const safeParse = <T>(value: string | null): T | null => {
   if (!value) return null
@@ -25,14 +31,14 @@ export const savePlayerSession = (session: PlayerSession): void => {
 
 export const clearPlayerSession = (): void => sessionStorage.removeItem(PLAYER_SESSION_KEY)
 
-export const getTeacherSession = (): TeacherSession | null =>
-  safeParse<TeacherSession>(sessionStorage.getItem(TEACHER_SESSION_KEY))
+export const getTeacherSession = (scope: TeacherSessionScope = 'production'): TeacherSession | null =>
+  safeParse<TeacherSession>(sessionStorage.getItem(teacherSessionKey(scope)))
 
-export const saveTeacherSession = (session: TeacherSession): void => {
-  sessionStorage.setItem(TEACHER_SESSION_KEY, JSON.stringify(session))
+export const saveTeacherSession = (session: TeacherSession, scope: TeacherSessionScope = 'production'): void => {
+  sessionStorage.setItem(teacherSessionKey(scope), JSON.stringify(session))
 }
 
-export const clearTeacherSession = (): void => sessionStorage.removeItem(TEACHER_SESSION_KEY)
+export const clearTeacherSession = (scope: TeacherSessionScope = 'production'): void => sessionStorage.removeItem(teacherSessionKey(scope))
 
 // Milestone 4: dedup key for the magic-effect popups (incoming seal / power surge / shield
 // block) — sessionStorage (not a React ref/state) so a page refresh in the SAME tab does not

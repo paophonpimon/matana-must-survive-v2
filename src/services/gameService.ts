@@ -60,10 +60,19 @@ export interface SurveyResponseInput {
   expectedIndex: number
 }
 
+export interface DemoFastForwardOptions {
+  bossOutcome?: 'winner' | 'no-winner'
+}
+
 export interface GameService {
   readonly isDemo: boolean
+  // True only for the dedicated, route-scoped presentation classroom. The ordinary local demo
+  // backend keeps this false, and Firebase never implements it. Optional demo helpers below are
+  // therefore unreachable from production rooms by both type/feature detection and routing.
+  readonly isPresentationDemo?: boolean
   readonly demoRoomCode?: string
   resetDemoRoom?(): Promise<Room>
+  fastForwardDemo?(roomCode: string, teacherSessionId: string, options?: DemoFastForwardOptions): Promise<void>
   ensureSession(): Promise<string>
   createRoom(teacherSessionId: string): Promise<Room>
   joinRoom(input: JoinInput, ownerUid: string): Promise<JoinResult>

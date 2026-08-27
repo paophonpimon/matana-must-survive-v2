@@ -11,7 +11,7 @@ import { buildRoundHistoryEntry, roundHistoryEntryId } from '../lib/roundHistory
 import { buildShowcaseDocuments, showcaseCollisionMessage, showcaseHistoryDocId } from '../lib/showcaseImport'
 import { SHOWCASE_MODE_FIELD, type RosterStudent } from '../lib/showcaseRound'
 import { buildTeamMetas, distributeTeamsEvenly, normalizeTeamGuardianName, validateTeamGuardianName } from '../lib/teamScoring'
-import type { AnswerInput, AnswerResult, BossAnswerInput, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
+import type { AnswerInput, AnswerResult, BossAnswerInput, DemoFastForwardOptions, GameService, PostTestAnswerInput, PreTestAnswerInput, RecallAnswerInput, SurveyResponseInput } from './gameService'
 import {
   BOSS_TRIGGER_AFTER_MAIN_QUESTION_INDEX,
   DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
@@ -112,7 +112,10 @@ export const DEMO_STORAGE_KEY = 'matana_demo_state_v6'
 const STORAGE_KEY = DEMO_STORAGE_KEY
 const UPDATE_EVENT = 'matana-demo-update'
 const DEMO_ROOM_CODE = 'MATANA'
+export const PRESENTATION_DEMO_ROOM_CODE = 'DEMO01'
+export const PRESENTATION_DEMO_TEACHER_ID = 'presentation-demo-teacher'
 const SHARED_STATE_PATH = '/__matana_demo_state'
+const PRESENTATION_SEED_TIME = 1_700_000_000_000
 
 const createId = (): string =>
   typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -126,18 +129,27 @@ const stablePlayerId = (studentNumber: string): string => {
   return `player-${(hash >>> 0).toString(36)}`
 }
 
+// The one demo learner a judge can drive by hand from /demo/student. It is deliberately one of
+// the eight seeded presentation students (D01), never a ninth participant: class size, team
+// totals and the PRE/POST evidence buckets all stay exactly as the deterministic scenario
+// defines them, and a deterministic reset wipes this learner's answers along with everyone
+// else's. The other seven students stay fully simulated via fastForwardDemo.
+export const PRESENTATION_DEMO_PARTICIPANT_STUDENT_NUMBER = 'D01'
+export const PRESENTATION_DEMO_PARTICIPANT_ID = stablePlayerId(PRESENTATION_DEMO_PARTICIPANT_STUDENT_NUMBER)
+
 const createPlayer = (
   id: string,
   displayName: string,
   studentNumber: string,
   ownerUid: string,
   round = 1,
+  joinedAt = Date.now(),
 ): Player => ({
   id,
   displayName,
   studentNumber,
   teamId: null,
-  joinedAt: Date.now(),
+  joinedAt,
   currentRound: round,
   currentQuestionIndex: 0,
   score: 0,
@@ -180,12 +192,14 @@ const createFreshBossFields = (): Pick<
   bossAwaitingContinue: false,
 })
 
-const createSeedState = (): DemoState => {
+const createSeedState = (presentation = false): DemoState => {
+  const roomCode = presentation ? PRESENTATION_DEMO_ROOM_CODE : DEMO_ROOM_CODE
+  const teacherSessionId = presentation ? PRESENTATION_DEMO_TEACHER_ID : 'demo-teacher'
   const room: Room = {
-    roomCode: DEMO_ROOM_CODE,
+    roomCode,
     status: 'waiting',
     currentRound: 1,
-    createdAt: Date.now(),
+    createdAt: presentation ? PRESENTATION_SEED_TIME : Date.now(),
     startedAt: null,
     completedAt: null,
     currentQuestionIndex: 0,
@@ -197,28 +211,89 @@ const createSeedState = (): DemoState => {
     recallQuestionStartedAt: null,
     assessmentSecondsPerQuestion: DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION,
     ...createFreshBossFields(),
-    questionIds: selectRoundQuestions(questions),
+    // The production bank is already the canonical ten-item order. Pinning that order in the
+    // presentation scenario makes every reset repeatable; ordinary demo rooms retain the same
+    // selection helper they used before.
+    questionIds: presentation ? questions.map((question) => question.id) : selectRoundQuestions(questions),
     previousQuestionIds: [],
     winner: null,
-    teacherSessionId: 'demo-teacher',
-    teamCount: 0,
-    teamsLocked: false,
-    teams: [],
+    teacherSessionId,
+    teamCount: presentation ? 2 : 0,
+    teamsLocked: presentation,
+    teams: presentation ? buildTeamMetas(2) : [],
   }
   const players: Record<string, Player> = {}
-  const demoStudents: Array<[string, string]> = [
-    ['พิมพ์ชนก', '01'],
-    ['ณัฐวุฒิ', '02'],
-    ['ศิรินภา', '03'],
-  ]
+  const demoStudents: Array<[string, string]> = presentation
+    ? [
+        ['พิมพ์ชนก (DEMO)', 'D01'],
+        ['ณัฐวุฒิ (DEMO)', 'D02'],
+        ['ศิรินภา (DEMO)', 'D03'],
+        ['กิตติภพ (DEMO)', 'D04'],
+        ['ชลธิชา (DEMO)', 'D05'],
+        ['ภาคิน (DEMO)', 'D06'],
+        ['มะลิ (DEMO)', 'D07'],
+        ['ต้นกล้า (DEMO)', 'D08'],
+      ]
+    : [
+        ['พิมพ์ชนก', '01'],
+        ['ณัฐวุฒิ', '02'],
+        ['ศิรินภา', '03'],
+      ]
   demoStudents.forEach(([displayName, studentNumber], index) => {
     // Use the same deterministic id scheme as a real join (stablePlayerId), not a literal
     // seed id — otherwise joinRoom's studentNumber lookup can never find these seed players,
     // breaking reconnect for the built-in demo dataset specifically.
     const id = stablePlayerId(studentNumber)
-    players[id] = createPlayer(id, displayName, studentNumber, `demo-student-${index + 1}`)
+    players[id] = createPlayer(
+      id,
+      displayName,
+      studentNumber,
+      `${presentation ? 'presentation' : 'demo'}-student-${index + 1}`,
+      1,
+      presentation ? PRESENTATION_SEED_TIME + index * 1_000 : Date.now(),
+    )
   })
-  return { rooms: { [DEMO_ROOM_CODE]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {}, roundHistory: {} } } }
+
+  if (!presentation) {
+    return { rooms: { [roomCode]: { room, players, magic: {}, magicEvents: [], rosters: {}, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames: {}, roundHistory: {} } } }
+  }
+
+  // The dedicated presentation room arrives with two complete teams so the real Team Setup
+  // screen can be shown immediately without eight physical student devices voting and choosing
+  // items. All shapes are the same ones the normal setup workflow persists.
+  const teams = room.teams
+  const playerList = Object.values(players)
+  playerList.forEach((player, index) => { player.teamId = teams[index < 4 ? 0 : 1].id })
+  const rosters: Record<string, TeamRosterSummary> = {}
+  teams.forEach((team) => {
+    rosters[team.id] = {
+      teamId: team.id,
+      teamName: team.name,
+      members: playerList.filter((player) => player.teamId === team.id).map((player) => ({ playerId: player.id, displayName: player.displayName })),
+    }
+  })
+  const magic: Record<string, TeamMagicState> = {}
+  teams.forEach((team, index) => {
+    const inventory = createEmptyMagicInventory()
+    inventory[index === 0 ? 'power_surge' : 'score_seal'].available = 1
+    magic[team.id] = {
+      teamId: team.id,
+      magicHolderPlayerId: playerList[index * 4].id,
+      captainElectionAttempt: 1,
+      inventory,
+      queuedEffect: null,
+      lastResolvedBreakdown: null,
+    }
+  })
+  const teamNames: Record<string, TeamGuardianName> = {
+    [teams[0].id]: { teamId: teams[0].id, name: 'กุหลาบพิทักษ์', updatedAt: PRESENTATION_SEED_TIME, updatedByPlayerId: playerList[0].id },
+    [teams[1].id]: { teamId: teams[1].id, name: 'มนตราจันทรา', updatedAt: PRESENTATION_SEED_TIME, updatedByPlayerId: playerList[4].id },
+  }
+  return {
+    rooms: {
+      [roomCode]: { room, players, magic, magicEvents: [], rosters, answerProgress: {}, captainVotes: {}, captainVoteProgress: {}, teamNames, roundHistory: {} },
+    },
+  }
 }
 
 const normalizeState = (state: DemoState): DemoState => {
@@ -491,22 +566,226 @@ const expireQueuedEffects = (roomState: DemoRoomState, now: number): void => {
 
 export class DemoGameService implements GameService {
   readonly isDemo = true
-  readonly demoRoomCode = DEMO_ROOM_CODE
+  readonly isPresentationDemo: boolean
+  readonly demoRoomCode: string
+
+  constructor(options: { presentation?: boolean } = {}) {
+    this.isPresentationDemo = options.presentation === true
+    this.demoRoomCode = this.isPresentationDemo ? PRESENTATION_DEMO_ROOM_CODE : DEMO_ROOM_CODE
+  }
 
   async resetDemoRoom(): Promise<Room> {
     const state = await readState()
-    const seededRoom = createSeedState().rooms[DEMO_ROOM_CODE]
-    state.rooms[DEMO_ROOM_CODE] = seededRoom
+    const seededRoom = createSeedState(this.isPresentationDemo).rooms[this.demoRoomCode]
+    state.rooms[this.demoRoomCode] = seededRoom
     await writeState(state)
     return seededRoom.room
   }
 
   async ensureSession(): Promise<string> {
+    if (this.isPresentationDemo) return PRESENTATION_DEMO_TEACHER_ID
     const existing = sessionStorage.getItem('matana_demo_uid')
     if (existing) return existing
     const uid = `demo-${createId()}`
     sessionStorage.setItem('matana_demo_uid', uid)
     return uid
+  }
+
+  // Presentation-only student driver. It submits through the same public service operations as
+  // real clients, then uses the existing teacher advances. The fixed outcome/timing matrices are
+  // data, not alternate scoring: correctness is still evaluated by save*Answer against the real
+  // question banks, magic is still activated/resolved by the real domain path, and completion
+  // still snapshots the normal round-history shape.
+  async fastForwardDemo(roomCode: string, teacherSessionId: string, options: DemoFastForwardOptions = {}): Promise<void> {
+    if (!this.isPresentationDemo || roomCode.toUpperCase() !== PRESENTATION_DEMO_ROOM_CODE) {
+      throw new Error('ผู้ใช้:ตัวช่วยนำเสนอใช้ได้เฉพาะห้องสาธิตเท่านั้น')
+    }
+    const code = PRESENTATION_DEMO_ROOM_CODE
+    const initialState = await readState()
+    const roomState = initialState.rooms[code]
+    if (!roomState) throw new Error('ผู้ใช้:ไม่พบห้องสาธิต')
+    verifyTeacher(roomState.room, teacherSessionId)
+    const room = roomState.room
+    const players = Object.values(roomState.players).sort((a, b) => a.studentNumber.localeCompare(b.studentNumber))
+    const wrongChoiceId = (choices: Array<{ id: string }>, correctChoiceId: string): string =>
+      choices.find((choice) => choice.id !== correctChoiceId)?.id ?? correctChoiceId
+
+    if (room.phase === 'preTest' && room.preTestStartedAt != null) {
+      const resumedAt = Date.now()
+      room.preTestStartedAt = resumedAt
+      players.forEach((player) => { player.preTestQuestionStartedAt = resumedAt })
+      await writeState(initialState)
+      const targetScores = [3, 4, 5, 6, 4, 5, 6, 7]
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        const player = players[playerIndex]
+        if (player.preTestProgress >= ASSESSMENT_QUESTION_COUNT) continue
+        for (let index = player.preTestProgress; index < PRE_TEST_QUESTIONS.length; index += 1) {
+          const question = PRE_TEST_QUESTIONS[index]
+          const correct = index < targetScores[playerIndex]
+          await this.savePreTestAnswer(code, player.id, {
+            questionId: question.id,
+            selectedChoiceId: correct ? question.correctChoiceId : wrongChoiceId(question.choices, question.correctChoiceId),
+            expectedIndex: index,
+          })
+        }
+      }
+      return
+    }
+
+    if (room.phase === 'recall' && room.recallQuestionIndex < RECALL_QUESTIONS.length) {
+      const index = room.recallQuestionIndex
+      const question = RECALL_QUESTIONS[index]
+      room.recallQuestionStartedAt = Date.now()
+      await writeState(initialState)
+      const recallStrength = [2, 3, 4, 5, 1, 3, 4, 2]
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        const player = players[playerIndex]
+        const timedOut = (playerIndex === 0 && index === 0) || (playerIndex === 6 && index === 3)
+        const correct = ((playerIndex + index * 2) % RECALL_QUESTIONS.length) < recallStrength[playerIndex]
+        await this.saveRecallAnswer(code, player.id, {
+          conceptId: question.id,
+          selectedChoiceId: timedOut
+            ? RECALL_TIMEOUT_CHOICE_ID
+            : correct ? question.correctChoiceId : wrongChoiceId(question.choices, question.correctChoiceId),
+          expectedRecallIndex: index,
+        })
+      }
+      await this.advanceRecallQuestion(code, teacherSessionId, index)
+      return
+    }
+
+    if (room.phase === 'main' && room.currentQuestionIndex < room.questionIds.length) {
+      const index = room.currentQuestionIndex
+      const question = questionsById.get(room.questionIds[index])
+      if (!question) throw new Error('ผู้ใช้:ไม่พบคำถามสาธิต')
+      room.questionStartedAt = Date.now()
+      room.questionClosedAt = null
+      await writeState(initialState)
+
+      // Two real item activations are placed on visible current questions. They write normal
+      // queued events, update the existing team badges/overlay, and resolve through
+      // advanceQuestion—there is no screenshot-only presentation state.
+      const teams = room.teams
+      if (index === 0 && teams[0] && !roomState.magicEvents.some((event) => event.affectedQuestionIndex === index)) {
+        const magic = roomState.magic[teams[0].id]
+        if (magic?.magicHolderPlayerId && magic.inventory.power_surge.available > 0) {
+          await this.activateItem(code, teams[0].id, magic.magicHolderPlayerId, 'power_surge')
+        }
+      }
+      if (index === 5 && teams[1] && teams[0] && !roomState.magicEvents.some((event) => event.affectedQuestionIndex === index)) {
+        const magic = roomState.magic[teams[1].id]
+        if (magic?.magicHolderPlayerId && magic.inventory.score_seal.available > 0) {
+          await this.activateItem(code, teams[1].id, magic.magicHolderPlayerId, 'score_seal', teams[0].id)
+        }
+      }
+
+      // A judge may already have answered this question by hand from /demo/student. That real
+      // submission is preserved exactly as saved — never overwritten by the seeded fill and
+      // never re-timed below — so the presenter can always fast-forward to keep the demo moving
+      // without clobbering the interactive answer. Every other student is filled
+      // deterministically, so the demo can never become unfinishable regardless of what (if
+      // anything) the judge did.
+      const preAnswered = new Set(
+        players.filter((player) => player.answers.some((answer) => answer.questionId === question.id)).map((player) => player.id),
+      )
+      const targetScores = [8, 7, 6, 9, 5, 7, 4, 6]
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        // Two genuine unanswered cells remain absent from the answer arrays and therefore appear
+        // as “–” in the real individual table/export.
+        if ((playerIndex === 6 && index === 2) || (playerIndex === 1 && index === 7)) continue
+        if (preAnswered.has(players[playerIndex].id)) continue
+        const correct = ((index + playerIndex) % room.questionIds.length) < targetScores[playerIndex]
+        await this.saveAnswer(code, players[playerIndex].id, {
+          questionId: question.id,
+          selectedChoiceId: correct ? question.correctChoiceId : wrongChoiceId(question.choices, question.correctChoiceId),
+          expectedQuestionIndex: index,
+        })
+      }
+      const timedState = await readState()
+      const timedRoom = timedState.rooms[code]
+      const startedAt = timedRoom.room.questionStartedAt ?? Date.now()
+      players.forEach((player, playerIndex) => {
+        if (preAnswered.has(player.id)) return
+        const record = timedRoom.players[player.id]?.answers.find((answer) => answer.questionId === question.id)
+        if (!record) return
+        record.responseTimeMs = 900 + playerIndex * 410 + (index % 3) * 230
+        record.answeredAt = startedAt + record.responseTimeMs
+      })
+      await writeState(timedState)
+      await this.advanceQuestion(code, teacherSessionId, index)
+      return
+    }
+
+    if (room.phase === 'boss' && !room.bossAwaitingContinue && room.bossQuestionIndex < room.bossQuestionIds.length) {
+      const index = room.bossQuestionIndex
+      const question = questionsById.get(room.bossQuestionIds[index])
+      if (!question) throw new Error('ผู้ใช้:ไม่พบคำถามด่านสาธิต')
+      room.bossQuestionStartedAt = Date.now()
+      await writeState(initialState)
+      const correctCounts = options.bossOutcome === 'no-winner'
+        ? [0, 0, 0, 0, 0, 0, 0, 0]
+        : [3, 2, 2, 1, 2, 1, 0, 0]
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        if (playerIndex === 7) continue
+        const correct = index < correctCounts[playerIndex]
+        await this.saveBossAnswer(code, players[playerIndex].id, {
+          questionId: question.id,
+          selectedChoiceId: correct ? question.correctChoiceId : wrongChoiceId(question.choices, question.correctChoiceId),
+          expectedBossIndex: index,
+        })
+      }
+      const timedState = await readState()
+      const timedRoom = timedState.rooms[code]
+      const startedAt = timedRoom.room.bossQuestionStartedAt ?? Date.now()
+      players.forEach((player, playerIndex) => {
+        const record = timedRoom.players[player.id]?.bossAnswers.find((answer) => answer.questionId === question.id)
+        if (!record) return
+        record.responseTimeMs = 650 + playerIndex * 520 + index * 180
+        record.answeredAt = startedAt + record.responseTimeMs
+      })
+      await writeState(timedState)
+      await this.advanceBossQuestion(code, teacherSessionId, index)
+      return
+    }
+
+    if (room.phase === 'postTest' && room.postTestStartedAt != null) {
+      const resumedAt = Date.now()
+      room.postTestStartedAt = resumedAt
+      players.forEach((player) => { player.postTestQuestionStartedAt = resumedAt })
+      await writeState(initialState)
+      // Six improve, one stays level, one declines: the final evidence panel demonstrates all
+      // three comparison buckets instead of a suspiciously perfect class.
+      const targetScores = [7, 7, 8, 6, 6, 7, 5, 9]
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        const player = players[playerIndex]
+        if (player.postTestProgress >= ASSESSMENT_QUESTION_COUNT) continue
+        for (let index = player.postTestProgress; index < POST_TEST_QUESTIONS.length; index += 1) {
+          const question = POST_TEST_QUESTIONS[index]
+          const correct = index < targetScores[playerIndex]
+          await this.savePostTestAnswer(code, player.id, {
+            questionId: question.id,
+            selectedChoiceId: correct ? question.correctChoiceId : wrongChoiceId(question.choices, question.correctChoiceId),
+            expectedIndex: index,
+          })
+        }
+      }
+      return
+    }
+
+    if (room.phase === 'survey') {
+      for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+        const player = players[playerIndex]
+        const limit = SURVEY_ITEMS.length
+        for (let index = player.surveyResponses.length; index < limit; index += 1) {
+          const item = SURVEY_ITEMS[index]
+          await this.saveSurveyResponse(code, player.id, {
+            itemId: item.id,
+            value: String(3 + ((playerIndex + index) % 3)),
+            expectedIndex: index,
+          })
+        }
+      }
+    }
   }
 
   async createRoom(teacherSessionId: string): Promise<Room> {
@@ -675,6 +954,13 @@ export class DemoGameService implements GameService {
       player.status = 'playing'
     })
     await writeState(state)
+    if (this.isPresentationDemo) {
+      const firstTeam = roomState.room.teams[0]
+      const firstMagic = firstTeam ? roomState.magic[firstTeam.id] : undefined
+      if (firstTeam && firstMagic?.magicHolderPlayerId && firstMagic.inventory.power_surge.available > 0) {
+        await this.activateItem(roomCode, firstTeam.id, firstMagic.magicHolderPlayerId, 'power_surge')
+      }
+    }
   }
 
   // Pre-game stage 2 -> 3: 'teamSetup' -> 'preTest'. Teacher-only, fired once team setup
@@ -1166,7 +1452,9 @@ export class DemoGameService implements GameService {
         if (ranking.winner) {
           const winnerPlayer = roomState.players[ranking.winner.playerId]
           const magic = winnerPlayer?.teamId ? roomState.magic[winnerPlayer.teamId] : undefined
-          const rewardItemType = pickRandomMagicItem()
+          // Presentation mode must replay identically. The normal demo and Firebase paths keep
+          // their real random reward behavior; only this isolated scenario pins the reward.
+          const rewardItemType = this.isPresentationDemo ? 'rose_shield' : pickRandomMagicItem()
           if (magic) magic.inventory[rewardItemType].available += 1
           // Denormalized onto the room (not just a bare playerId) — see BossWinner's doc
           // comment in types/game.ts for why: a student can't look up an opposing team's
@@ -1219,6 +1507,14 @@ export class DemoGameService implements GameService {
     roomState.room.questionClosedAt = null
     roomState.room.bossAwaitingContinue = false
     await writeState(state)
+    if (this.isPresentationDemo) {
+      const sourceTeam = roomState.room.teams[1]
+      const targetTeam = roomState.room.teams[0]
+      const sourceMagic = sourceTeam ? roomState.magic[sourceTeam.id] : undefined
+      if (sourceTeam && targetTeam && sourceMagic?.magicHolderPlayerId && sourceMagic.inventory.score_seal.available > 0) {
+        await this.activateItem(roomCode, sourceTeam.id, sourceMagic.magicHolderPlayerId, 'score_seal', targetTeam.id)
+      }
+    }
   }
 
   // Milestone 2.2: transactional (single-writeState, all-or-nothing like every other demo

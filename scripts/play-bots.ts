@@ -19,7 +19,7 @@ import { RECALL_QUESTIONS } from '../src/data/recallQuestions'
 import { PRE_TEST_QUESTIONS, POST_TEST_QUESTIONS } from '../src/data/assessmentQuestions'
 import { SURVEY_ITEMS, SURVEY_SCALE } from '../src/data/surveyItems'
 import { bossQuestionsById } from '../src/data/bossQuestions'
-import { gameServicePromise } from '../src/services'
+import { getGameServicePromise } from '../src/services'
 import type { Player, Room, TeamRosterSummary } from '../src/types/game'
 
 const args = process.argv.slice(2)
@@ -84,7 +84,7 @@ const pickChoice = (
 }
 
 const main = async (): Promise<void> => {
-  const service = await gameServicePromise
+  const service = await getGameServicePromise()
   console.log('─'.repeat(70))
   console.log(`  ส่งบอต ${count} คน เข้าห้อง ${roomCode}`)
   console.log(`  โหมด: ${service.isDemo ? 'DEMO (localStorage)' : 'FIREBASE จริง'}`)

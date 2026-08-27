@@ -27,6 +27,7 @@ import { buildRoundHistoryEntry } from '../lib/roundHistory'
 import { buildTeacherSpellEventCopy, computeHostileMultiplier, computeTeamCompetitionStats, formatHostilePercent, getMagicEffectPhase, hasAnyMagicItem, MAGIC_ITEM_INFO, MAGIC_ITEM_TYPES, type MagicEventCopy } from '../lib/magic'
 import { computeCurrentQuestionStats, computeTeamCurrentQuestionCounts, computeTeamStats, TEAM_GUARDIAN_NAME_MAX_LENGTH, TEAM_GUARDIAN_NAME_MIN_LENGTH } from '../lib/teamScoring'
 import { friendlyError } from '../services'
+import { PRESENTATION_DEMO_PARTICIPANT_ID } from '../services/demoService'
 import { getTeacherSession, hasShownMagicPopup, markMagicPopupShown, saveTeacherSession } from '../services/sessionStorage'
 import { recallQuestionsById } from '../data/recallQuestions'
 import {
@@ -119,11 +120,12 @@ const IndividualResultsTable = ({ players, questionIds, teamNameById }: {
 
 export const TeacherPage = () => {
   const { service, uid } = useGame()
+  const teacherSessionScope = service.isPresentationDemo ? 'presentation-demo' : 'production'
   // uid here is the stable, authoritative Firebase uid (GameContext only resolves it via
   // ensureAnonymousUser). A locally stored session from an earlier browser identity must
   // never override it — if the stored teacherSessionId doesn't match, that old room is
   // treated as not owned by this browser rather than silently reused.
-  const initialTeacherSession = resolveTeacherRoomSession(getTeacherSession(), uid)
+  const initialTeacherSession = resolveTeacherRoomSession(getTeacherSession(teacherSessionScope), uid)
   const [teacherSessionId, setTeacherSessionId] = useState(initialTeacherSession.teacherSessionId)
   const [roomCode, setRoomCode] = useState(initialTeacherSession.roomCode)
   const roomState = useRoom(roomCode)
@@ -132,15 +134,19 @@ export const TeacherPage = () => {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null)
-  const [durationValue, setDurationValue] = useState('30')
+  // Presentation timers are deliberately generous so explaining a screen never causes an
+  // accidental automatic advance; the demo-only helper below performs the fast-forward.
+  const [durationValue, setDurationValue] = useState(service.isPresentationDemo ? '600' : '30')
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes'>('seconds')
   // Teacher-configurable timers, both in plain seconds and both defaulted to the values the game
   // used before they were configurable.
-  const [recallDurationValue, setRecallDurationValue] = useState(String(RECALL_SECONDS_PER_ITEM))
-  const [assessmentDurationValue, setAssessmentDurationValue] = useState(String(DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION))
-  const [bossDurationValue, setBossDurationValue] = useState(String(DEFAULT_BOSS_QUESTION_DURATION_SECONDS))
+  const [recallDurationValue, setRecallDurationValue] = useState(String(service.isPresentationDemo ? MAX_RECALL_SECONDS_PER_ITEM : RECALL_SECONDS_PER_ITEM))
+  const [assessmentDurationValue, setAssessmentDurationValue] = useState(String(service.isPresentationDemo ? MAX_ASSESSMENT_SECONDS_PER_QUESTION : DEFAULT_ASSESSMENT_SECONDS_PER_QUESTION))
+  const [bossDurationValue, setBossDurationValue] = useState(String(service.isPresentationDemo ? MAX_BOSS_SECONDS_PER_QUESTION : DEFAULT_BOSS_QUESTION_DURATION_SECONDS))
   const [teamCountValue, setTeamCountValue] = useState('2')
   const [resultsTab, setResultsTab] = useState<'team' | 'individual'>('team')
+  const [demoBossOutcome, setDemoBossOutcome] = useState<'winner' | 'no-winner'>('winner')
+  const [demoHelperOpen, setDemoHelperOpen] = useState(true)
   const [now, setNow] = useState(Date.now())
   const advancingQuestion = useRef({ key: '', attemptedAt: 0 })
   const advancingBossQuestion = useRef({ key: '', attemptedAt: 0 })
@@ -810,7 +816,7 @@ export const TeacherPage = () => {
     if (nextRoomCode !== roomCode) backgroundMusic.stop()
     setTeacherSessionId(nextTeacherSessionId)
     setRoomCode(nextRoomCode)
-    saveTeacherSession({ teacherSessionId: nextTeacherSessionId, roomCode: nextRoomCode, role: 'teacher' })
+    saveTeacherSession({ teacherSessionId: nextTeacherSessionId, roomCode: nextRoomCode, role: 'teacher' }, teacherSessionScope)
   }
 
   const createRoom = async (): Promise<void> => {
@@ -833,8 +839,72 @@ export const TeacherPage = () => {
     try {
       const room = await service.resetDemoRoom?.()
       const demoRoomCode = room?.roomCode ?? service.demoRoomCode ?? 'MATANA'
-      rememberRoom('demo-teacher', demoRoomCode)
-      setNotice('รีเซ็ตห้องสาธิตพร้อมผู้เล่นตัวอย่าง 3 คนแล้ว กรุณาสุ่มและล็อกทีมก่อนเริ่มภารกิจ')
+      rememberRoom(service.isPresentationDemo ? uid : 'demo-teacher', demoRoomCode)
+      setNotice(service.isPresentationDemo
+        ? 'เริ่มการสาธิตใหม่แล้ว พร้อมนักเรียนจำลอง 8 คน และ 2 ทีม'
+        : 'รีเซ็ตห้องสาธิตพร้อมผู้เล่นตัวอย่าง 3 คนแล้ว กรุณาสุ่มและล็อกทีมก่อนเริ่มภารกิจ')
+      setDemoBossOutcome('winner')
+    } catch (reason) {
+      setError(friendlyError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const autoOpeningPresentationDemo = useRef(false)
+  useEffect(() => {
+    if (!service.isPresentationDemo || roomCode || autoOpeningPresentationDemo.current) return
+    autoOpeningPresentationDemo.current = true
+    void service.resetDemoRoom?.()
+      .then((room) => {
+        const demoRoomCode = room?.roomCode ?? service.demoRoomCode ?? 'DEMO01'
+        setTeacherSessionId(uid)
+        setRoomCode(demoRoomCode)
+        saveTeacherSession({ teacherSessionId: uid, roomCode: demoRoomCode, role: 'teacher' }, 'presentation-demo')
+        setNotice('พร้อมสาธิตด้วยนักเรียนจำลอง 8 คน และ 2 ทีม')
+      })
+      .catch((reason) => setError(friendlyError(reason)))
+      .finally(() => { autoOpeningPresentationDemo.current = false })
+  }, [roomCode, service, uid])
+
+  const demoFastForwardAvailable = Boolean(service.isPresentationDemo && roomState.data && (
+    (isPreTestPhase && preTestCompletedCount < sortedPlayers.length)
+    || (isRecallPhase && recallQuestionIndex < RECALL_QUESTION_COUNT)
+    || (roomState.data.phase === 'main' && roomState.data.currentQuestionIndex < roomState.data.questionIds.length)
+    || (isBossPhase && !roomState.data.bossAwaitingContinue)
+    || (isPostTestPhase && roomState.data.postTestStartedAt != null && postTestCompletedCount < sortedPlayers.length)
+    || (isSurveyPhase && surveyCompletedCount < sortedPlayers.length)
+  ))
+  const demoFastForwardLabel = isPreTestPhase
+    ? 'เติมคำตอบ PRE จำลอง'
+    : isRecallPhase
+      ? `ข้ามเวลารอ Recall ข้อ ${Math.min(recallQuestionIndex + 1, RECALL_QUESTION_COUNT)}`
+      : roomState.data?.phase === 'main'
+        ? `ข้ามเวลารอ Main ข้อ ${Math.min(roomState.data.currentQuestionIndex + 1, roomState.data.questionIds.length)}`
+        : isBossPhase
+          ? `ข้ามเวลารอ Boss ข้อ ${Math.min((roomState.data?.bossQuestionIndex ?? 0) + 1, 3)}`
+          : isPostTestPhase
+            ? 'เติมคำตอบ POST จำลอง'
+            : isSurveyPhase
+              ? 'เติมแบบประเมินจำลอง'
+              : 'ข้ามเวลารอ'
+
+  // Presence only — never correctness. Read from the raw players list (the sanctioned "who has
+  // answered" signal, same as currentQuestionStats.answeredCount); the judge's ✓/✕ stays hidden
+  // behind the normal reveal gate exactly as it does for every simulated student.
+  const demoParticipantAnsweredCurrent = Boolean(
+    service.isPresentationDemo
+    && roomState.data?.phase === 'main'
+    && currentQuestionId
+    && playersState.data.find((player) => player.id === PRESENTATION_DEMO_PARTICIPANT_ID)?.answers.some((answer) => answer.questionId === currentQuestionId),
+  )
+
+  const handleDemoFastForward = async (): Promise<void> => {
+    if (!service.fastForwardDemo || !roomCode) return
+    setBusy(true)
+    setError('')
+    try {
+      await service.fastForwardDemo(roomCode, teacherSessionId, { bossOutcome: demoBossOutcome })
     } catch (reason) {
       setError(friendlyError(reason))
     } finally {
@@ -959,8 +1029,8 @@ export const TeacherPage = () => {
   const StageRoomControls = () => (
     <div className="stage-room-controls">
       <button type="button" className="copy-button" onClick={() => setConfirmAction('close')} disabled={busy}>ยุติห้อง</button>
-      <Link className="copy-button" to="/teacher/history">ประวัติห้อง</Link>
-      {service.isDemo ? (
+      {!service.isPresentationDemo ? <Link className="copy-button" to="/teacher/history">ประวัติห้อง</Link> : null}
+      {service.isDemo && !service.isPresentationDemo ? (
         <button type="button" className="copy-button" onClick={() => void createRoom()} disabled={busy}>สร้างห้องทดสอบใหม่</button>
       ) : null}
     </div>
@@ -1162,7 +1232,7 @@ export const TeacherPage = () => {
             ) : null}
             {/* Reachable with no active room on purpose: the usual reason to open this is to
                 print or export a class that finished days ago. */}
-            <Link className="secondary-button mx-auto mt-3 flex w-full max-w-sm justify-center" to="/teacher/history">ประวัติห้อง</Link>
+            {!service.isPresentationDemo ? <Link className="secondary-button mx-auto mt-3 flex w-full max-w-sm justify-center" to="/teacher/history">ประวัติห้อง</Link> : null}
             {error ? <p className="error-message mt-5" role="alert">{error}</p> : null}
           </section>
         ) : roomState.loading ? (
@@ -1170,7 +1240,7 @@ export const TeacherPage = () => {
         ) : !roomState.data ? (
           <ErrorPanel
             message={roomState.error || 'ไม่พบข้อมูลห้องนี้ อาจถูกลบหรือเซสชันหมดอายุ'}
-            action={<button className="primary-button w-full" onClick={() => { setRoomCode(''); saveTeacherSession({ teacherSessionId: uid, role: 'teacher' }) }}>สร้างห้องใหม่</button>}
+            action={<button className="primary-button w-full" onClick={() => { setRoomCode(''); saveTeacherSession({ teacherSessionId: uid, role: 'teacher' }, teacherSessionScope) }}>สร้างห้องใหม่</button>}
           />
         ) : (
           <>
@@ -1793,12 +1863,13 @@ export const TeacherPage = () => {
                 evidence={isCompletedRound ? selectedEvidence : null}
                 busy={busy}
                 onPrint={() => window.print()}
-                onExportExcel={() => downloadLearningWorkbook(exportEntries, roomCode)}
+                onExportExcel={() => downloadLearningWorkbook(exportEntries, roomCode, { demo: service.isPresentationDemo })}
+                demo={service.isPresentationDemo}
                 onPrepareNextRound={() => setConfirmAction('prepare')}
                 onCloseRoom={() => setConfirmAction('close')}
                 closedRoomAction={
                   service.isDemo && roomCode === service.demoRoomCode ? (
-                    <button type="button" className="result-room-primary" onClick={() => void openDemoRoom()} disabled={busy}>รีเซ็ตห้องสาธิต {service.demoRoomCode}</button>
+                    <button type="button" className="result-room-primary" onClick={() => void openDemoRoom()} disabled={busy}>{service.isPresentationDemo ? 'เริ่มการสาธิตใหม่' : `รีเซ็ตห้องสาธิต ${service.demoRoomCode}`}</button>
                   ) : (
                     <button type="button" className="result-room-primary" onClick={() => { setRoomCode(''); setNotice('') }}>สร้างห้องใหม่</button>
                   )
@@ -2131,7 +2202,7 @@ export const TeacherPage = () => {
                       <button className="danger-button w-full" onClick={() => setConfirmAction('close')} disabled={busy}>ยุติห้อง</button>
                     ) : (
                       service.isDemo && roomCode === service.demoRoomCode ? (
-                        <button className="primary-button w-full" onClick={() => void openDemoRoom()} disabled={busy}>รีเซ็ตห้องสาธิต {service.demoRoomCode}</button>
+                        <button className="primary-button w-full" onClick={() => void openDemoRoom()} disabled={busy}>{service.isPresentationDemo ? 'เริ่มการสาธิตใหม่' : `รีเซ็ตห้องสาธิต ${service.demoRoomCode}`}</button>
                       ) : (
                         <button className="secondary-button w-full" onClick={() => { setRoomCode(''); setNotice('') }}>สร้างห้องใหม่</button>
                       )
@@ -2193,7 +2264,7 @@ export const TeacherPage = () => {
                     <button type="button" className="copy-button" onClick={() => setHistoryOpen((open) => !open)}>
                       {historyOpen ? 'ซ่อนรายละเอียด' : 'ดูรายละเอียด'}
                     </button>
-                    <button type="button" className="copy-button" onClick={() => downloadLearningWorkbook(exportEntries, roomCode)}>
+                    <button type="button" className="copy-button" onClick={() => downloadLearningWorkbook(exportEntries, roomCode, { demo: service.isPresentationDemo })}>
                       ⬇ ดาวน์โหลด Excel
                     </button>
                   </div>
@@ -2326,7 +2397,50 @@ export const TeacherPage = () => {
           evidence={printEvidence}
           strongestConceptLabel={classRecallSummary.strongestConceptId ? recallQuestionsById.get(classRecallSummary.strongestConceptId)?.label ?? '-' : '-'}
           weakestConceptLabel={classRecallSummary.weakestConceptId ? recallQuestionsById.get(classRecallSummary.weakestConceptId)?.label ?? '-' : '-'}
+          demo={service.isPresentationDemo}
         />
+      ) : null}
+
+      {service.isPresentationDemo ? (
+        <aside className={`presentation-demo-helper ${demoHelperOpen ? '' : 'is-collapsed'}`} aria-label="ตัวช่วยนำเสนอ">
+          {/* Collapsible so it can never sit on top of a teacher control the presenter needs —
+              on a projector it also gets a reserved right gutter (see styles.css). */}
+          <button
+            type="button"
+            className="presentation-demo-helper-toggle"
+            aria-expanded={demoHelperOpen}
+            onClick={() => setDemoHelperOpen((open) => !open)}
+          >
+            <strong>ตัวช่วยนำเสนอ</strong>
+            <span aria-hidden="true">{demoHelperOpen ? '▾' : '▸'}</span>
+          </button>
+          {demoHelperOpen ? (
+            <div className="presentation-demo-helper-body">
+              {isBossPhase && !roomState.data?.bossAwaitingContinue ? (
+                <label className="presentation-demo-boss-choice">
+                  <span>ผล Boss</span>
+                  <select value={demoBossOutcome} onChange={(event) => setDemoBossOutcome(event.target.value as 'winner' | 'no-winner')} disabled={(roomState.data?.bossQuestionIndex ?? 0) > 0}>
+                    <option value="winner">มีผู้ชนะ + รางวัล</option>
+                    <option value="no-winner">ไม่มีผู้ชนะ</option>
+                  </select>
+                </label>
+              ) : null}
+              <button type="button" className="primary-button" onClick={() => void handleDemoFastForward()} disabled={busy || !demoFastForwardAvailable}>
+                {busy ? 'กำลังจำลอง...' : demoFastForwardLabel}
+              </button>
+              {/* Opens the judge's student view. A plain target=_blank link is never popup-blocked
+                  and never navigates the presenter away from this screen. */}
+              <a className="secondary-button" href="/demo/student" target="_blank" rel="noreferrer">ลองมุมมองนักเรียน ↗</a>
+              {roomState.data?.phase === 'main' ? (
+                <span className={`presentation-demo-participant-state ${demoParticipantAnsweredCurrent ? 'is-answered' : ''}`}>
+                  {demoParticipantAnsweredCurrent ? 'ผู้ทดลองตอบแล้ว ✓' : 'พร้อมให้ผู้ทดลองตอบ'}
+                </span>
+              ) : null}
+              <button type="button" className="secondary-button" onClick={() => void openDemoRoom()} disabled={busy}>เริ่มการสาธิตใหม่</button>
+              <small>มีผลเฉพาะข้อมูลจำลองในหน้านี้</small>
+            </div>
+          ) : null}
+        </aside>
       ) : null}
 
       {/* Persistent BGM control — rendered outside the stage-specific content so it stays put

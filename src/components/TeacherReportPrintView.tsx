@@ -15,6 +15,7 @@ interface TeacherReportPrintViewProps {
   evidence: EvidenceSummary
   strongestConceptLabel: string
   weakestConceptLabel: string
+  demo?: boolean
 }
 
 // Print-only report for the finished round, rendered into the normal document and revealed by the
@@ -39,6 +40,7 @@ export const TeacherReportPrintView = ({
   evidence,
   strongestConceptLabel,
   weakestConceptLabel,
+  demo = false,
 }: TeacherReportPrintViewProps) => {
   const printedAt = new Date().toLocaleString('th-TH', {
     dateStyle: 'long',
@@ -52,6 +54,7 @@ export const TeacherReportPrintView = ({
   return createPortal(
     <div className="print-report" role="document" aria-hidden="true">
       <header className="print-report-header">
+        {demo ? <p className="print-report-demo-label">ข้อมูลสาธิต</p> : null}
         <h1>มัทนาต้องรอด</h1>
         <p className="print-report-subtitle">สรุปผลการเรียนรู้ — รอบที่ {round}</p>
         <p className="print-report-meta">

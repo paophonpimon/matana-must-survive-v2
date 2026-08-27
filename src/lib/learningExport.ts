@@ -227,9 +227,13 @@ export const buildSurveyItemSheet = (entries: RoundHistoryEntry[]): SheetData =>
   ],
 })
 
-export const buildLearningWorkbook = (entries: RoundHistoryEntry[]): Uint8Array => {
+export interface LearningWorkbookOptions {
+  demo?: boolean
+}
+
+export const buildLearningWorkbook = (entries: RoundHistoryEntry[], options: LearningWorkbookOptions = {}): Uint8Array => {
   const ordered = [...entries].sort((a, b) => a.round - b.round || a.studentNumber.localeCompare(b.studentNumber))
-  return buildXlsx([
+  const sheets: SheetData[] = [
     // Existing Main/Recall sheets keep their original positions so anything already reading
     // sheet 1-3 is unaffected; the evidence sheets are appended after them.
     buildStudentSummarySheet(ordered),
@@ -239,17 +243,27 @@ export const buildLearningWorkbook = (entries: RoundHistoryEntry[]): Uint8Array 
     buildEvidenceTraceabilitySheet(ordered),
     buildStudentEvidenceSheet(ordered),
     buildSurveyItemSheet(ordered),
-  ])
+  ]
+  if (options.demo) {
+    sheets.unshift({
+      name: 'ข้อมูลสาธิต',
+      rows: [
+        ['ข้อมูลสาธิต'],
+        ['เอกสารนี้สร้างจากโหมดสาธิต — ข้อมูลทั้งหมดเป็นข้อมูลจำลอง'],
+      ],
+    })
+  }
+  return buildXlsx(sheets)
 }
 
 // Browser-only download trigger, kept out of the pure builders above so those stay testable.
-export const downloadLearningWorkbook = (entries: RoundHistoryEntry[], roomCode: string): void => {
-  const bytes = buildLearningWorkbook(entries)
+export const downloadLearningWorkbook = (entries: RoundHistoryEntry[], roomCode: string, options: LearningWorkbookOptions = {}): void => {
+  const bytes = buildLearningWorkbook(entries, options)
   const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `ผลการเรียน-${roomCode}.xlsx`
+  link.download = `${options.demo ? 'ข้อมูลสาธิต-' : ''}ผลการเรียน-${roomCode}.xlsx`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)

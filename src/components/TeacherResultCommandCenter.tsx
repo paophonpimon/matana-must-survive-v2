@@ -64,6 +64,7 @@ interface TeacherResultCommandCenterProps {
   busy: boolean
   onPrint: () => void
   onExportExcel: () => void
+  demo?: boolean
   // Live-room controls. Omitted entirely in historical mode — a recorded round has nothing to
   // prepare and nothing to end, and offering either would imply this screen can still mutate it.
   onPrepareNextRound?: () => void
@@ -95,6 +96,7 @@ export const TeacherResultCommandCenter = ({
   onCloseRoom,
   closedRoomAction,
   historical,
+  demo = false,
 }: TeacherResultCommandCenterProps) => {
   const [tab, setTab] = useState<TabId>('summary')
 
@@ -109,6 +111,7 @@ export const TeacherResultCommandCenter = ({
 
   return (
     <div className="rcc-cc">
+      {demo ? <div className="rcc-demo-label">โหมดสาธิต — ข้อมูลจำลอง</div> : null}
       {/* ── Compact result hero ─────────────────────────────────────────────── */}
       <section className="rcc-hero" aria-label="ผลภารกิจรอบนี้">
         <div className="rcc-hero-round">
@@ -175,7 +178,7 @@ export const TeacherResultCommandCenter = ({
         <div className="rcc-utilities">
           <button type="button" className="rcc-utility" onClick={onPrint}>ดาวน์โหลด PDF</button>
           <button type="button" className="rcc-utility" onClick={onExportExcel}>ดาวน์โหลด Excel</button>
-          {historical ? null : <Link className="rcc-utility" to="/teacher/history">ประวัติห้อง</Link>}
+          {historical || demo ? null : <Link className="rcc-utility" to="/teacher/history">ประวัติห้อง</Link>}
         </div>
       </div>
 

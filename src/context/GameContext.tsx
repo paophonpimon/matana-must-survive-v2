@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { gameServicePromise, friendlyError, type GameService } from '../services'
+import { friendlyError, getGameServicePromise, type GameService } from '../services'
 
 interface GameContextValue {
   service: GameService
@@ -8,7 +8,8 @@ interface GameContextValue {
 
 const GameContext = createContext<GameContextValue | null>(null)
 
-export const GameProvider = ({ children }: { children: ReactNode }) => {
+export const GameProvider = ({ children, servicePromise }: { children: ReactNode; servicePromise?: Promise<GameService> }) => {
+  const resolvedServicePromise = servicePromise ?? getGameServicePromise()
   const [service, setService] = useState<GameService | null>(null)
   const [uid, setUid] = useState('')
   const [error, setError] = useState('')
@@ -24,7 +25,7 @@ export const GameProvider = ({ children }: { children: ReactNode }) => {
     // resolves to the same stable uid rather than racing two anonymous sign-ins. `uid` is
     // never set until this resolves, so the service is never exposed to children before the
     // authenticated uid is stable.
-    gameServicePromise
+    resolvedServicePromise
       .then(async (nextService) => {
         const nextUid = await nextService.ensureSession()
         if (active) {
@@ -38,7 +39,7 @@ export const GameProvider = ({ children }: { children: ReactNode }) => {
     return () => {
       active = false
     }
-  }, [attempt])
+  }, [attempt, resolvedServicePromise])
 
   const value = useMemo(() => (service && uid ? { service, uid } : null), [service, uid])
 
